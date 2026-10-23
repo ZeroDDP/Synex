@@ -1,0 +1,87 @@
+"""Приложение целиком: lifespan, плагины, воркер как subprocess, HTTP API."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import httpx
+import pytest
+
+from app.core.app import create_app
+from app.plugins.ssh.session import ssh_state
+from app.worker import worker_manager
+from tests.conftest import FAKE_WORKER_SCRIPT
+
+
+@pytest.fixture
+async def api(monkeypatch, worker_settings):
+    monkeypatch.setattr(
+        worker_manager, "_worker_command", lambda: [sys.executable, str(FAKE_WORKER_SCRIPT)]
+    )
+    app = create_app()
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            yield client
+    ssh_state.mark_disconnected()
+
+
+async def test_only_ssh_api_is_exposed():
+    paths = set(create_app().openapi()["paths"])
+    assert paths == {
+        "/api/health",
+        "/api/ssh/connect",
+        "/api/ssh/exec",
+        "/api/ssh/status",
+        "/api/keys",
+        "/api/keys/generate",
+        "/api/keys/{key_id}",
+    }
+
+
+async def test_health_reports_worker(api):
+    body = (await api.get("/api/health")).json()
+    assert body["status"] == "ok"
+    assert body["plugins"] == ["ssh", "keys"]
+    assert body["worker"]["connected"] is True
+    assert body["worker"]["worker_pid"]
+
+
+async def test_ssh_connect_through_worker_subprocess(api, tmp_path: Path):
+    key = tmp_path / "id_ed25519"
+    key.write_text("key")
+    body = {"host": "10.0.0.1", "username": "root", "key_path": str(key)}
+
+    response = await api.post("/api/ssh/connect", json=body)
+    assert response.status_code == 201, response.text
+    assert response.json()["status"] == "connected"
+    assert response.json()["message"] == "Connected successfully"
+
+    status = (await api.get("/api/ssh/status")).json()
+    assert status["connected"] is True and status["host"] == "10.0.0.1"
+
+    exec_response = await api.post("/api/ssh/exec", json={"command": "ls", "track_cwd": False})
+    assert exec_response.json()["stdout"] == "ran: ls"
+
+
+async def test_ssh_connect_with_generated_key(api):
+    key = (await api.post("/api/keys/generate", json={"name": "server"})).json()
+    assert key["public_key"].startswith("ssh-ed25519 ")
+
+    body = {"host": "10.0.0.1", "username": "root", "key_id": key["id"]}
+    response = await api.post("/api/ssh/connect", json=body)
+    assert response.status_code == 201, response.text
+    assert response.json()["key_id"] == key["id"]
+
+
+async def test_worker_is_stopped_after_shutdown(monkeypatch, worker_settings):
+    monkeypatch.setattr(
+        worker_manager, "_worker_command", lambda: [sys.executable, str(FAKE_WORKER_SCRIPT)]
+    )
+    app = create_app()
+    async with app.router.lifespan_context(app):
+        process = worker_manager._process
+        assert process is not None and process.poll() is None
+    assert process.poll() is not None
+    assert worker_manager.client is None
