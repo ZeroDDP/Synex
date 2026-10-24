@@ -4,7 +4,7 @@ import os
 import sys
 from pathlib import Path
 
-from pydantic import SecretStr
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BASE_DIR = Path(__file__).resolve().parents[2]  # .../backend
@@ -54,6 +54,11 @@ class Settings(BaseSettings):
 
     # Плагины через запятую.
     PLUGINS_ENABLED: str = "ssh,keys"
+
+    # WebSocket /ws (поток данных для UI). Тестовые метрики: включены, пока нет
+    # настоящего мониторинга; период публикации, сек.
+    WS_FAKE_METRICS: bool = True
+    WS_FAKE_METRICS_INTERVAL: float = Field(default=0.5, gt=0)
 
     @property
     def BASE_DIR(self) -> Path:  # noqa: N802
