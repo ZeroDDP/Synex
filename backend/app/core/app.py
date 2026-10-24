@@ -14,6 +14,8 @@ from app.core.errors import register_error_handlers
 from app.core.logging import setup_logging
 from app.plugins.manager import PluginManager
 from app.worker import worker_manager
+from app.ws import METRICS_EVENT, FakeMetricsPublisher, ws_hub
+from app.ws import router as ws_router
 
 logger = structlog.get_logger()
 
@@ -24,13 +26,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Starting up", app=settings.APP_NAME, version=__version__)
 
     await worker_manager.start()
+    # До плагинов: событие, опубликованное в on_load, уже дойдёт до UI
+    ws_hub.forward(METRICS_EVENT)
     await plugins.load_all()
-    logger.info("Ready", plugins=plugins.names, worker=worker_manager.status())
+
+    fake_metrics: FakeMetricsPublisher | None = None
+    if settings.WS_FAKE_METRICS:
+        fake_metrics = FakeMetricsPublisher(settings.WS_FAKE_METRICS_INTERVAL)
+        fake_metrics.start()
+
+    logger.info(
+        "Ready",
+        plugins=plugins.names,
+        worker=worker_manager.status(),
+        ws_streams=ws_hub.streams,
+        fake_metrics=fake_metrics is not None,
+    )
     try:
         yield
     finally:
         logger.info("Shutting down...")
+        if fake_metrics is not None:
+            await fake_metrics.stop()
         await plugins.unload_all()
+        ws_hub.stop_forwarding()
         await worker_manager.stop()
         logger.info("Shutdown complete")
 
@@ -59,5 +78,6 @@ def create_app() -> FastAPI:
     plugins = PluginManager()
     plugins.discover(api_router)
     app.include_router(api_router)
+    app.include_router(ws_router)
     app.state.plugins = plugins
     return app
