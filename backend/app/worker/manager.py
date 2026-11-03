@@ -5,7 +5,12 @@
 * stdout/stderr воркера читаются в отдельных потоках. Если их не читать, буфер пайпа
   (~4 КБ на Windows) переполняется и воркер виснет на очередном println!.
 * Менеджер ждёт строку "Listening on pipe|tcp ..." и подключается именно к тому
-  транспорту, который выбрал воркер.
+  транспорту, который выбрал воркер. Воркер печатает "Listening on pipe" до того, как
+  создаёт pipe, и при неудаче уходит на TCP следующей строкой, поэтому клиент
+  перечитывает выбранный транспорт перед каждой попыткой.
+* Вывод воркера (логи tracing) очищается от ANSI-цветов, уровень берётся из строки.
+  Пароль и парольная фраза, которые воркер печатает при ssh_connect, затираются до
+  записи в лог.
 * Супервизор: если процесс умер, публикуется событие worker.status/worker_exited и
   воркер перезапускается с экспоненциальной задержкой. Если оборвалось только
   соединение, менеджер переподключается.
@@ -24,6 +29,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import IO, Any
 
@@ -41,7 +47,9 @@ WORKER_STATUS_EVENT = "worker.status"
 STATUS_CONNECTED = "connected"
 STATUS_CONNECTION_LOST = "connection_lost"
 STATUS_WORKER_STARTED = "worker_started"
-STATUS_WORKER_EXITED = "worker_exited"  # SSH-сессия внутри воркера потеряна
+STATUS_WORKER_EXITED = "worker_exited"
+# При connection_lost и worker_exited SSH-сессии в воркере потеряны: воркер закрывает
+# сессии подключения, которое оборвалось.
 
 SUPERVISE_INTERVAL = 2.0
 READY_WAIT = 3.0  # сколько ждать строку "Listening on ..." перед попыткой подключения
@@ -53,8 +61,37 @@ MAX_RESTART_DELAY = 30.0
 STABLE_UPTIME = 60.0  # после стольких секунд без падений задержка рестарта сбрасывается
 
 _LISTEN_RE = re.compile(r"listening on (pipe|tcp|unix|socket)", re.IGNORECASE)
-_ERROR_RE = re.compile(r"\b(error|panicked|fatal)\b", re.IGNORECASE)
-_WARN_RE = re.compile(r"\b(warn|warning|failed)\b|❌|⚠", re.IGNORECASE)
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+# Строка tracing: "2026-11-03T11:18:26.796342Z ERROR synex_worker: текст"
+_TRACING_RE = re.compile(r"^\S+\s+(TRACE|DEBUG|INFO|WARN|ERROR)\s+\S+?:\s?(.*)$")
+# Всё после "password:" / "passphrase:" до конца строки: значение может содержать
+# запятые и скобки, поэтому безопаснее затереть хвост целиком.
+_SECRET_RE = re.compile(r"\b(passphrase|password)\b\s*[:=].*$", re.IGNORECASE)
+_PANIC_RE = re.compile(r"\b(panicked|fatal)\b", re.IGNORECASE)
+_WARN_RE = re.compile(r"^pipe failed|falling back|❌|⚠", re.IGNORECASE)
+
+
+def sanitize_worker_line(raw: str) -> str:
+    """Убирает ANSI-цвета и секреты из строки вывода воркера."""
+    line = _ANSI_RE.sub("", raw).rstrip()
+    return _SECRET_RE.sub(lambda m: f"{m.group(1)}: <hidden>", line)
+
+
+def worker_line_level(line: str) -> str:
+    """Уровень, с которым строка вывода воркера попадёт в лог backend."""
+    if _LISTEN_RE.search(line):
+        return "info"
+    match = _TRACING_RE.match(line)
+    if match:
+        # ERROR у воркера это обычно ошибка запроса ("Session not found", неверный
+        # пароль): она и так вернётся в API, поэтому в логе backend это warning.
+        return "warning" if match.group(1) in ("ERROR", "WARN") else "debug"
+    if _PANIC_RE.search(line):
+        return "error"
+    if _WARN_RE.search(line):
+        return "warning"
+    # Остальное, в том числе продолжение многострочных команд, только в DEBUG
+    return "debug"
 
 
 class WorkerManager:
@@ -216,12 +253,12 @@ class WorkerManager:
         if client is None or client.connected:
             return True
 
-        prefer: str | None = None
+        prefer: Callable[[], str | None] | None = None
         proc = self._process
         if proc is not None:
             if not self._listening.is_set():
                 await self._wait_listening(proc, READY_WAIT)
-            prefer = self._listening_transport
+            prefer = self._current_transport
             if proc.poll() is not None:
                 if initial:
                     logger.error(
@@ -248,6 +285,9 @@ class WorkerManager:
         self._connect_failures = 0
         await self._publish(STATUS_CONNECTED, transport=client.transport)
         return True
+
+    def _current_transport(self) -> str | None:
+        return self._listening_transport
 
     async def _wait_listening(self, proc: subprocess.Popen[bytes], timeout: float) -> None:
         """Ждёт строку "Listening on ..." от воркера, его падение или таймаут."""
@@ -378,7 +418,7 @@ class WorkerManager:
         непрочитанный пайп переполнится, и воркер зависнет на очередном println!."""
         try:
             for raw in iter(stream.readline, b""):
-                line = raw.decode("utf-8", errors="replace").rstrip()
+                line = sanitize_worker_line(raw.decode("utf-8", errors="replace"))
                 if not line:
                     continue
                 self._output_tail.append(f"[{name}] {line}")
@@ -388,7 +428,7 @@ class WorkerManager:
                     transport = match.group(1).lower()
                     self._notify_listening("unix" if transport == "socket" else transport)
                 try:
-                    self._log_output(name, pid, line, listening=match is not None)
+                    self._log_output(name, pid, line)
                 except Exception:
                     # Например, UnicodeEncodeError: эмодзи воркера в stdout с кодировкой cp1251
                     pass
@@ -399,16 +439,10 @@ class WorkerManager:
                 stream.close()
 
     @staticmethod
-    def _log_output(name: str, pid: int, line: str, *, listening: bool) -> None:
-        if listening:
-            logger.info("Rust worker output", stream=name, pid=pid, line=line)
-        elif _ERROR_RE.search(line):
-            logger.error("Rust worker output", stream=name, pid=pid, line=line)
-        elif _WARN_RE.search(line):
-            logger.warning("Rust worker output", stream=name, pid=pid, line=line)
-        else:
-            # Служебный вывод на каждый запрос (в т.ч. текст команд) только в DEBUG
-            logger.debug("Rust worker output", stream=name, pid=pid, line=line)
+    def _log_output(name: str, pid: int, line: str) -> None:
+        # Служебный вывод на каждый запрос (в т.ч. текст команд) только в DEBUG
+        log = getattr(logger, worker_line_level(line))
+        log("Rust worker output", stream=name, pid=pid, line=line)
 
     def _notify_listening(self, transport: str) -> None:
         loop = self._loop

@@ -16,8 +16,18 @@ from app.worker.manager import (
     STATUS_WORKER_STARTED,
     WORKER_STATUS_EVENT,
     WorkerManager,
+    sanitize_worker_line,
+    worker_line_level,
 )
 from tests.conftest import FAKE_WORKER_SCRIPT
+from tests.fake_worker import PASSWORD
+
+# Строки настоящего synex_worker (сборка 2026-11-03), как они приходят из пайпа
+ANSI_INFO = (
+    "\x1b[2m2026-11-03T11:18:26.840998Z\x1b[0m \x1b[32m INFO\x1b[0m "
+    "\x1b[2msynex_worker\x1b[0m\x1b[2m:\x1b[0m "
+)
+ANSI_ERROR = ANSI_INFO.replace("\x1b[32m INFO", "\x1b[31mERROR")
 
 
 @pytest.fixture
@@ -59,7 +69,7 @@ async def test_start_connect_stop(monkeypatch, worker_settings, events):
         assert any("Listening on tcp" in line for line in manager.worker_output_tail)
         assert {"status": STATUS_CONNECTED, "transport": "tcp"} in events
 
-        with pytest.raises(WorkerCommandError, match="Not connected"):
+        with pytest.raises(WorkerCommandError, match="Session dont founded"):
             await manager.client.request("ssh_exec", {"command": "ls"})
         process = manager._process
     finally:
@@ -174,3 +184,47 @@ def test_relative_executable_path_is_resolved_from_backend_dir(monkeypatch):
     monkeypatch.setattr(settings, "RUST_EXECUTABLE_PATH_UNIX", "./app/worker")
     first = WorkerManager.executable_candidates()[0]
     assert first.parent == settings.BASE_DIR / "app"
+
+
+def test_worker_output_is_sanitized():
+    line = sanitize_worker_line(
+        ANSI_INFO + "Попытка подключения к root@1.2.3.4:22 (key: None, passphrase: p4ss, "
+        "password: hunter2, with comma)...\r\n"
+    )
+    assert line == (
+        "2026-11-03T11:18:26.840998Z  INFO synex_worker: Попытка подключения к "
+        "root@1.2.3.4:22 (key: None, passphrase: <hidden>"
+    )
+    assert sanitize_worker_line("Connected successfully") == "Connected successfully"
+
+
+@pytest.mark.parametrize(
+    ("line", "level"),
+    [
+        ("🔌 Listening on pipe: \\\\.\\pipe\\synex_worker", "info"),
+        ("🔌 Listening on tcp 127.0.0.1:9100", "info"),
+        (ANSI_INFO + "Выполняется команда: grep error /var/log/syslog", "debug"),
+        (ANSI_ERROR + "Session dont founded by key: s1", "warning"),
+        ("Pipe failed (Invalid name. (os error 123)), falling back to TCP", "warning"),
+        ("❌ Неизвестное действие: nope", "warning"),
+        ("thread 'main' panicked at src/main.rs:10:5", "error"),
+        ("  echo failed; exit 1", "debug"),  # продолжение многострочной команды
+    ],
+)
+def test_worker_output_levels(line, level):
+    assert worker_line_level(sanitize_worker_line(line)) == level
+
+
+async def test_password_never_reaches_output_tail(monkeypatch, worker_settings):
+    manager = fake_manager(monkeypatch)
+    await manager.start()
+    try:
+        connection = {"host": "h", "port": 22, "username": "u", "password": PASSWORD}
+        await manager.client.request("ssh_connect", {"connection": connection}, request_id="s1")
+        await wait_until(lambda: any("Попытка" in line for line in manager.worker_output_tail))
+        tail = "\n".join(manager.worker_output_tail)
+        assert PASSWORD not in tail
+        assert "password: <hidden>" in tail or "passphrase: <hidden>" in tail
+        assert "\x1b[" not in tail
+    finally:
+        await manager.stop()

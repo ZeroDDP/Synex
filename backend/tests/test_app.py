@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from app.core.app import create_app
-from app.plugins.ssh.session import ssh_state
+from app.plugins.ssh.session import ssh_sessions
 from app.worker import worker_manager
 from tests.conftest import FAKE_WORKER_SCRIPT
 
@@ -24,7 +24,7 @@ async def api(monkeypatch, worker_settings):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             yield client
-    ssh_state.mark_disconnected()
+    ssh_sessions.clear(reason="test")
 
 
 async def test_only_ssh_api_is_exposed():
@@ -33,6 +33,7 @@ async def test_only_ssh_api_is_exposed():
         "/api/health",
         "/api/ssh/connect",
         "/api/ssh/exec",
+        "/api/ssh/disconnect",
         "/api/ssh/status",
         "/api/keys",
         "/api/keys/generate",
@@ -56,13 +57,18 @@ async def test_ssh_connect_through_worker_subprocess(api, tmp_path: Path):
     response = await api.post("/api/ssh/connect", json=body)
     assert response.status_code == 201, response.text
     assert response.json()["status"] == "connected"
-    assert response.json()["message"] == "Connected successfully"
+    session_id = response.json()["session_id"]
 
     status = (await api.get("/api/ssh/status")).json()
     assert status["connected"] is True and status["host"] == "10.0.0.1"
+    assert status["session_id"] == session_id
 
     exec_response = await api.post("/api/ssh/exec", json={"command": "ls", "track_cwd": False})
     assert exec_response.json()["stdout"] == "ran: ls"
+
+    closed = await api.post("/api/ssh/disconnect", json={"session_id": session_id})
+    assert closed.status_code == 200, closed.text
+    assert (await api.get("/api/ssh/status")).json()["connected"] is False
 
 
 async def test_ssh_connect_with_generated_key(api):
