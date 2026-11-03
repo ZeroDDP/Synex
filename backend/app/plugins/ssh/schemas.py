@@ -1,9 +1,20 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
+
+SESSION_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
+
+
+def session_id_field() -> Any:
+    return Field(
+        default=None,
+        pattern=SESSION_ID_PATTERN,
+        description="ID сессии из ответа /api/ssh/connect. Без него берётся последняя открытая",
+    )
 
 
 class SSHConnectRequest(BaseModel):
@@ -14,7 +25,7 @@ class SSHConnectRequest(BaseModel):
         default=None,
         min_length=1,
         max_length=64,
-        description="ID ключа из хранилища /api/keys. Указывается вместо key_path",
+        description="ID ключа из хранилища /api/keys",
     )
     key_path: str | None = Field(
         default=None,
@@ -22,9 +33,21 @@ class SSHConnectRequest(BaseModel):
         max_length=1024,
         description=(
             "Путь к приватному ключу на этой машине (воркер запущен здесь же). "
-            "Можно с ~, например ~/.ssh/id_ed25519. Указывается вместо key_id"
+            "Можно с ~, например ~/.ssh/id_ed25519"
         ),
         examples=["C:/Users/user/.ssh/id_ed25519"],
+    )
+    passphrase: SecretStr | None = Field(
+        default=None,
+        min_length=1,
+        max_length=1024,
+        description="Парольная фраза ключа из key_path, если он зашифрован",
+    )
+    password: SecretStr | None = Field(
+        default=None,
+        min_length=1,
+        max_length=1024,
+        description="Пароль пользователя (вход по паролю вместо ключа)",
     )
 
     @field_validator("host", "username")
@@ -48,23 +71,32 @@ class SSHConnectRequest(BaseModel):
         return str(path)
 
     @model_validator(mode="after")
-    def _one_key_source(self) -> SSHConnectRequest:
-        if (self.key_id is None) == (self.key_path is None):
-            raise ValueError("pass exactly one of key_id or key_path")
+    def _one_auth_method(self) -> SSHConnectRequest:
+        given = [v for v in (self.key_id, self.key_path, self.password) if v is not None]
+        if len(given) != 1:
+            raise ValueError("pass exactly one of key_id, key_path or password")
+        if self.passphrase is not None and self.key_path is None:
+            raise ValueError(
+                "passphrase is only used with key_path "
+                "(keys in the key storage are already stored without a passphrase)"
+            )
         return self
 
 
 class SSHConnectResponse(BaseModel):
     status: Literal["connected"] = "connected"
+    session_id: str = Field(..., description="ID сессии для exec, disconnect и status")
     message: str = Field(..., description="Ответ воркера (stdout)")
     host: str
     port: int
     username: str
+    auth: Literal["key_id", "key_path", "password"]
     key_id: str | None = None
 
 
 class SSHExecRequest(BaseModel):
     command: str = Field(..., min_length=1, max_length=4096, description="Команда для выполнения")
+    session_id: str | None = session_id_field()
     timeout: float | None = Field(
         default=None,
         gt=0,
@@ -84,6 +116,7 @@ class SSHExecRequest(BaseModel):
 
 
 class SSHExecResponse(BaseModel):
+    session_id: str
     stdout: str = Field(default="", description="Стандартный вывод команды")
     stderr: str = Field(default="", description="Стандартный вывод ошибок")
     exit_code: int = Field(..., description="Код возврата (0 = успех; 124/137 при таймауте)")
@@ -92,10 +125,24 @@ class SSHExecResponse(BaseModel):
     duration_ms: int = Field(..., description="Время выполнения, мс")
 
 
+class SSHDisconnectRequest(BaseModel):
+    session_id: str | None = session_id_field()
+
+
+class SSHDisconnectResponse(BaseModel):
+    status: Literal["disconnected"] = "disconnected"
+    session_id: str
+    message: str = Field(..., description="Ответ воркера")
+
+
 class SSHStatusResponse(BaseModel):
     connected: bool
+    session_id: str | None = None
     host: str | None = None
     port: int | None = None
     username: str | None = None
+    auth: Literal["key_id", "key_path", "password"] | None = None
     key_id: str | None = None
     cwd: str | None = None
+    created_at: datetime | None = None
+    sessions: int = Field(default=0, description="Сколько сессий открыто всего")

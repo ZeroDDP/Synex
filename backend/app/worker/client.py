@@ -4,6 +4,19 @@
 Запрос:  {"id": str, "action": str, "payload": {...}}
 Ответ:   {"id": str, "status": "ok" | "error", "payload": {stdout, stderr, exit_code}}
 
+Как ведёт себя воркер на самом деле (проверено на сборке от 2026-11-03):
+  * `id` запроса одновременно ключ SSH-сессии: ssh_connect с id X создаёт сессию X,
+    ssh_exec / monitor_get_values / ssh_disconnect с тем же id работают с ней.
+    Поле payload.session_id воркер не читает. Ответ приходит с тем же id.
+  * Запросы одного IPC-подключения выполняются строго по очереди, разных подключений
+    параллельно. Сессии принадлежат подключению: другое их не видит, а при закрытии
+    подключения воркер закрывает его сессии.
+
+Поэтому несколько запросов могут ждать ответа с одинаковым id. Ответы сопоставляются
+с ними по порядку отправки (очередь на каждый id). Запрос, который не дождался ответа
+(таймаут или отмена), остаётся в очереди отменённым: его поздний ответ выбрасывается
+и не достаётся следующему запросу с тем же id.
+
 Транспорт:
     Windows      Named Pipe через overlapped I/O (ProactorEventLoop), запасной: TCP 127.0.0.1
     Linux/macOS  Unix Domain Socket, запасной: TCP 127.0.0.1
@@ -24,6 +37,7 @@ import contextlib
 import inspect
 import sys
 import uuid
+from collections import deque
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -46,6 +60,9 @@ LOCALHOST = "127.0.0.1"  # воркер слушает TCP только на loo
 
 Opener = Callable[[], Awaitable[tuple[asyncio.StreamReader, asyncio.StreamWriter]]]
 DisconnectListener = Callable[[str], Awaitable[None] | None]
+# Транспорт, который выбрал воркер: строка или функция, которую клиент спрашивает
+# перед каждой попыткой (воркер может сначала объявить pipe, а потом уйти на TCP).
+Prefer = str | Callable[[], str | None] | None
 
 
 def encode_frame(message: dict[str, Any]) -> bytes:
@@ -55,12 +72,14 @@ def encode_frame(message: dict[str, Any]) -> bytes:
     return len(data).to_bytes(HEADER_SIZE, "big") + data
 
 
-def make_request(action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    return {"id": uuid.uuid4().hex, "action": action, "payload": payload or {}}
+def make_request(
+    action: str, payload: dict[str, Any] | None = None, request_id: str | None = None
+) -> dict[str, Any]:
+    return {"id": request_id or uuid.uuid4().hex, "action": action, "payload": payload or {}}
 
 
 class WorkerClient:
-    """Одно IPC-соединение с воркером. Запросы матчатся с ответами по id."""
+    """Одно IPC-соединение с воркером. Ответы сопоставляются с запросами по id."""
 
     def __init__(
         self,
@@ -80,7 +99,8 @@ class WorkerClient:
         self._read_task: asyncio.Task | None = None
         self._write_lock = asyncio.Lock()
         self._connect_lock = asyncio.Lock()
-        self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        # id -> ожидающие ответа запросы в порядке отправки (см. docstring модуля)
+        self._pending: dict[str, deque[asyncio.Future[dict[str, Any]]]] = {}
         self._disconnect_listeners: list[DisconnectListener] = []
         self._background: set[asyncio.Task] = set()
         self._connected = False
@@ -95,12 +115,13 @@ class WorkerClient:
         *,
         timeout: float | None = None,
         retry_delay: float = 0.3,
-        prefer: str | None = None,
+        prefer: Prefer = None,
     ) -> None:
         """Подключается к воркеру, повторяя попытки, пока не истечёт timeout.
 
         prefer: "pipe" | "unix" | "tcp", если заранее известно, что слушает воркер
-        (менеджер узнаёт это по строке "Listening on ..." в stdout воркера).
+        (менеджер узнаёт это по строке "Listening on ..." в stdout воркера). Можно
+        передать функцию: она вызывается перед каждой попыткой.
         """
         async with self._connect_lock:
             if self._connected:
@@ -108,7 +129,7 @@ class WorkerClient:
             await self._connect_locked(timeout, retry_delay, prefer)
 
     async def _connect_locked(
-        self, timeout: float | None, retry_delay: float, prefer: str | None
+        self, timeout: float | None, retry_delay: float, prefer: Prefer
     ) -> None:
         timeout = settings.RUST_IPC_CONNECT_TIMEOUT if timeout is None else timeout
         loop = asyncio.get_running_loop()
@@ -116,7 +137,8 @@ class WorkerClient:
         errors: dict[str, str] = {}
 
         while True:
-            for name, opener in self._candidates(prefer):
+            current = prefer() if callable(prefer) else prefer
+            for name, opener in self._candidates(current):
                 per_try = max(0.5, min(3.0, deadline - loop.time()))
                 try:
                     reader, writer = await asyncio.wait_for(opener(), timeout=per_try)
@@ -227,14 +249,18 @@ class WorkerClient:
         payload: dict[str, Any] | None = None,
         *,
         timeout: float | None = None,
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         """Отправляет action и возвращает payload ответа со status="ok".
+
+        request_id: id запроса. Для действий с SSH-сессией это id сессии, иначе
+        генерируется случайный.
 
         WorkerCommandError: воркер ответил status="error".
         WorkerTimeoutError: ответа нет дольше timeout.
         WorkerConnectionError: нет соединения или оно оборвалось.
         """
-        response = await self.request_raw(action, payload, timeout=timeout)
+        response = await self.request_raw(action, payload, timeout=timeout, request_id=request_id)
         body = response.get("payload")
         if not isinstance(body, dict):
             body = {}
@@ -255,9 +281,10 @@ class WorkerClient:
         payload: dict[str, Any] | None = None,
         *,
         timeout: float | None = None,
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         """Отправляет запрос и возвращает ответ воркера целиком, без разбора status."""
-        message = make_request(action, payload)
+        message = make_request(action, payload, request_id)
         frame = encode_frame(message)
         msg_id = message["id"]
 
@@ -267,25 +294,37 @@ class WorkerClient:
         if not self._connected or writer is None:
             raise WorkerConnectionError("Not connected to Rust worker")
         future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
-        self._pending[msg_id] = future
+        self._pending.setdefault(msg_id, deque()).append(future)
 
+        sent = False
         try:
             async with self._write_lock:
                 writer.write(frame)
+                sent = True
                 await writer.drain()
         except (ConnectionError, OSError, RuntimeError) as e:
-            self._pending.pop(msg_id, None)
+            self._forget(msg_id, future)
             raise WorkerConnectionError(f"Failed to send '{action}' to Rust worker: {e!r}") from e
+        except BaseException:
+            # Отмена, пока запрос ждал очереди на запись: воркер его не получит, и место
+            # в очереди ответов ему не нужно. Если кадр уже записан, ответ придёт.
+            if sent:
+                future.cancel()
+            else:
+                self._forget(msg_id, future)
+            raise
 
         wait = self._request_timeout if timeout is None else timeout
         try:
-            return await asyncio.wait_for(future, timeout=wait)
+            return await asyncio.wait_for(asyncio.shield(future), timeout=wait)
         except TimeoutError:
             raise WorkerTimeoutError(
                 f"Rust worker did not answer '{action}' within {wait:g}s"
             ) from None
         finally:
-            self._pending.pop(msg_id, None)
+            # Запрос уже у воркера, ответ придёт позже. Отменённый future остаётся в
+            # очереди своего id и заберёт этот поздний ответ на себя.
+            future.cancel()
 
     # ------------------------------------------------------------------- status
 
@@ -304,7 +343,9 @@ class WorkerClient:
         return {
             "connected": self._connected,
             "transport": self._transport,
-            "pending_requests": len(self._pending),
+            "pending_requests": sum(
+                not future.done() for queue in self._pending.values() for future in queue
+            ),
         }
 
     # --------------------------------------------------------------- internals
@@ -347,10 +388,15 @@ class WorkerClient:
             return
 
         msg_id = message.get("id")
-        future = self._pending.pop(msg_id, None) if isinstance(msg_id, str) else None
-        if future is not None:
+        queue = self._pending.get(msg_id) if isinstance(msg_id, str) else None
+        if queue:
+            future = queue.popleft()
+            if not queue:
+                del self._pending[msg_id]
             if not future.done():
                 future.set_result(message)
+            else:
+                logger.debug("IPC: late reply to an abandoned request dropped", id=msg_id)
             return
 
         # Например id="bad_msgpack": воркер не смог разобрать наш запрос.
@@ -392,11 +438,22 @@ class WorkerClient:
         self._background.add(task)
         task.add_done_callback(self._background.discard)
 
+    def _forget(self, msg_id: str, future: asyncio.Future[dict[str, Any]]) -> None:
+        """Убирает запрос, который так и не ушёл воркеру."""
+        queue = self._pending.get(msg_id)
+        if queue is None:
+            return
+        with contextlib.suppress(ValueError):
+            queue.remove(future)
+        if not queue:
+            del self._pending[msg_id]
+
     def _fail_pending(self, error: WorkerConnectionError) -> None:
         pending, self._pending = self._pending, {}
-        for future in pending.values():
-            if not future.done():
-                future.set_exception(error)
+        for queue in pending.values():
+            for future in queue:
+                if not future.done():
+                    future.set_exception(error)
 
 
 def _as_int(value: Any, default: int) -> int:

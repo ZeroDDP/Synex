@@ -1,8 +1,9 @@
 # Synex backend
 
 FastAPI-сервер между UI и Rust-ядром `synex_worker` (протокол описан в CoreDocs).
-Сейчас умеет три вещи: работать с SSH-сессией через воркер, хранить SSH-ключи
-в зашифрованном виде и отдавать UI поток данных по WebSocket (пока тестовые метрики).
+Сейчас умеет три вещи: работать с SSH-сессиями через воркер (несколько одновременно),
+хранить SSH-ключи в зашифрованном виде и отдавать UI поток данных по WebSocket
+(пока тестовые метрики).
 
 ## Запуск
 
@@ -25,9 +26,10 @@ uv run python -m app.main    # http://127.0.0.1:8000
 
 | Метод | Путь | Что делает |
 |---|---|---|
-| POST | `/api/ssh/connect` | Открыть SSH-сессию: `{host, port, username, key_id \| key_path}` → 201 |
-| POST | `/api/ssh/exec` | Выполнить команду: `{command, timeout?, track_cwd?}` |
-| GET | `/api/ssh/status` | Состояние сессии |
+| POST | `/api/ssh/connect` | Открыть SSH-сессию: `{host, port, username, key_id \| key_path [+ passphrase] \| password}` → 201 и `session_id` |
+| POST | `/api/ssh/exec` | Выполнить команду: `{command, session_id?, timeout?, track_cwd?}` |
+| POST | `/api/ssh/disconnect` | Закрыть сессию: `{session_id?}` |
+| GET | `/api/ssh/status` | Состояние сессии: `?session_id=` или последняя открытая |
 | GET | `/api/keys` | Список ключей (без секретной части) |
 | POST | `/api/keys` | Импорт: `{name, private_key \| private_key_path, passphrase?, comment?}` → 201 |
 | POST | `/api/keys/generate` | Новый ключ: `{name, type: ed25519 \| rsa, bits?, comment?}` → 201 |
@@ -39,17 +41,32 @@ uv run python -m app.main    # http://127.0.0.1:8000
 
 С `DEBUG=true` Swagger доступен на `/api/docs`.
 
-### Пример: ключ из хранилища → подключение → команда
+### Пример: ключ из хранилища → подключение → команда → отключение
 
 ```powershell
 $api = "http://127.0.0.1:8000/api"
 $key = Invoke-RestMethod -Method Post "$api/keys" -ContentType "application/json" `
   -Body '{"name": "prod", "private_key_path": "C:/Users/me/.ssh/id_ed25519"}'
-Invoke-RestMethod -Method Post "$api/ssh/connect" -ContentType "application/json" `
+$s = Invoke-RestMethod -Method Post "$api/ssh/connect" -ContentType "application/json" `
   -Body (@{host = "1.2.3.4"; username = "root"; key_id = $key.id} | ConvertTo-Json)
 Invoke-RestMethod -Method Post "$api/ssh/exec" -ContentType "application/json" `
-  -Body '{"command": "cd /var/log && ls", "timeout": 10}'
+  -Body (@{session_id = $s.session_id; command = "cd /var/log && ls"; timeout = 10} | ConvertTo-Json)
+Invoke-RestMethod -Method Post "$api/ssh/disconnect" -ContentType "application/json" `
+  -Body (@{session_id = $s.session_id} | ConvertTo-Json)
 ```
+
+### SSH-сессии
+
+- Каждый `/api/ssh/connect` открывает новую сессию и возвращает `session_id`. Уже
+  открытые сессии продолжают работать. У каждой сессии своя `cwd`.
+- Способ входа ровно один: `key_id` (ключ из хранилища), `key_path` (файл ключа на этой
+  машине; если ключ зашифрован, добавьте `passphrase`) или `password`. Пароль и фраза
+  никуда не сохраняются и не попадают в логи.
+- `exec`, `disconnect` и `status` без `session_id` работают с последней открытой
+  сессией. Так клиент, который знает только про одну сессию, работает как раньше.
+- Сессия живёт внутри воркера и привязана к IPC-подключению backend. Если воркер упал
+  или подключение оборвалось, все сессии закрываются, и `exec` вернёт 409
+  `ssh_not_connected`: нужно подключиться заново.
 
 ### /api/ssh/exec
 
@@ -60,8 +77,9 @@ Invoke-RestMethod -Method Post "$api/ssh/exec" -ContentType "application/json" `
   получают TERM, через 3 секунды KILL. Ответ приходит с кодом 200, `timed_out: true`,
   `exit_code` 124 (TERM) или 137 (KILL) и выводом, который успел накопиться. Это важно:
   воркер выполняет запросы по одному, и `tail -f` без лимита занял бы его навсегда.
-- Команды выполняются по одной. Следующая ждёт окончания предыдущей, и её таймаут
-  начинает идти, только когда она реально отправлена воркеру.
+- Команды выполняются по одной, даже в разных сессиях: воркер обрабатывает запросы
+  одного подключения строго по очереди. Следующая команда ждёт окончания предыдущей,
+  и её таймаут начинает идти, только когда она реально отправлена воркеру.
 - `cwd` сохраняется между командами: после `cd /var/log` следующая команда стартует там.
   Если директорию удалили, команда не выполняется (`exit_code` 1, `cwd` = домашняя папка).
 - `track_cwd: false` отправляет команду воркеру как есть: без cwd, без таймаута на
@@ -85,8 +103,8 @@ Invoke-RestMethod -Method Post "$api/ssh/exec" -ContentType "application/json" `
   `keystore_corrupted`, новый мастер-ключ молча не создастся. Там, где системного
   хранилища нет (CI, headless Linux), мастер-ключ задаётся в `KEYSTORE_MASTER_KEY`.
 - Поддерживаются Ed25519, RSA от 2048 бит и ECDSA (P-256/384/521) в форматах OpenSSH и
-  PEM. Ключ с парольной фразой расшифровывается при импорте (фраза не сохраняется),
-  потому что воркер парольные фразы не принимает.
+  PEM. Ключ с парольной фразой расшифровывается при импорте (фраза не сохраняется):
+  в хранилище ключ уже защищён Fernet, и при подключении по `key_id` фраза не нужна.
 - Приватный ключ API не отдаёт никогда. Для `ssh_connect` воркеру нужен путь к файлу,
   поэтому при `key_id` ключ на время подключения расшифровывается во временный файл
   (`runtime/` рядом с `keys.json`, права 0600) и сразу удаляется.
@@ -141,11 +159,12 @@ ws.onmessage = (e) => console.log(JSON.parse(e.data));
 | HTTP | error | Когда |
 |---|---|---|
 | 404 | `key_not_found` | Нет ключа с таким id |
-| 409 | `ssh_not_connected` | `exec` без открытой сессии |
+| 404 | `ssh_session_not_found` | Нет сессии с таким `session_id` |
+| 409 | `ssh_not_connected` | Нет открытой сессии, или воркер её уже не знает |
 | 409 | `key_exists` | Имя занято или этот ключ уже сохранён |
 | 422 | `invalid_key` / — | Ключ не читается, нужна парольная фраза, неверные поля |
 | 500 | `keystore_corrupted` | `keys.json` повреждён или зашифрован другим мастер-ключом |
-| 502 | `ssh_connect_failed` | Воркер не смог подключиться (хост, ключ, пользователь) |
+| 502 | `ssh_connect_failed` | Воркер не смог подключиться (хост, ключ, пароль, фраза) |
 | 502 | `worker_command_failed` | Воркер вернул ошибку |
 | 503 | `worker_unavailable` | Воркер не запущен или IPC недоступен |
 | 503 | `keystore_unavailable` | Нет доступа к Credential Manager / неверный `KEYSTORE_MASTER_KEY` |
@@ -164,7 +183,8 @@ app/
   api/                 корневой роутер /api, /api/health, зависимости
   ws/                  WebSocket /ws: hub.py (протокол, рассылка), metrics.py (метрики)
   plugins/             менеджер плагинов
-    ssh/               /api/ssh/*: routes, schemas, сессия, wrapper (cwd, таймаут)
+    ssh/               /api/ssh/*: routes, service (действия через воркер), session
+                       (реестр сессий), wrapper (cwd, таймаут), schemas, errors
     keys/              /api/keys/*
 tests/                 pytest; fake_worker.py имитирует synex_worker
 ```
@@ -181,15 +201,21 @@ uv run pytest
 Тесты используют временное хранилище и свой мастер-ключ: настоящий `keys.json` и
 Credential Manager они не трогают.
 
-`tests/test_real_worker.py` запускает настоящий `synex_worker.exe` (только Windows).
-Проверки с реальным SSH-сервером включаются переменными окружения:
+`tests/test_real_worker.py` запускает настоящий `synex_worker.exe` (Windows; на Linux
+можно указать команду запуска exe через wine в `SYNEX_TEST_WORKER`). Проверки с
+реальным SSH-сервером включаются переменными окружения:
 
 ```powershell
 $env:SYNEX_TEST_SSH_HOST="1.2.3.4"; $env:SYNEX_TEST_SSH_USER="root"
 $env:SYNEX_TEST_SSH_KEY="C:/Users/me/.ssh/id_ed25519"
+$env:SYNEX_TEST_SSH_PASSWORD="..."   # необязательно: проверить вход по паролю
 uv run pytest tests/test_real_worker.py -v
 ```
 
-`test_real_worker_raw_exit_codes` падает, пока воркер возвращает `exit_code=0` для
+`test_real_worker_raw_exit_codes` помечен `xfail`: воркер возвращает `exit_code=0` для
 любой команды. Это баг на стороне Rust. Пока он не исправлен, `/api/ssh/exec` берёт
-настоящий код возврата из shell (при `track_cwd=true`).
+настоящий код возврата из shell (при `track_cwd=true`). Когда баг исправят, тест
+покажет `XPASS`.
+
+`tests/fake_worker.py` повторяет поведение воркера сборки 2026-11-03: сессия = `id`
+запроса, запросы подключения по очереди, `exit_code` всегда 0.
