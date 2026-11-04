@@ -121,14 +121,19 @@ class SocketLocation:
         self._checked = False  # папка выбрана и проверена
         self._prepared = False  # был prepare(): есть что убирать в cleanup()
 
-    def prepare(self) -> Path:
-        """Перед запуском воркера: папка, проверки, удаление мёртвого сокета."""
+    def choose(self) -> Path:
+        """Выбирает и проверяет папку сокета (один раз): см. docstring модуля."""
         if not self._checked:
             self._checked = True
             if self.explicit:
                 self._check_explicit()
             else:
                 self._choose_private_dir()
+        return self.path
+
+    def prepare(self) -> Path:
+        """Перед запуском воркера: папка, проверки, удаление мёртвого сокета."""
+        self.choose()
         self._prepared = True
         remove_stale_socket(self.path)
         return self.path

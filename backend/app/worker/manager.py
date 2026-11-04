@@ -15,7 +15,9 @@
   воркер перезапускается с экспоненциальной задержкой. Если оборвалось только
   соединение, менеджер переподключается.
 * На Windows воркер помещается в Job Object с KILL_ON_JOB_CLOSE: если Python упадёт
-  или его убьют из IDE, воркер умрёт вместе с ним и не будет держать имя pipe.
+  или его убьют из IDE, воркер умрёт вместе с ним и не будет держать имя pipe. На Linux
+  и macOS то же самое делает process.py (своя сессия, PDEATHSIG, PID-файл), а сокет
+  готовит unix_socket.py.
 * Кроме основного подключения (client) менеджер открывает дополнительные
   (open_channel): воркер выполняет запросы одного подключения по очереди, а разных
   параллельно, поэтому у каждой SSH-сессии своё подключение. При остановке менеджер
@@ -52,6 +54,7 @@ from app.worker.executable import (
     host_os,
     startup_failure_hint,
 )
+from app.worker.process import WorkerPidFile, popen_options
 from app.worker.unix_socket import SocketLocation
 
 logger = structlog.get_logger()
@@ -132,6 +135,7 @@ class WorkerManager:
         self._connect_failures = 0
         self._job: Any = None
         self._socket: SocketLocation | None = None  # Linux/macOS: путь и папка сокета
+        self._pid_file: WorkerPidFile | None = None  # Linux/macOS: воркер прошлого запуска
 
     # ------------------------------------------------------------- public API
 
@@ -141,6 +145,10 @@ class WorkerManager:
         self._wake = asyncio.Event()
         if sys.platform != "win32":
             self._socket = SocketLocation(settings.RUST_IPC_SOCKET_PATH, default_socket_path())
+            socket_path = self._socket.choose()
+            self._pid_file = WorkerPidFile(socket_path.with_name(socket_path.name + ".pid"))
+            # Воркер, оставшийся от прошлого запуска (backend убили), держит сокет и порт
+            await asyncio.to_thread(self._pid_file.stop_orphan)
 
         client = WorkerClient(socket_path=self.socket_path)
         client.add_disconnect_listener(self._on_connection_lost)
@@ -262,10 +270,12 @@ class WorkerManager:
             proc = subprocess.Popen(
                 command,
                 env=self._worker_env(),
-                stdin=subprocess.DEVNULL,
+                # stdin держим открытым: ОС закроет его, когда backend завершится любым
+                # способом, и воркер увидит EOF (process.py)
+                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                **popen_options(),
             )
         except OSError as e:
             logger.error("Failed to start Rust worker", error=repr(e), command=command)
@@ -275,6 +285,8 @@ class WorkerManager:
         self._process = proc
         self._started_at = time.monotonic()
         self._attach_to_job(proc)
+        if self._pid_file is not None:
+            self._pid_file.write(proc.pid, command[0])
         self._start_pumps(proc)
         logger.info("Rust worker started", pid=proc.pid, path=command[0])
         return True
@@ -284,6 +296,7 @@ class WorkerManager:
         if proc is None:
             return
 
+        self._close_stdin(proc)
         if proc.poll() is None:
             logger.info("Terminating Rust worker", pid=proc.pid)
             proc.terminate()
@@ -296,7 +309,15 @@ class WorkerManager:
                     await asyncio.to_thread(proc.wait, 2.0)
 
         await asyncio.to_thread(self._join_pumps)
+        if self._pid_file is not None:
+            self._pid_file.clear(proc.pid)
         logger.info("Rust worker stopped", pid=proc.pid, returncode=proc.returncode)
+
+    @staticmethod
+    def _close_stdin(proc: subprocess.Popen[bytes]) -> None:
+        if proc.stdin is not None:
+            with contextlib.suppress(OSError):
+                proc.stdin.close()
 
     # ------------------------------------------------------------ connection
 
@@ -413,6 +434,9 @@ class WorkerManager:
     async def _handle_worker_exit(self, proc: subprocess.Popen[bytes]) -> None:
         returncode = proc.returncode
         self._process = None
+        self._close_stdin(proc)
+        if self._pid_file is not None:
+            self._pid_file.clear(proc.pid)
         await asyncio.to_thread(self._join_pumps)
         logger.error(
             "Rust worker exited",

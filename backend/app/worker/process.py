@@ -1,0 +1,201 @@
+"""Процесс воркера на Linux и macOS: не оставлять его сиротой.
+
+На Windows это делает Job Object (manager.py). На Linux и macOS:
+
+* Своя сессия (start_new_session). Ctrl+C в терминале шлёт SIGINT всей группе
+  процессов: без этого воркер умирал бы раньше, чем backend успеет закрыть SSH-сессии,
+  а супервизор успевал бы его «перезапустить».
+* Linux: PR_SET_PDEATHSIG. Если backend убит (kill -9, падение, закрытие IDE), ядро
+  пошлёт воркеру SIGTERM. Сигнал привязан к потоку, который запустил процесс: воркер
+  запускается из потока event loop, который живёт столько же, сколько backend.
+* macOS такого механизма не имеет. Поэтому PID воркера записывается в файл рядом с
+  сокетом (worker.sock.pid). При следующем запуске backend находит воркер, оставшийся
+  от прошлого раза, и останавливает его: иначе тот держал бы сокет и порт. Процесс
+  останавливается, только если его backend уже не работает и это тот же бинарник
+  (защита от повторно использованного PID).
+* stdin воркера это пайп, который backend держит открытым. Когда backend завершается
+  любым способом, ОС закрывает пайп, и воркер видит EOF. Сейчас воркер stdin не читает;
+  если научится завершаться по EOF (вопрос Rust-стороне), это заработает и на macOS.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import ctypes
+import ctypes.util
+import json
+import os
+import signal
+import sys
+import time
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
+
+import structlog
+
+logger = structlog.get_logger()
+
+PR_SET_PDEATHSIG = 1
+
+
+def linux_pdeathsig() -> Callable[[], None] | None:
+    """preexec_fn для Popen: SIGTERM воркеру, когда умрёт backend (только Linux)."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        prctl = ctypes.CDLL(None, use_errno=True).prctl  # libc загружаем до fork
+    except (OSError, AttributeError):
+        return None
+    parent = os.getpid()
+
+    def set_pdeathsig() -> None:
+        # Выполняется в дочернем процессе между fork и exec: только простые вызовы
+        prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
+        if os.getppid() != parent:  # backend умер раньше, чем мы успели подписаться
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    return set_pdeathsig
+
+
+def popen_options() -> dict[str, Any]:
+    """Платформенные параметры subprocess.Popen для воркера."""
+    if sys.platform == "win32":
+        import subprocess
+
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    options: dict[str, Any] = {"start_new_session": True}
+    preexec = linux_pdeathsig()
+    if preexec is not None:
+        options["preexec_fn"] = preexec
+    return options
+
+
+# ------------------------------------------------------------------ processes
+
+
+def is_alive(pid: int) -> bool:
+    """Процесс существует и не зомби."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # чужой процесс: существует, но не наш
+    with contextlib.suppress(OSError):
+        stat = Path(f"/proc/{pid}/stat").read_text()
+        return stat.rsplit(")", 1)[1].split()[0] != "Z"
+    return True
+
+
+def process_executable(pid: int) -> str | None:
+    """Путь к бинарнику процесса (None: узнать не удалось)."""
+    if sys.platform.startswith("linux"):
+        try:
+            path = os.readlink(f"/proc/{pid}/exe")
+        except OSError:
+            return None
+        return path.removesuffix(" (deleted)")  # бинарник пересобрали, пока он работал
+    if sys.platform == "darwin":
+        try:
+            libproc = ctypes.CDLL(ctypes.util.find_library("proc") or "libproc.dylib")
+            buffer = ctypes.create_string_buffer(4096)
+            if libproc.proc_pidpath(pid, buffer, len(buffer)) <= 0:
+                return None
+        except (OSError, AttributeError):
+            return None
+        return os.fsdecode(buffer.value)
+    return None
+
+
+def same_file(a: str, b: str) -> bool:
+    return os.path.realpath(a) == os.path.realpath(b)
+
+
+def stop_process(pid: int, timeout: float = 3.0) -> bool:
+    """SIGTERM, затем SIGKILL. True: процесс завершился."""
+    for sig, wait in ((signal.SIGTERM, timeout), (signal.SIGKILL, 2.0)):
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, sig)
+        deadline = time.monotonic() + wait
+        while time.monotonic() < deadline:
+            if not is_alive(pid):
+                return True
+            time.sleep(0.05)
+    return not is_alive(pid)
+
+
+# -------------------------------------------------------------------- pid file
+
+
+class WorkerPidFile:
+    """worker.sock.pid: {worker_pid, backend_pid, executable} запущенного воркера."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def write(self, worker_pid: int, executable: str) -> None:
+        data = {
+            "worker_pid": worker_pid,
+            "backend_pid": os.getpid(),
+            "executable": os.path.realpath(executable),
+        }
+        try:
+            tmp = self.path.with_name(self.path.name + ".tmp")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                json.dump(data, f)
+            os.replace(tmp, self.path)
+        except OSError as e:
+            logger.warning("Cannot write worker PID file", path=str(self.path), error=repr(e))
+
+    def read(self) -> dict[str, Any] | None:
+        try:
+            data = json.loads(self.path.read_text())
+            int(data["worker_pid"]), int(data["backend_pid"]), str(data["executable"])
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError, KeyError, TypeError):
+            logger.warning("Ignoring a broken worker PID file", path=str(self.path))
+            self._remove()
+            return None
+        return data
+
+    def clear(self, worker_pid: int) -> None:
+        """Удаляет файл, если он про этот воркер (другой backend мог его перезаписать)."""
+        data = self.read()
+        if data is not None and data["worker_pid"] == worker_pid:
+            self._remove()
+
+    def stop_orphan(self) -> None:
+        """Останавливает воркер, оставшийся от прошлого запуска backend."""
+        data = self.read()
+        if data is None:
+            return
+        worker_pid, backend_pid = int(data["worker_pid"]), int(data["backend_pid"])
+        if backend_pid != os.getpid() and is_alive(backend_pid):
+            logger.warning(
+                "Another backend seems to be running with its own worker; leaving it alone",
+                backend_pid=backend_pid,
+                worker_pid=worker_pid,
+            )
+            return
+        if not is_alive(worker_pid):
+            self._remove()
+            return
+        executable = process_executable(worker_pid)
+        if executable is None or not same_file(executable, data["executable"]):
+            self._remove()  # PID уже занят другим процессом
+            return
+        stopped = stop_process(worker_pid)
+        logger.warning(
+            "Stopped a Rust worker left from a previous backend run",
+            pid=worker_pid,
+            stopped=stopped,
+        )
+        if stopped:
+            self._remove()
+
+    def _remove(self) -> None:
+        with contextlib.suppress(OSError):
+            self.path.unlink()
