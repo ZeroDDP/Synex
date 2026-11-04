@@ -18,6 +18,8 @@ uv run python -m app.main    # http://127.0.0.1:8000
 Бэкенд сам запускает `app/core/target/release/synex_worker.exe` как дочерний процесс,
 подключается к нему по Named Pipe (Linux/macOS: Unix socket, запасной вариант TCP)
 и перезапускает воркер, если тот упал. Настройки лежат в `.env`, образец: `.env.example`.
+Пустое значение (`DEBUG=`) означает значение по умолчанию. Если значение неверное,
+бэкенд не запустится и напишет, какая настройка и что с ней не так.
 
 Не запускайте uvicorn с `--reload` или `--workers` на Windows: тогда uvicorn
 использует SelectorEventLoop, на котором Named Pipe не работает.
@@ -140,6 +142,8 @@ ws.onopen = () => ws.send(JSON.stringify({type: "exec", data: {command: "uptime"
 - `track_cwd: false` отправляет команду воркеру как есть: без cwd, без таймаута на
   сервере и с `exit_code` от воркера (сейчас всегда 0, см. ниже). Нужно для
   не-POSIX оболочек вроде fish.
+- Переводы строк приводятся к `\n`: `\r\n` из Windows-текста и одиночный `\r` (Enter в
+  терминале) на сервере стали бы частью команды (`cd /tmp\r` → "can't cd to /tmp").
 - 504 `ssh_exec_timeout` означает, что воркер не вернул результат даже через
   `timeout + 3 + SSH_EXEC_TIMEOUT_GRACE` секунд. Например, на сервере нет coreutils
   `timeout` (macOS, старый busybox): тогда команда могла продолжить работать.

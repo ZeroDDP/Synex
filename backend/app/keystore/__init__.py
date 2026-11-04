@@ -33,4 +33,3 @@ def get_keystore() -> KeyStore:
     if _keystore is None or _keystore.path != path:
         _keystore = KeyStore(path)
     return _keystore
-

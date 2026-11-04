@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from app.plugins.ssh.wrapper import build_command, new_marker, parse_output
+from app.plugins.ssh.wrapper import build_command, new_marker, normalize_newlines, parse_output
 
 M = "__SYNEX_test__:"
 
@@ -38,6 +38,12 @@ def test_parse_variants():
     assert parse(f"\n{M}C124|/x\n{M}E124") == ("", 124, "/x", False)
     # маркеров нет
     assert parse("  indented\nline") == ("  indented\nline", None, None, False)
+
+
+def test_normalize_newlines():
+    assert normalize_newlines("cd /tmp\r\nls\r\n") == "cd /tmp\nls\n"
+    assert normalize_newlines("echo a\recho b") == "echo a\necho b"
+    assert normalize_newlines("printf 'a\\rb'") == "printf 'a\\rb'"  # escape, не символ CR
 
 
 def test_markers_are_unique():

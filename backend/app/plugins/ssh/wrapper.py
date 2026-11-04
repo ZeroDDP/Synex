@@ -28,6 +28,8 @@
   а сообщения оболочки вида "Killed ..." (bash печатает в них весь скрипт) глушатся.
 * Если директории из cwd больше нет, команда НЕ выполняется (иначе `rm -rf *`
   сработал бы в домашней папке): exit_code=1, cwd=$HOME.
+* Переводы строк в команде приводятся к LF (normalize_newlines): CR из Windows-текста
+  shell считает частью слова, и `cd /tmp\r` падает с "can't cd to /tmp".
 
 Нужен POSIX-совместимый login shell на сервере (bash, zsh, sh/dash); проверено на всех
 четырёх. Для fish используйте track_cwd=false: команда уйдёт как есть.
@@ -42,6 +44,11 @@ from dataclasses import dataclass
 RC_VAR = "__synex_rc"
 KILL_AFTER = 3  # сек между TERM и KILL
 TIMEOUT_EXIT_CODES = frozenset({124, 137})  # timeout: TERM / KILL
+
+
+def normalize_newlines(command: str) -> str:
+    """CRLF и одиночный CR (вставка из Windows, Enter в терминале) → LF."""
+    return command.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def new_marker() -> str:

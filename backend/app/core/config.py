@@ -15,7 +15,10 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(
         env_file=BASE_DIR / ".env",
-        env_file_encoding="utf-8",
+        # utf-8-sig: .env, сохранённый с BOM (PowerShell 5, старый Блокнот), тоже читается
+        env_file_encoding="utf-8-sig",
+        # Пустое значение (DEBUG=) значит «по умолчанию», а не ошибку валидации
+        env_ignore_empty=True,
         extra="ignore",
     )
 

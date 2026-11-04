@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import socket
+import struct
 import sys
 import time
 
 import pytest
+from structlog.testing import capture_logs
 
 from app.core.errors import WorkerCommandError, WorkerConnectionError, WorkerTimeoutError
 from app.worker.client import WorkerClient
@@ -208,6 +211,27 @@ async def test_connection_loss_fails_pending_immediately(fake_worker, missing_so
     await client.disconnect()
 
 
+async def test_connection_reset_by_dying_worker_is_not_an_error(fake_worker, missing_socket_path):
+    """Упавший воркер часто обрывает соединение RST, а не EOF: это потеря соединения,
+    а не ошибка клиента (иначе на каждую сессию в логе был бы error)."""
+    client = await make_client(fake_worker.port, missing_socket_path, timeout=10)
+    lost: list[str] = []
+    client.add_disconnect_listener(lost.append)
+    (protocol,) = fake_worker.protocols
+    sock = protocol.transport.get_extra_info("socket")
+    linger = struct.pack("HH" if sys.platform == "win32" else "ii", 1, 0)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, linger)  # close() шлёт RST
+
+    with capture_logs() as logs:
+        protocol.transport.abort()
+        async with asyncio.timeout(5):
+            while not lost:
+                await asyncio.sleep(0.02)
+    assert not client.connected
+    assert "reset" in lost[0] or "closed" in lost[0], lost
+    assert [e for e in logs if e["log_level"] == "error"] == []
+
+
 async def test_manual_disconnect_is_quiet(fake_worker, missing_socket_path):
     client = await make_client(fake_worker.port, missing_socket_path, timeout=10)
     lost: list[str] = []
@@ -279,9 +303,9 @@ async def test_connect_gives_up_with_clear_error(missing_socket_path):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Unix sockets: Linux/macOS")
-async def test_unix_socket_transport(tmp_path):
+async def test_unix_socket_transport(missing_socket_path):
     state = FakeWorkerState()
-    path = str(tmp_path / "w.sock")
+    path = missing_socket_path  # короткий путь: на macOS tmp_path длиннее лимита
     loop = asyncio.get_running_loop()
     server = await loop.create_unix_server(lambda: FakeWorkerProtocol(state), path)
     client = WorkerClient(socket_path=path, tcp_port=get_free_port())
