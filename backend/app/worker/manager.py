@@ -16,6 +16,10 @@
   соединение, менеджер переподключается.
 * На Windows воркер помещается в Job Object с KILL_ON_JOB_CLOSE: если Python упадёт
   или его убьют из IDE, воркер умрёт вместе с ним и не будет держать имя pipe.
+* Кроме основного подключения (client) менеджер открывает дополнительные
+  (open_channel): воркер выполняет запросы одного подключения по очереди, а разных
+  параллельно, поэтому у каждой SSH-сессии своё подключение. При остановке менеджер
+  закрывает их все.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ import subprocess
 import sys
 import threading
 import time
+import weakref
 from collections.abc import Callable
 from pathlib import Path
 from typing import IO, Any
@@ -54,6 +59,7 @@ STATUS_WORKER_EXITED = "worker_exited"
 SUPERVISE_INTERVAL = 2.0
 READY_WAIT = 3.0  # сколько ждать строку "Listening on ..." перед попыткой подключения
 RECONNECT_TIMEOUT = 2.0
+CHANNEL_CONNECT_TIMEOUT = 3.0  # сколько ждать дополнительное подключение (open_channel)
 # Процесс жив, но IPC недоступен столько проверок подряд (~20 с): считаем воркер
 # зависшим и перезапускаем.
 MAX_FAILED_RECONNECTS = 5
@@ -95,10 +101,12 @@ def worker_line_level(line: str) -> str:
 
 
 class WorkerManager:
-    """Владеет процессом synex_worker и единственным WorkerClient к нему."""
+    """Владеет процессом synex_worker, основным WorkerClient и дополнительными
+    подключениями к нему (open_channel)."""
 
     def __init__(self) -> None:
         self.client: WorkerClient | None = None
+        self._channels: weakref.WeakSet[WorkerClient] = weakref.WeakSet()
         self._process: subprocess.Popen[bytes] | None = None
         self._pump_threads: list[threading.Thread] = []
         self._output_tail: collections.deque[str] = collections.deque(maxlen=50)
@@ -141,6 +149,9 @@ class WorkerManager:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
 
+        for channel in list(self._channels):
+            with contextlib.suppress(Exception):
+                await channel.disconnect()
         if self.client is not None:
             with contextlib.suppress(Exception):
                 await self.client.disconnect()
@@ -156,9 +167,25 @@ class WorkerManager:
         alive = proc is not None and proc.poll() is None
         return {
             **client,
+            "channels": sum(channel.connected for channel in list(self._channels)),
             "worker_pid": proc.pid if alive and proc is not None else None,
             "worker_restarts": self._restarts,
         }
+
+    async def open_channel(self, *, timeout: float = CHANNEL_CONNECT_TIMEOUT) -> WorkerClient:
+        """Ещё одно IPC-подключение к тому же воркеру, тем же транспортом.
+
+        Его запросы выполняются параллельно с запросами других подключений, а SSH-сессии,
+        открытые через него, принадлежат только ему: воркер закроет их, когда подключение
+        закроется. Закрывает подключение тот, кто его открыл (disconnect()).
+        """
+        main = self.client
+        if main is None or not main.connected:
+            raise WorkerConnectionError("Rust worker is not connected")
+        channel = WorkerClient()
+        await channel.connect(timeout=timeout, prefer=main.transport)
+        self._channels.add(channel)
+        return channel
 
     @property
     def worker_output_tail(self) -> list[str]:

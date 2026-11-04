@@ -11,6 +11,8 @@ from cryptography.fernet import Fernet
 from pydantic import SecretStr
 
 from app.core.config import settings
+from app.core.errors import WorkerConnectionError
+from app.worker.client import WorkerClient
 from tests.fake_worker import FakeWorkerProtocol, FakeWorkerState
 
 FAKE_WORKER_SCRIPT = Path(__file__).with_name("fake_worker.py")
@@ -87,3 +89,57 @@ def worker_settings(monkeypatch, free_port, missing_socket_path):
     monkeypatch.setattr(settings, "RUST_IPC_REQUEST_TIMEOUT", 5.0)
     monkeypatch.setattr(settings, "RUST_WORKER_AUTORESTART", True)
     return settings
+
+
+class FakeWorkerProvider:
+    """Подключения к фейковому воркеру для SSHSessionManager, как у WorkerManager.
+
+    channels=False: воркер «не принимает» дополнительные подключения.
+    """
+
+    def __init__(
+        self,
+        port: int,
+        socket_path: str,
+        *,
+        request_timeout: float = 5,
+        channels: bool = True,
+    ) -> None:
+        self.port = port
+        self.socket_path = socket_path
+        self.request_timeout = request_timeout
+        self.channels = channels
+        self.main = self._client()
+        self.opened: list[WorkerClient] = []
+
+    def _client(self) -> WorkerClient:
+        return WorkerClient(
+            pipe_name=unique_pipe_name(),
+            socket_path=self.socket_path,
+            tcp_port=self.port,
+            request_timeout=self.request_timeout,
+        )
+
+    async def start(self) -> None:
+        await self.main.connect(timeout=3.0, prefer="tcp")
+
+    def shared(self) -> WorkerClient:
+        if not self.main.connected:
+            raise WorkerConnectionError("Rust worker is not connected")
+        return self.main
+
+    async def open_channel(self) -> WorkerClient:
+        if not self.channels or not self.main.connected:
+            raise WorkerConnectionError("Cannot connect to Rust worker (test)")
+        client = self._client()
+        await client.connect(timeout=3.0, prefer="tcp")
+        self.opened.append(client)
+        return client
+
+    @property
+    def open_channels(self) -> int:
+        return sum(client.connected for client in self.opened)
+
+    async def close(self) -> None:
+        for client in [*self.opened, self.main]:
+            await client.disconnect()

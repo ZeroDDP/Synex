@@ -1,9 +1,9 @@
 # Synex backend
 
 FastAPI-сервер между UI и Rust-ядром `synex_worker` (протокол описан в CoreDocs).
-Сейчас умеет три вещи: работать с SSH-сессиями через воркер (несколько одновременно),
-хранить SSH-ключи в зашифрованном виде и отдавать UI поток данных по WebSocket
-(пока тестовые метрики).
+Сейчас умеет три вещи: работать с SSH-сессиями через воркер (несколько одновременно,
+у каждой свой терминал по WebSocket), хранить SSH-ключи в зашифрованном виде и отдавать
+UI поток данных по WebSocket (пока тестовые метрики).
 
 ## Запуск
 
@@ -26,8 +26,15 @@ uv run python -m app.main    # http://127.0.0.1:8000
 
 | Метод | Путь | Что делает |
 |---|---|---|
-| POST | `/api/ssh/connect` | Открыть SSH-сессию: `{host, port, username, key_id \| key_path [+ passphrase] \| password}` → 201 и `session_id` |
-| POST | `/api/ssh/exec` | Выполнить команду: `{command, session_id?, timeout?, track_cwd?}` |
+| GET | `/api/ssh/sessions` | Открытые SSH-сессии |
+| POST | `/api/ssh/sessions` | Открыть сессию: `{host, port, username, key_id \| key_path [+ passphrase] \| password}` → 201 |
+| GET | `/api/ssh/sessions/{id}` | Одна сессия: хост, `cwd`, занята ли, сколько вкладок смотрят |
+| DELETE | `/api/ssh/sessions/{id}` | Закрыть сессию |
+| POST | `/api/ssh/sessions/{id}/exec` | Выполнить команду: `{command, timeout?, track_cwd?}` |
+| GET | `/api/ssh/sessions/{id}/output` | Буфер вывода: `?since=N&limit=M` |
+| WS | `/api/ssh/sessions/{id}/ws` | Терминал сессии: `?since=N` (см. ниже) |
+| POST | `/api/ssh/connect` | То же, что `POST /sessions`, ответ короче |
+| POST | `/api/ssh/exec` | Команда: `{command, session_id?, timeout?, track_cwd?}`, без `session_id` в последней открытой сессии |
 | POST | `/api/ssh/disconnect` | Закрыть сессию: `{session_id?}` |
 | GET | `/api/ssh/status` | Состояние сессии: `?session_id=` или последняя открытая |
 | GET | `/api/keys` | Список ключей (без секретной части) |
@@ -47,38 +54,85 @@ uv run python -m app.main    # http://127.0.0.1:8000
 $api = "http://127.0.0.1:8000/api"
 $key = Invoke-RestMethod -Method Post "$api/keys" -ContentType "application/json" `
   -Body '{"name": "prod", "private_key_path": "C:/Users/me/.ssh/id_ed25519"}'
-$s = Invoke-RestMethod -Method Post "$api/ssh/connect" -ContentType "application/json" `
+$s = Invoke-RestMethod -Method Post "$api/ssh/sessions" -ContentType "application/json" `
   -Body (@{host = "1.2.3.4"; username = "root"; key_id = $key.id} | ConvertTo-Json)
-Invoke-RestMethod -Method Post "$api/ssh/exec" -ContentType "application/json" `
-  -Body (@{session_id = $s.session_id; command = "cd /var/log && ls"; timeout = 10} | ConvertTo-Json)
-Invoke-RestMethod -Method Post "$api/ssh/disconnect" -ContentType "application/json" `
-  -Body (@{session_id = $s.session_id} | ConvertTo-Json)
+Invoke-RestMethod -Method Post "$api/ssh/sessions/$($s.session_id)/exec" `
+  -ContentType "application/json" -Body '{"command": "cd /var/log && ls", "timeout": 10}'
+Invoke-RestMethod "$api/ssh/sessions/$($s.session_id)/output"
+Invoke-RestMethod -Method Delete "$api/ssh/sessions/$($s.session_id)"
 ```
 
 ### SSH-сессии
 
-- Каждый `/api/ssh/connect` открывает новую сессию и возвращает `session_id`. Уже
-  открытые сессии продолжают работать. У каждой сессии своя `cwd`.
+- Каждый `POST /api/ssh/sessions` (или `/api/ssh/connect`) открывает новую сессию и
+  возвращает `session_id`. Уже открытые сессии продолжают работать. У каждой сессии
+  своя `cwd`. Одновременно можно держать `SSH_MAX_SESSIONS` (20) сессий, дальше 429.
+- У каждой сессии своё IPC-подключение к воркеру: воркер выполняет запросы одного
+  подключения по очереди, а разных параллельно. Команды одной сессии идут по очереди,
+  разных сессий параллельно. Если воркер не принял отдельное подключение, сессии
+  работают через общее (`channel: "shared"` в описании сессии) и команды всех сессий
+  идут по одной.
 - Способ входа ровно один: `key_id` (ключ из хранилища), `key_path` (файл ключа на этой
   машине; если ключ зашифрован, добавьте `passphrase`) или `password`. Пароль и фраза
   никуда не сохраняются и не попадают в логи.
 - `exec`, `disconnect` и `status` без `session_id` работают с последней открытой
   сессией. Так клиент, который знает только про одну сессию, работает как раньше.
-- Сессия живёт внутри воркера и привязана к IPC-подключению backend. Если воркер упал
-  или подключение оборвалось, все сессии закрываются, и `exec` вернёт 409
-  `ssh_not_connected`: нужно подключиться заново.
+- Сессия живёт внутри воркера и привязана к своему IPC-подключению. Если воркер упал
+  или подключение оборвалось, сессия закрывается: вкладки получают `closed`, `exec`
+  вернёт 404/409, нужно подключиться заново.
+- Закрытие сессии (`DELETE`, `close` из WebSocket) прерывает и команду, которая в ней
+  ещё выполняется: её запрос вернёт 409 `ssh_not_connected`.
+- Всё, что происходит в сессии, пишется в её буфер вывода: `opened`, `command`
+  (команда и `cwd`, откуда пришла: `api` или `ws`), `result` (`stdout`, `stderr`,
+  `exit_code`, `cwd`, `timed_out`, `duration_ms`) и `error`. У записи номер `seq`, он
+  растёт на 1. Буфер ограничен `SSH_OUTPUT_BUFFER_BYTES` (1 МиБ на сессию): старое
+  вытесняется, у слишком большого вывода остаётся конец и `truncated: true`.
+- О каждом открытии и закрытии в шину событий уходит `ssh.session`
+  (`{action: opened | closed, session_id, host, port, username, reason?}`).
+
+### WebSocket терминала
+
+`ws://127.0.0.1:8000/api/ssh/sessions/{id}/ws?since=N`. Одно подключение смотрит одну
+сессию, одну сессию могут смотреть несколько вкладок. Конверт тот же, что у `/ws`:
+`{"type", "ts", "data"}`.
+
+| type | Кто и когда шлёт | data |
+|---|---|---|
+| `hello` | сервер, сразу после подключения | `{protocol, session, replay: {since, count, gap, first_seq, last_seq}}` |
+| `output` | сервер: сначала записи буфера после `since`, потом новые | запись буфера `{seq, ts, kind, ...}` |
+| `closed` | сервер, когда сессию закрыли; затем закрывает подключение | `{reason}`: `closed`, `worker_connection_lost`, `lost_in_worker`, `shutdown` |
+| `error` | сервер, если сообщение не разобрано или команда не запустилась | `{error, detail, request_id?}` |
+| `pong` | сервер, в ответ на `ping` | `data` из `ping` |
+| `exec` | UI | `{command, timeout?, track_cwd?, id?}`: `id` вернётся в записях как `request_id` |
+| `close` | UI | закрыть сессию для всех вкладок |
+| `ping` | UI | что угодно |
+
+- Команду из одной вкладки и её результат видят все вкладки этой сессии, команды через
+  REST тоже.
+- Закрытие вкладки не закрывает сессию: команда продолжает выполняться, результат ждёт
+  в буфере. При переподключении передайте `since` = последний полученный `seq` и
+  получите только пропущенное; `gap: true` значит, что часть уже вытеснена.
+- Вывод терминала не выбрасывается молча. Если UI не успевает читать, подключение
+  закрывается кодом 1013: переподключитесь с `since`. Другие коды закрытия: 1000
+  (сессию закрыли), 1001 (backend остановлен), 4404 (сессии нет).
+
+```js
+const ws = new WebSocket(`ws://127.0.0.1:8000/api/ssh/sessions/${id}/ws`);
+ws.onmessage = (e) => console.log(JSON.parse(e.data));
+ws.onopen = () => ws.send(JSON.stringify({type: "exec", data: {command: "uptime", id: "1"}}));
+```
 
 ### /api/ssh/exec
 
-Ответ: `{stdout, stderr, exit_code, cwd, timed_out, duration_ms}`.
+Ответ: `{session_id, seq, stdout, stderr, exit_code, cwd, timed_out, duration_ms}`
+(`seq`: номер записи с результатом в буфере вывода). То же для `/sessions/{id}/exec`.
 
 - `timeout`: лимит выполнения в секундах (по умолчанию `SSH_EXEC_TIMEOUT=30`, максимум 3600).
   Применяется **на сервере** через coreutils `timeout`. Команда и все её дочерние процессы
   получают TERM, через 3 секунды KILL. Ответ приходит с кодом 200, `timed_out: true`,
   `exit_code` 124 (TERM) или 137 (KILL) и выводом, который успел накопиться. Это важно:
   воркер выполняет запросы по одному, и `tail -f` без лимита занял бы его навсегда.
-- Команды выполняются по одной, даже в разных сессиях: воркер обрабатывает запросы
-  одного подключения строго по очереди. Следующая команда ждёт окончания предыдущей,
+- Команды одной сессии выполняются по одной. Следующая ждёт окончания предыдущей,
   и её таймаут начинает идти, только когда она реально отправлена воркеру.
 - `cwd` сохраняется между командами: после `cd /var/log` следующая команда стартует там.
   Если директорию удалили, команда не выполняется (`exit_code` 1, `cwd` = домашняя папка).
@@ -162,6 +216,7 @@ ws.onmessage = (e) => console.log(JSON.parse(e.data));
 | 404 | `ssh_session_not_found` | Нет сессии с таким `session_id` |
 | 409 | `ssh_not_connected` | Нет открытой сессии, или воркер её уже не знает |
 | 409 | `key_exists` | Имя занято или этот ключ уже сохранён |
+| 429 | `ssh_too_many_sessions` | Открыто `SSH_MAX_SESSIONS` сессий |
 | 422 | `invalid_key` / — | Ключ не читается, нужна парольная фраза, неверные поля |
 | 500 | `keystore_corrupted` | `keys.json` повреждён или зашифрован другим мастер-ключом |
 | 502 | `ssh_connect_failed` | Воркер не смог подключиться (хост, ключ, пароль, фраза) |
@@ -183,8 +238,9 @@ app/
   api/                 корневой роутер /api, /api/health, зависимости
   ws/                  WebSocket /ws: hub.py (протокол, рассылка), metrics.py (метрики)
   plugins/             менеджер плагинов
-    ssh/               /api/ssh/*: routes, service (действия через воркер), session
-                       (реестр сессий), wrapper (cwd, таймаут), schemas, errors
+    ssh/               /api/ssh/*: manager (менеджер сессий), session (сессия и её
+                       подключение к воркеру), buffer (буфер вывода), ws (терминал),
+                       wrapper (cwd, таймаут), routes, schemas, errors
     keys/              /api/keys/*
 tests/                 pytest; fake_worker.py имитирует synex_worker
 ```
@@ -218,4 +274,6 @@ uv run pytest tests/test_real_worker.py -v
 покажет `XPASS`.
 
 `tests/fake_worker.py` повторяет поведение воркера сборки 2026-11-03: сессия = `id`
-запроса, запросы подключения по очереди, `exit_code` всегда 0.
+запроса, сессии принадлежат подключению, запросы подключения по очереди, `exit_code`
+всегда 0. `tests/ssh_helpers.py` собирает плагин ssh поверх него и запускает uvicorn
+для тестов WebSocket.
