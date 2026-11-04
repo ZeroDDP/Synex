@@ -24,6 +24,30 @@ uv run python -m app.main    # http://127.0.0.1:8000
 Не запускайте uvicorn с `--reload` или `--workers` на Windows: тогда uvicorn
 использует SelectorEventLoop, на котором Named Pipe не работает.
 
+### Linux и macOS
+
+```bash
+cd backend
+uv sync
+uv run python -m app.main
+```
+
+Бинарника для Linux и macOS в репозитории пока нет: его нужно собрать
+(`cargo build --release`) и положить в `app/core/target/release/synex_worker` или
+указать путь в `RUST_EXECUTABLE_PATH_UNIX`. Бэкенд ищет воркер так:
+
+1. `RUST_EXECUTABLE_PATH_UNIX` (относительно `backend/`, затем текущей папки);
+2. сборку под конкретную платформу (`cargo build --release --target <triple>`):
+   `app/core/target/<triple>/release/synex_worker`, где `<triple>` —
+   `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`
+   (Apple Silicon) или `x86_64-apple-darwin`.
+
+Файл проверяется по заголовку: `synex_worker.exe` или сборка под другой процессор
+пропускается, а в логе написано, для чего она собрана (вместо «Exec format error»).
+Скрипт-обёртка (`#!/bin/sh`) тоже подходит. Право на запуск (`chmod +x`) бэкенд ставит
+сам. macOS может заблокировать неподписанный бинарник, скачанный из интернета (воркер
+умирает сразу с кодом -9): `xattr -d com.apple.quarantine <путь к synex_worker>`.
+
 ### Доступ к API
 
 Авторизации у API нет: он слушает только `127.0.0.1` и доверяет программам на этой
@@ -280,7 +304,8 @@ app/
   main.py              точка входа (uvicorn)
   core/                платформа: config, app factory, ошибки, шина событий, логи
     target/release/    synex_worker.exe
-  worker/              Rust-ядро: client.py (IPC-протокол), manager.py (процесс)
+  worker/              Rust-ядро: client.py (IPC-протокол), manager.py (процесс),
+                       executable.py (поиск бинарника для ОС и процессора)
   keystore/            хранилище ключей: store.py, ssh_keys.py, master_key.py
   api/                 корневой роутер /api, /api/health, зависимости
   ws/                  WebSocket /ws: hub.py (протокол, рассылка), metrics.py (формат

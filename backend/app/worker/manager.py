@@ -44,6 +44,14 @@ from app.core.config import settings
 from app.core.errors import WorkerConnectionError
 from app.core.event_bus import event_bus
 from app.worker.client import WorkerClient
+from app.worker.executable import (
+    candidates,
+    ensure_executable,
+    find_executable,
+    host_arch,
+    host_os,
+    startup_failure_hint,
+)
 
 logger = structlog.get_logger()
 
@@ -193,23 +201,25 @@ class WorkerManager:
 
     @staticmethod
     def executable_candidates() -> list[Path]:
-        raw = Path(settings.rust_executable_path)
-        if raw.is_absolute():
-            return [raw]
-        # Сначала относительно backend/ (не зависит от того, откуда запущен Python),
-        # затем относительно cwd, как было раньше.
-        return [settings.BASE_DIR / raw, Path.cwd() / raw]
+        """Где ищется бинарник (см. executable.py): сначала относительно backend/."""
+        return candidates(settings.rust_executable_path, settings.BASE_DIR)
 
     # ----------------------------------------------------------- spawn / stop
 
     def _worker_command(self) -> list[str] | None:
-        candidates = self.executable_candidates()
-        for path in candidates:
-            if path.is_file():
-                return [str(path.resolve())]
+        found = find_executable(settings.rust_executable_path, settings.BASE_DIR)
+        if found.path is not None:
+            return [str(found.path)] if ensure_executable(found.path) else None
+        if found.skipped:
+            logger.error(
+                "Rust worker executable is not built for this platform. Build it with "
+                "`cargo build --release` or set RUST_EXECUTABLE_PATH_UNIX / _WIN32",
+                platform=f"{host_os()}-{host_arch()}",
+                skipped=found.skipped,
+            )
         logger.warning(
             "Rust worker executable not found. Will try to connect to an already running worker.",
-            tried=[str(p) for p in candidates],
+            tried=found.tried,
         )
         return None
 
@@ -288,10 +298,12 @@ class WorkerManager:
             prefer = self._current_transport
             if proc.poll() is not None:
                 if initial:
+                    hint = startup_failure_hint(proc.returncode)
                     logger.error(
                         "Rust worker exited during startup",
                         returncode=proc.returncode,
                         last_output=self.worker_output_tail[-15:],
+                        **({"hint": hint} if hint else {}),
                     )
                 self._wake.set()  # супервизор обработает выход и перезапустит
                 return False
