@@ -36,12 +36,14 @@ def main() -> None:
 
     # Без reload: на Windows uvicorn с --reload/--workers переключается на
     # SelectorEventLoop, а Named Pipe к воркеру работает только на ProactorEventLoop.
+    # log_level uvicorn всегда info: на debug он пишет каждый кадр WebSocket (метрики
+    # идут дважды в секунду). DEBUG=true включает debug-логи самого backend.
     uvicorn.run(
         "app.core.app:create_app",
         factory=True,
         host=settings.HOST,
         port=settings.PORT,
-        log_level="debug" if settings.DEBUG else "info",
+        log_level="info",
     )
 
 
