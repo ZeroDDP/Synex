@@ -24,6 +24,23 @@ uv run python -m app.main    # http://127.0.0.1:8000
 Не запускайте uvicorn с `--reload` или `--workers` на Windows: тогда uvicorn
 использует SelectorEventLoop, на котором Named Pipe не работает.
 
+### Доступ к API
+
+Авторизации у API нет: он слушает только `127.0.0.1` и доверяет программам на этой
+машине. Браузер тоже программа на этой машине, поэтому запросы от веб-страниц
+ограничены. Без этого любая открытая страница могла бы через `fetch` и WebSocket
+читать сессии и выполнять команды на серверах.
+
+- Запрос с заголовком `Origin` (его шлёт браузер) проходит, только если origin — сам
+  backend (`http://127.0.0.1:8000`, `http://localhost:8000`) или указан в
+  `ALLOWED_ORIGINS`. Иначе 403 `forbidden_origin`, WebSocket получает отказ при
+  подключении. Dev-сервер UI добавляется так: `ALLOWED_ORIGINS=http://localhost:5173`.
+- Запросы без `Origin` (curl, PowerShell, настольное приложение, тесты) проходят.
+- Заголовок `Host` должен быть `127.0.0.1`, `localhost`, `[::1]` или из `ALLOWED_HOSTS`.
+  Иначе 403 `forbidden_host`: это защита от DNS rebinding.
+- `HOST=0.0.0.0` открывает API в сеть без авторизации. При старте backend пишет
+  об этом предупреждение.
+
 ## API
 
 | Метод | Путь | Что делает |
@@ -244,6 +261,7 @@ ws.onmessage = (e) => console.log(JSON.parse(e.data));
 | 404 | `key_not_found` | Нет ключа с таким id |
 | 404 | `ssh_session_not_found` | Нет сессии с таким `session_id` |
 | 409 | `ssh_not_connected` | Нет открытой сессии, или воркер её уже не знает |
+| 403 | `forbidden_origin` / `forbidden_host` | Запрос со страницы не из `ALLOWED_ORIGINS` или с чужим `Host` |
 | 409 | `key_exists` | Имя занято или этот ключ уже сохранён |
 | 429 | `ssh_too_many_sessions` | Открыто `SSH_MAX_SESSIONS` сессий |
 | 422 | `invalid_key` / — | Ключ не читается, нужна парольная фраза, неверные поля |

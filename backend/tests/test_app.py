@@ -22,7 +22,7 @@ async def api(monkeypatch, worker_settings):
     app = create_app()
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as client:
             yield client
     await ssh_manager.close_all(reason="test")
 
