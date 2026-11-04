@@ -48,6 +48,17 @@ uv run python -m app.main
 сам. macOS может заблокировать неподписанный бинарник, скачанный из интернета (воркер
 умирает сразу с кодом -9): `xattr -d com.apple.quarantine <путь к synex_worker>`.
 
+Воркер слушает Unix socket. По умолчанию (`RUST_IPC_SOCKET_PATH` пустой) он лежит в
+личной папке пользователя, а не в общем `/tmp`: `$XDG_RUNTIME_DIR/synex/worker.sock`
+(Linux, обычно `/run/user/<uid>`), без `XDG_RUNTIME_DIR` — `/tmp/synex-<uid>/worker.sock`,
+на macOS — `$TMPDIR/synex/worker.sock`. Перед запуском воркера бэкенд:
+
+- создаёт папку с правами `0700` и проверяет, что она его и не symlink; иначе берёт
+  временную папку со случайным именем;
+- удаляет файл сокета, который никто не слушает (остался после падения воркера):
+  иначе воркер не смог бы занять путь и ушёл бы на TCP;
+- проверяет длину пути: не больше 103 байт на macOS и 107 на Linux.
+
 ### Доступ к API
 
 Авторизации у API нет: он слушает только `127.0.0.1` и доверяет программам на этой
@@ -305,7 +316,8 @@ app/
   core/                платформа: config, app factory, ошибки, шина событий, логи
     target/release/    synex_worker.exe
   worker/              Rust-ядро: client.py (IPC-протокол), manager.py (процесс),
-                       executable.py (поиск бинарника для ОС и процессора)
+                       executable.py (поиск бинарника для ОС и процессора),
+                       unix_socket.py (путь и папка сокета на Linux/macOS)
   keystore/            хранилище ключей: store.py, ssh_keys.py, master_key.py
   api/                 корневой роутер /api, /api/health, зависимости
   ws/                  WebSocket /ws: hub.py (протокол, рассылка), metrics.py (формат

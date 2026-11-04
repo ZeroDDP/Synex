@@ -90,7 +90,7 @@ class WorkerClient:
         request_timeout: float | None = None,
     ) -> None:
         self._pipe_name = pipe_name or settings.RUST_IPC_PIPE_NAME
-        self._socket_path = socket_path or settings.RUST_IPC_SOCKET_PATH
+        self._socket_path = socket_path or settings.ipc_socket_path
         self._tcp_port = tcp_port or settings.RUST_IPC_TCP_FALLBACK_PORT
         self._request_timeout = request_timeout or settings.RUST_IPC_REQUEST_TIMEOUT
 

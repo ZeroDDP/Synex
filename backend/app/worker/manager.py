@@ -40,7 +40,7 @@ from typing import IO, Any
 
 import structlog
 
-from app.core.config import settings
+from app.core.config import default_socket_path, settings
 from app.core.errors import WorkerConnectionError
 from app.core.event_bus import event_bus
 from app.worker.client import WorkerClient
@@ -52,6 +52,7 @@ from app.worker.executable import (
     host_os,
     startup_failure_hint,
 )
+from app.worker.unix_socket import SocketLocation
 
 logger = structlog.get_logger()
 
@@ -130,6 +131,7 @@ class WorkerManager:
         self._restarts = 0
         self._connect_failures = 0
         self._job: Any = None
+        self._socket: SocketLocation | None = None  # Linux/macOS: путь и папка сокета
 
     # ------------------------------------------------------------- public API
 
@@ -137,8 +139,10 @@ class WorkerManager:
         self._stopping = False
         self._loop = asyncio.get_running_loop()
         self._wake = asyncio.Event()
+        if sys.platform != "win32":
+            self._socket = SocketLocation(settings.RUST_IPC_SOCKET_PATH, default_socket_path())
 
-        client = WorkerClient()
+        client = WorkerClient(socket_path=self.socket_path)
         client.add_disconnect_listener(self._on_connection_lost)
         self.client = client
 
@@ -165,6 +169,8 @@ class WorkerManager:
                 await self.client.disconnect()
 
         await self._terminate_worker()
+        if self._socket is not None:
+            self._socket.cleanup()
         self._close_job()
         self.client = None
         logger.info("Rust worker manager stopped")
@@ -190,10 +196,17 @@ class WorkerManager:
         main = self.client
         if main is None or not main.connected:
             raise WorkerConnectionError("Rust worker is not connected")
-        channel = WorkerClient()
+        channel = WorkerClient(socket_path=self.socket_path)
         await channel.connect(timeout=timeout, prefer=main.transport)
         self._channels.add(channel)
         return channel
+
+    @property
+    def socket_path(self) -> str:
+        """Unix socket воркера (Linux/macOS), тот же, что передан ему в окружении."""
+        if self._socket is not None:
+            return str(self._socket.path)
+        return settings.ipc_socket_path
 
     @property
     def worker_output_tail(self) -> list[str]:
@@ -229,7 +242,7 @@ class WorkerManager:
             {
                 "RUST_BRIDGE_MODE": "ipc",
                 "RUST_IPC_PIPE_NAME": settings.RUST_IPC_PIPE_NAME,
-                "RUST_IPC_SOCKET_PATH": settings.RUST_IPC_SOCKET_PATH,
+                "RUST_IPC_SOCKET_PATH": self.socket_path,
                 "RUST_IPC_TCP_FALLBACK_PORT": str(settings.RUST_IPC_TCP_FALLBACK_PORT),
             }
         )
@@ -239,6 +252,8 @@ class WorkerManager:
         command = self._worker_command()
         if command is None:
             return False
+        if self._socket is not None:
+            self._socket.prepare()  # до запуска: папка 0700, мёртвый сокет удалён
 
         self._listening = asyncio.Event()
         self._listening_transport = None
