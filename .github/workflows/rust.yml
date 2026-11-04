@@ -2,9 +2,9 @@ name: Rust
 
 on:
   push:
-    branches: [ "core" ]
+    branches: [ "core", "core/**", "core-ipc-worker" ]
   pull_request:
-    branches: [ "core" ]
+    branches: [ "core", "core/**" ]
 
 env:
   CARGO_TERM_COLOR: always
@@ -18,5 +18,7 @@ jobs:
     - uses: actions/checkout@v4
     - name: Build
       run: cargo build --verbose --release
+      working-directory: ./core
     - name: Run tests
       run: cargo test --verbose
+      working-directory: ./core
