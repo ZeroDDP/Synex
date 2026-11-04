@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     SSH_EXEC_TIMEOUT: float = 30.0
     # Сколько ещё ждать ответа воркера сверх лимита команды, сек.
     SSH_EXEC_TIMEOUT_GRACE: float = 10.0
+    # Сколько SSH-сессий можно держать открытыми одновременно.
+    SSH_MAX_SESSIONS: int = Field(default=20, ge=1)
+    # Буфер вывода одной сессии (команды и их результаты), байт. Старое вытесняется.
+    SSH_OUTPUT_BUFFER_BYTES: int = Field(default=1024 * 1024, ge=1024)
 
     # Хранилище SSH-ключей. По умолчанию keys.json в папке данных пользователя:
     # Windows %LOCALAPPDATA%\Synex, macOS ~/Library/Application Support/Synex,

@@ -1,22 +1,23 @@
-"""SSH-сессии со стороны Python.
+"""SSH-сессия со стороны Python.
 
 Сама сессия живёт внутри воркера, её ключ там это id запросов (см. app/worker/client.py).
-Здесь хранится то, что воркер не помнит: куда подключились, каким способом и текущая
-директория (cwd), которую обёртка подставляет в каждую команду.
+Здесь хранится то, что воркер не помнит: куда подключились и каким способом, текущая
+директория (cwd), буфер вывода и кто сейчас смотрит сессию (WebSocket-подключения).
 """
 
 from __future__ import annotations
 
 import secrets
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import structlog
 
-from app.plugins.ssh.errors import SSHNotConnectedError, SSHSessionNotFoundError
+from app.core.locks import LoopLock
+from app.plugins.ssh.buffer import EntryKind, OutputBuffer, OutputEntry, Replay
 from app.plugins.ssh.wrapper import new_marker
+from app.worker import WorkerClient
 
 logger = structlog.get_logger()
 
@@ -27,19 +28,54 @@ def new_session_id() -> str:
     return secrets.token_hex(8)
 
 
-@dataclass
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+class Subscriber(Protocol):
+    """Тот, кто смотрит сессию: WebSocket-подключение UI. Методы не должны блокировать."""
+
+    def deliver(self, entry: OutputEntry) -> None: ...
+
+    def session_closed(self, reason: str) -> None: ...
+
+
+@dataclass(eq=False)
+class WorkerChannel:
+    """IPC-подключение к воркеру, через которое работает сессия.
+
+    Воркер выполняет запросы подключения по очереди, поэтому запросы идут по одному
+    (lock): иначе таймаут команды тикал бы, пока она стоит в очереди воркера.
+    dedicated: подключение принадлежит одной сессии и закрывается вместе с ней;
+    иначе это общее основное подключение backend (запасной вариант).
+    """
+
+    client: WorkerClient
+    dedicated: bool
+    lock: LoopLock = field(default_factory=LoopLock)
+
+
+@dataclass(eq=False)
 class SSHSession:
     id: str
     host: str
     port: int
     username: str
     auth: AuthMethod
+    channel: WorkerChannel
+    buffer: OutputBuffer
     key_id: str | None = None
     cwd: str | None = None  # None = домашняя папка, путь ещё не известен
     marker: str = field(default_factory=new_marker)
-    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
+    created_at: datetime = field(default_factory=_now)
+    last_activity_at: datetime = field(default_factory=_now)
+    running: str | None = None  # команда, которая сейчас выполняется
+    waiting: int = 0  # команды в очереди за ней
+    closed: bool = False
+    close_reason: str | None = None
+    subscribers: set[Subscriber] = field(default_factory=set)
 
-    def snapshot(self) -> dict[str, Any]:
+    def info(self) -> dict[str, Any]:
         return {
             "session_id": self.id,
             "host": self.host,
@@ -49,65 +85,46 @@ class SSHSession:
             "key_id": self.key_id,
             "cwd": self.cwd,
             "created_at": self.created_at,
+            "last_activity_at": self.last_activity_at,
+            "busy": self.running is not None,
+            "waiting": self.waiting,
+            "attached": len(self.subscribers),
+            "last_seq": self.buffer.last_seq,
+            "channel": "dedicated" if self.channel.dedicated else "shared",
         }
 
+    def record(self, kind: EntryKind, data: dict[str, Any]) -> OutputEntry:
+        """Записать в буфер и сразу отдать всем, кто смотрит сессию."""
+        self.last_activity_at = _now()
+        entry = self.buffer.append(kind, data)
+        for subscriber in list(self.subscribers):
+            try:
+                subscriber.deliver(entry)
+            except Exception as e:
+                logger.warning("SSH subscriber failed", session_id=self.id, error=repr(e))
+        return entry
 
-class SSHSessionRegistry:
-    """Открытые сессии. «Текущая» = последняя открытая: её используют запросы без
-    session_id, так старый API с одной сессией работает как раньше."""
+    def attach(self, subscriber: Subscriber, since: int = 0) -> Replay:
+        """Подписать на новые записи и вернуть пропущенные после since.
 
-    def __init__(self) -> None:
-        self._sessions: dict[str, SSHSession] = {}
+        Без await внутри: между снимком буфера и подпиской не может появиться запись,
+        которая потеряется или придёт дважды.
+        """
+        replay = self.buffer.since(since)
+        self.subscribers.add(subscriber)
+        return replay
 
-    def add(self, session: SSHSession) -> None:
-        self._sessions[session.id] = session
-        logger.info(
-            "SSH session opened",
-            session_id=session.id,
-            host=session.host,
-            username=session.username,
-            auth=session.auth,
-        )
+    def detach(self, subscriber: Subscriber) -> None:
+        self.subscribers.discard(subscriber)
 
-    def get(self, session_id: str) -> SSHSession:
-        try:
-            return self._sessions[session_id]
-        except KeyError:
-            raise SSHSessionNotFoundError(f"SSH session '{session_id}' not found") from None
-
-    def resolve(self, session_id: str | None) -> SSHSession:
-        """Сессия по id или текущая, если id не передан."""
-        if session_id is not None:
-            return self.get(session_id)
-        current = self.current
-        if current is None:
-            raise SSHNotConnectedError("SSH session is not open. Call /api/ssh/connect first.")
-        return current
-
-    @property
-    def current(self) -> SSHSession | None:
-        return next(reversed(self._sessions.values()), None)
-
-    def contains(self, session_id: str) -> bool:
-        return session_id in self._sessions
-
-    def remove(self, session_id: str, *, reason: str) -> SSHSession | None:
-        session = self._sessions.pop(session_id, None)
-        if session is not None:
-            logger.info("SSH session closed", session_id=session_id, reason=reason)
-        return session
-
-    def clear(self, *, reason: str) -> list[SSHSession]:
-        sessions, self._sessions = list(self._sessions.values()), {}
-        if sessions:
-            logger.info("SSH sessions closed", count=len(sessions), reason=reason)
-        return sessions
-
-    def __iter__(self) -> Iterator[SSHSession]:
-        return iter(list(self._sessions.values()))
-
-    def __len__(self) -> int:
-        return len(self._sessions)
-
-
-ssh_sessions = SSHSessionRegistry()
+    def mark_closed(self, reason: str) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        self.close_reason = reason
+        subscribers, self.subscribers = list(self.subscribers), set()
+        for subscriber in subscribers:
+            try:
+                subscriber.session_closed(reason)
+            except Exception as e:
+                logger.warning("SSH subscriber failed", session_id=self.id, error=repr(e))

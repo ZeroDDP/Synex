@@ -15,18 +15,20 @@ import asyncio
 import json
 import os
 import sys
+import time
 
 import httpx
 import pytest
+from websockets.asyncio.client import connect
 
 from app.core.app import create_app
 from app.core.config import settings
 from app.core.errors import WorkerCommandError
-from app.plugins.ssh.session import ssh_sessions
 from app.plugins.ssh.wrapper import build_command, new_marker, parse_output
 from app.worker import manager as manager_module
 from app.worker.manager import WorkerManager
 from tests.conftest import unique_pipe_name
+from tests.ssh_helpers import recv_json, send_json, serve
 
 WORKER_COMMAND = os.environ.get("SYNEX_TEST_WORKER")
 EXE = next((p for p in WorkerManager.executable_candidates() if p.is_file()), None)
@@ -205,73 +207,124 @@ async def test_real_worker_raw_exit_codes(ssh_client):
 
 
 @needs_ssh
+async def test_real_extra_connections_run_in_parallel(real_worker):
+    """Сессии в разных IPC-подключениях выполняют команды параллельно. На Windows это
+    заодно проверка, что Named Pipe принимает несколько подключений сразу."""
+    channels = [await real_worker.open_channel() for _ in range(2)]
+    try:
+        assert all(c.transport == real_worker.client.transport for c in channels)
+        for i, channel in enumerate(channels):
+            await channel.request(
+                "ssh_connect", {"connection": ssh_connection()}, timeout=30, request_id=f"p{i}"
+            )
+        started = time.monotonic()
+        results = await asyncio.gather(
+            *[
+                channel.request("ssh_exec", {"command": f"sleep 1; echo {i}"}, request_id=f"p{i}")
+                for i, channel in enumerate(channels)
+            ]
+        )
+        elapsed = time.monotonic() - started
+        assert [r["stdout"].strip() for r in results] == ["0", "1"]
+        assert elapsed < 1.8, f"commands ran one after another ({elapsed:.1f}s)"
+        assert real_worker.status()["channels"] == 2
+    finally:
+        for channel in channels:
+            await channel.disconnect()
+
+
+@needs_ssh
+async def test_real_terminal_websocket(real_worker_settings):
+    """Приложение на uvicorn: сессия через REST, терминал через WebSocket."""
+    app = create_app()
+    async with serve(app) as base:
+        http = base.replace("ws://", "http://")
+        async with httpx.AsyncClient(base_url=http, timeout=60) as api:
+            created = await api.post("/api/ssh/sessions", json=ssh_connection())
+            assert created.status_code == 201, created.text
+            info = created.json()
+            assert info["channel"] == "dedicated", info
+            session_id = info["session_id"]
+
+            url = f"{base}/api/ssh/sessions/{session_id}/ws"
+            async with connect(url) as ws:
+                hello = await recv_json(ws)
+                assert hello["data"]["session"]["session_id"] == session_id
+                await recv_json(ws)  # запись opened
+                await send_json(ws, "exec", {"command": "cd /tmp && pwd", "id": "c1"})
+                command = await recv_json(ws, timeout=30)
+                result = await recv_json(ws, timeout=30)
+                assert command["data"]["kind"] == "command"
+                assert (result["data"]["stdout"], result["data"]["request_id"]) == ("/tmp", "c1")
+
+                closed = await api.delete(f"/api/ssh/sessions/{session_id}")
+                assert closed.status_code == 200, closed.text
+                assert (await recv_json(ws))["data"] == {"reason": "closed"}
+
+
+@needs_ssh
 async def test_real_api(real_worker_settings):
     """Всё приложение целиком: HTTP → плагин ssh → synex_worker → сервер."""
     app = create_app()
-    try:
-        async with app.router.lifespan_context(app):
-            transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(
-                transport=transport, base_url="http://test", timeout=60
-            ) as api:
-                connection = ssh_connection()
-                response = await api.post("/api/ssh/connect", json=connection)
-                assert response.status_code == 201, response.text
-                first = response.json()["session_id"]
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://test", timeout=60
+        ) as api:
+            connection = ssh_connection()
+            response = await api.post("/api/ssh/connect", json=connection)
+            assert response.status_code == 201, response.text
+            first = response.json()["session_id"]
 
-                async def run(command: str, **extra) -> dict:
-                    body = {"command": command, **extra}
-                    reply = await api.post("/api/ssh/exec", json=body)
-                    assert reply.status_code == 200, reply.text
-                    return reply.json()
+            async def run(command: str, **extra) -> dict:
+                body = {"command": command, **extra}
+                reply = await api.post("/api/ssh/exec", json=body)
+                assert reply.status_code == 200, reply.text
+                return reply.json()
 
-                assert (await run("cd /tmp"))["cwd"] == "/tmp"
-                assert (await run("pwd"))["stdout"] == "/tmp"
-                assert (await run("false"))["exit_code"] == 1
+            assert (await run("cd /tmp"))["cwd"] == "/tmp"
+            assert (await run("pwd"))["stdout"] == "/tmp"
+            assert (await run("false"))["exit_code"] == 1
 
-                # Таймаут на сервере: команда прервана, воркер сразу свободен
-                body = await run("echo started; sleep 60", timeout=2)
-                assert body["timed_out"] is True, body
-                assert body["stdout"] == "started"
-                assert body["duration_ms"] < 15_000
-                assert (await run("echo next"))["stdout"] == "next"
+            # Таймаут на сервере: команда прервана, воркер сразу свободен
+            body = await run("echo started; sleep 60", timeout=2)
+            assert body["timed_out"] is True, body
+            assert body["stdout"] == "started"
+            assert body["duration_ms"] < 15_000
+            assert (await run("echo next"))["stdout"] == "next"
 
-                # Вторая сессия к тому же серверу через ключ из хранилища
-                imported = await api.post(
-                    "/api/keys",
-                    json={"name": "test", "private_key_path": os.environ["SYNEX_TEST_SSH_KEY"]},
+            # Вторая сессия к тому же серверу через ключ из хранилища
+            imported = await api.post(
+                "/api/keys",
+                json={"name": "test", "private_key_path": os.environ["SYNEX_TEST_SSH_KEY"]},
+            )
+            assert imported.status_code == 201, imported.text
+            key_id = imported.json()["id"]
+            connection.pop("key_path")
+            by_id = await api.post("/api/ssh/connect", json={**connection, "key_id": key_id})
+            assert by_id.status_code == 201, by_id.text
+            second = by_id.json()["session_id"]
+
+            # У каждой сессии своя cwd
+            assert (await run("pwd", session_id=second))["stdout"] != "/tmp"
+            assert (await run("pwd", session_id=first))["stdout"] == "/tmp"
+
+            closed = await api.post("/api/ssh/disconnect", json={"session_id": second})
+            assert closed.status_code == 200, closed.text
+            gone = await api.post("/api/ssh/exec", json={"command": "pwd", "session_id": second})
+            assert gone.status_code == 404
+            assert (await run("echo still-open"))["session_id"] == first
+
+            password = os.environ.get("SYNEX_TEST_SSH_PASSWORD")
+            if password:
+                by_password = await api.post(
+                    "/api/ssh/connect", json={**connection, "password": password}
                 )
-                assert imported.status_code == 201, imported.text
-                key_id = imported.json()["id"]
-                connection.pop("key_path")
-                by_id = await api.post("/api/ssh/connect", json={**connection, "key_id": key_id})
-                assert by_id.status_code == 201, by_id.text
-                second = by_id.json()["session_id"]
+                assert by_password.status_code == 201, by_password.text
+                assert (await run("whoami"))["stdout"] == connection["username"]
 
-                # У каждой сессии своя cwd
-                assert (await run("pwd", session_id=second))["stdout"] != "/tmp"
-                assert (await run("pwd", session_id=first))["stdout"] == "/tmp"
-
-                closed = await api.post("/api/ssh/disconnect", json={"session_id": second})
-                assert closed.status_code == 200, closed.text
-                gone = await api.post(
-                    "/api/ssh/exec", json={"command": "pwd", "session_id": second}
-                )
-                assert gone.status_code == 404
-                assert (await run("echo still-open"))["session_id"] == first
-
-                password = os.environ.get("SYNEX_TEST_SSH_PASSWORD")
-                if password:
-                    by_password = await api.post(
-                        "/api/ssh/connect", json={**connection, "password": password}
-                    )
-                    assert by_password.status_code == 201, by_password.text
-                    assert (await run("whoami"))["stdout"] == connection["username"]
-
-                wrong = await api.post(
-                    "/api/ssh/connect", json={**connection, "password": "definitely-wrong"}
-                )
-                assert wrong.status_code == 502, wrong.text
-                assert wrong.json()["error"] == "ssh_connect_failed"
-    finally:
-        ssh_sessions.clear(reason="test")
+            wrong = await api.post(
+                "/api/ssh/connect", json={**connection, "password": "definitely-wrong"}
+            )
+            assert wrong.status_code == 502, wrong.text
+            assert wrong.json()["error"] == "ssh_connect_failed"

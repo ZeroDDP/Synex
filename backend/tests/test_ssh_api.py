@@ -7,29 +7,14 @@ from pathlib import Path
 
 import httpx
 import pytest
-from fastapi import FastAPI
 
-from app.api.deps import get_worker_client
-from app.api.router import build_api_router
-from app.core.errors import register_error_handlers
 from app.keystore import get_keystore
-from app.plugins.manager import PluginManager
-from app.plugins.ssh.plugin import on_worker_status
-from app.plugins.ssh.session import SSHSession, ssh_sessions
-from app.worker.client import WorkerClient
-from app.worker.manager import STATUS_CONNECTION_LOST, STATUS_WORKER_EXITED, WORKER_STATUS_EVENT
-from tests.conftest import start_fake_worker, unique_pipe_name
+from tests.conftest import start_fake_worker
 from tests.fake_worker import PASSPHRASE, PASSWORD, FakeWorkerState
+from tests.ssh_helpers import make_api
 
 # Абсолютный на любой ОС путь к несуществующему файлу (на Windows "/x/y" не абсолютный)
 MISSING_FILE = str(Path(__file__).resolve().with_name("definitely-missing") / "id_ed25519")
-
-
-@pytest.fixture(autouse=True)
-def reset_sessions():
-    ssh_sessions.clear(reason="test")
-    yield
-    ssh_sessions.clear(reason="test")
 
 
 @pytest.fixture
@@ -51,32 +36,18 @@ def connect_body(key_file: str) -> dict:
     return {"host": "10.0.0.1", "port": 22, "username": "root", "key_path": key_file}
 
 
-async def make_api(port: int, missing_socket_path: str, request_timeout: float = 5):
-    worker = WorkerClient(
-        pipe_name=unique_pipe_name(),
-        socket_path=missing_socket_path,
-        tcp_port=port,
-        request_timeout=request_timeout,
-    )
-    await worker.connect(timeout=3.0, prefer="tcp")
-
-    app = FastAPI()
-    register_error_handlers(app)
-    api_router = build_api_router()
-    PluginManager().discover(api_router, enabled=["ssh"])
-    app.include_router(api_router)
-    app.dependency_overrides[get_worker_client] = lambda: worker
-
-    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
-    return client, worker
+@pytest.fixture
+async def ssh(fake_worker, missing_socket_path):
+    client, harness = await make_api(fake_worker.port, missing_socket_path)
+    async with client:
+        harness.api = client
+        yield harness
+    await harness.disconnect()
 
 
 @pytest.fixture
-async def api(fake_worker, missing_socket_path):
-    client, worker = await make_api(fake_worker.port, missing_socket_path)
-    async with client:
-        yield client
-    await worker.disconnect()
+def api(ssh) -> httpx.AsyncClient:
+    return ssh.api
 
 
 # ----------------------------------------------------------------- connect
@@ -141,7 +112,7 @@ async def test_connect_with_password(api, fake_worker):
     }
 
 
-async def test_connect_with_passphrase(api, fake_worker, encrypted_key_file):
+async def test_connect_with_passphrase(ssh, api, fake_worker, encrypted_key_file):
     body = {"host": "10.0.0.1", "username": "root", "key_path": encrypted_key_file}
 
     missing = await api.post("/api/ssh/connect", json=body)
@@ -156,7 +127,7 @@ async def test_connect_with_passphrase(api, fake_worker, encrypted_key_file):
     assert ok.status_code == 201, ok.text
     assert ok.json()["auth"] == "key_path"
     assert fake_worker.requests[-1]["payload"]["connection"]["passphrase"] == PASSPHRASE
-    assert len(ssh_sessions) == 1
+    assert len(ssh.manager) == 1
 
 
 @pytest.mark.parametrize(
@@ -221,28 +192,33 @@ async def test_connect_when_worker_is_down(fake_worker, missing_socket_path, con
     assert response.json()["error"] == "worker_unavailable"
 
 
-async def test_connect_timeout_closes_late_session(missing_socket_path, connect_body):
-    """Воркер довёл подключение до конца уже после таймаута: сессия не должна повиснуть."""
+@pytest.mark.parametrize("channels", [True, False], ids=["dedicated", "shared"])
+async def test_connect_timeout_closes_late_session(missing_socket_path, connect_body, channels):
+    """Воркер довёл подключение до конца уже после таймаута: сессия не должна повиснуть.
+
+    Отдельное подключение закрывается целиком (воркер закроет его сессии сам), а в общем
+    подключении уходит ssh_disconnect с тем же id.
+    """
     state = FakeWorkerState(connect_delay=0.5)
     server = await start_fake_worker(state)
-    client, worker = await make_api(state.port, missing_socket_path, request_timeout=0.2)
+    client, harness = await make_api(
+        state.port, missing_socket_path, request_timeout=0.2, channels=channels
+    )
     try:
         async with client:
             response = await client.post("/api/ssh/connect", json=connect_body)
             assert response.status_code == 504
             assert response.json()["error"] == "worker_timeout"
-            assert len(ssh_sessions) == 0
+            assert len(harness.manager) == 0
 
-            for _ in range(50):
-                actions = [r["action"] for r in state.requests]
-                if actions == ["ssh_connect", "ssh_disconnect"] and not state.sessions:
-                    break
-                await asyncio.sleep(0.05)
-            assert [r["action"] for r in state.requests] == ["ssh_connect", "ssh_disconnect"]
-            assert state.requests[0]["id"] == state.requests[1]["id"]
+            expected = ["ssh_connect"] if channels else ["ssh_connect", "ssh_disconnect"]
+            await asyncio.sleep(0.8)
+            assert [r["action"] for r in state.requests] == expected
+            assert len({r["id"] for r in state.requests}) == 1
             assert state.sessions == set()
+            assert harness.provider.open_channels == 0
     finally:
-        await worker.disconnect()
+        await harness.disconnect()
         server.close()
         await server.wait_closed()
 
@@ -316,13 +292,13 @@ async def test_disconnect_without_session_id_closes_current(api, fake_worker, co
     assert (await api.get("/api/ssh/status")).json()["connected"] is False
 
 
-async def test_disconnect_of_session_lost_in_worker(api, fake_worker, connect_body):
+async def test_disconnect_of_session_lost_in_worker(ssh, api, fake_worker, connect_body):
     session_id = (await api.post("/api/ssh/connect", json=connect_body)).json()["session_id"]
     fake_worker.drop_sessions()
     response = await api.post("/api/ssh/disconnect", json={"session_id": session_id})
     assert response.status_code == 200
     assert response.json()["message"] == "The session was already closed in the worker"
-    assert len(ssh_sessions) == 0
+    assert len(ssh.manager) == 0
 
 
 # -------------------------------------------------------------------- exec
@@ -348,7 +324,7 @@ async def test_session_lost_in_worker_resets_state(api, fake_worker, connect_bod
     assert (await api.get("/api/ssh/status")).json()["connected"] is False
 
 
-async def test_no_reply_from_worker_is_504(api, connect_body):
+async def test_no_reply_from_worker_is_504(ssh, api, connect_body):
     await api.post("/api/ssh/connect", json=connect_body)
     response = await api.post(
         "/api/ssh/exec", json={"command": "sleep 1", "timeout": 0.1, "track_cwd": False}
@@ -356,7 +332,7 @@ async def test_no_reply_from_worker_is_504(api, connect_body):
     assert response.status_code == 504
     assert response.json()["error"] == "ssh_exec_timeout"
     assert "may still be running" in response.json()["detail"]
-    assert len(ssh_sessions) == 1  # сессия в воркере жива
+    assert len(ssh.manager) == 1  # сессия в воркере жива
 
 
 async def test_timeout_stops_command_on_server(shell_worker, missing_socket_path, connect_body):
@@ -381,10 +357,12 @@ async def test_timeout_stops_command_on_server(shell_worker, missing_socket_path
     await worker.disconnect()
 
 
-async def test_commands_run_one_at_a_time(shell_worker, missing_socket_path, connect_body):
-    """Воркер выполняет запросы подключения по очереди, даже для разных сессий.
+async def test_shared_connection_runs_commands_one_at_a_time(
+    shell_worker, missing_socket_path, connect_body
+):
+    """Без отдельных подключений воркер выполняет запросы всех сессий по очереди.
     Таймаут команды второй сессии не тикает, пока первая занимает воркер."""
-    client, worker = await make_api(shell_worker.port, missing_socket_path)
+    client, worker = await make_api(shell_worker.port, missing_socket_path, channels=False)
     try:
         async with client:
             first = (await client.post("/api/ssh/connect", json=connect_body)).json()
@@ -420,6 +398,7 @@ async def test_cwd_persists_between_commands(shell_worker, missing_socket_path, 
         first = (await client.post("/api/ssh/exec", json={"command": "pwd"})).json()
         assert first["duration_ms"] >= 0
         first.pop("duration_ms")
+        assert first.pop("seq") == 3  # opened, command, result
         assert first == {
             "session_id": session_id,
             "stdout": home,
@@ -529,17 +508,3 @@ async def test_connect_with_stored_key_failure_cleans_up(api):
     assert response.status_code == 502
     assert list(keystore.runtime_dir.iterdir()) == []
     assert missing.status_code == 404 and missing.json()["error"] == "key_not_found"
-
-
-# ------------------------------------------------------------------ events
-
-
-@pytest.mark.parametrize("status", [STATUS_CONNECTION_LOST, STATUS_WORKER_EXITED])
-async def test_lost_worker_connection_clears_sessions(status):
-    """Сессии принадлежат IPC-подключению: воркер закрывает их при его обрыве."""
-    ssh_sessions.add(SSHSession(id="a", host="h", port=22, username="u", auth="password"))
-    ssh_sessions.add(SSHSession(id="b", host="h", port=22, username="u", auth="password"))
-    await on_worker_status({"event_type": WORKER_STATUS_EVENT, "payload": {"status": "connected"}})
-    assert len(ssh_sessions) == 2
-    await on_worker_status({"event_type": WORKER_STATUS_EVENT, "payload": {"status": status}})
-    assert len(ssh_sessions) == 0

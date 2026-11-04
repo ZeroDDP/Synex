@@ -3,47 +3,227 @@ from __future__ import annotations
 from typing import Annotated
 
 import structlog
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Path, Query, WebSocket
+from pydantic import SecretStr
 
-from app.api.deps import Keys, Worker
-from app.plugins.ssh import service
+from app.api.deps import Keys
+from app.plugins.ssh.manager import ConnectParams, ExecResult, SSHSessionManager, ssh_manager
 from app.plugins.ssh.schemas import (
     SESSION_ID_PATTERN,
+    SSHCommandRequest,
     SSHConnectRequest,
     SSHConnectResponse,
     SSHDisconnectRequest,
     SSHDisconnectResponse,
     SSHExecRequest,
     SSHExecResponse,
+    SSHOutputResponse,
+    SSHSessionInfo,
     SSHStatusResponse,
 )
-from app.plugins.ssh.session import ssh_sessions
+from app.plugins.ssh.session import SSHSession
+from app.plugins.ssh.ws import serve_session_socket
 
 logger = structlog.get_logger()
 
 router = APIRouter()
 
 
+def get_ssh_manager() -> SSHSessionManager:
+    return ssh_manager
+
+
+Manager = Annotated[SSHSessionManager, Depends(get_ssh_manager)]
+SessionId = Annotated[str, Path(pattern=SESSION_ID_PATTERN)]
+
+CONNECT_ERRORS = {
+    404: {"description": "Ключа key_id нет в хранилище"},
+    422: {"description": "Неверные параметры (например, нет файла ключа)"},
+    429: {"description": "Открыто слишком много сессий (SSH_MAX_SESSIONS)"},
+    502: {"description": "Воркер не смог подключиться: хост недоступен, ключ или пароль"},
+    503: {"description": "Воркер не запущен или IPC недоступен"},
+    504: {"description": "Воркер не ответил вовремя"},
+}
+EXEC_ERRORS = {
+    404: {"description": "Сессии session_id нет"},
+    409: {"description": "Нет открытой сессии, или воркер её уже не знает"},
+    502: {"description": "Ошибка воркера"},
+    503: {"description": "Воркер не запущен или IPC недоступен"},
+    504: {"description": "Воркер не вернул результат даже после лимита команды"},
+}
+NOT_FOUND = {404: {"description": "Сессии session_id нет"}}
+
+
+# ------------------------------------------------------------ /sessions
+
+
+@router.get("/sessions", response_model=list[SSHSessionInfo], summary="Открытые SSH-сессии")
+async def list_sessions(manager: Manager) -> list[SSHSessionInfo]:
+    return [_info(session) for session in manager.sessions()]
+
+
+@router.post(
+    "/sessions",
+    response_model=SSHSessionInfo,
+    status_code=201,
+    summary="Открыть SSH-сессию",
+    responses=CONNECT_ERRORS,
+)
+async def create_session(
+    request: SSHConnectRequest, manager: Manager, keys: Keys
+) -> SSHSessionInfo:
+    """Способ входа ровно один: `key_id` (ключ из хранилища), `key_path` (файл ключа, при
+    необходимости с `passphrase`) или `password`. Уже открытые сессии продолжают работать.
+    """
+    return _info(await _open(request, manager, keys))
+
+
+@router.get(
+    "/sessions/{session_id}",
+    response_model=SSHSessionInfo,
+    summary="Одна SSH-сессия",
+    responses=NOT_FOUND,
+)
+async def get_session(session_id: SessionId, manager: Manager) -> SSHSessionInfo:
+    return _info(manager.get(session_id))
+
+
+@router.delete(
+    "/sessions/{session_id}",
+    response_model=SSHDisconnectResponse,
+    summary="Закрыть SSH-сессию",
+    responses=NOT_FOUND,
+)
+async def delete_session(session_id: SessionId, manager: Manager) -> SSHDisconnectResponse:
+    """Подключённые WebSocket получают `closed` и закрываются. Если в сессии ещё
+    выполняется команда, она прерывается вместе с сессией."""
+    session, message = await manager.close(session_id)
+    return SSHDisconnectResponse(session_id=session.id, message=message)
+
+
+@router.post(
+    "/sessions/{session_id}/exec",
+    response_model=SSHExecResponse,
+    summary="Выполнить команду в сессии",
+    responses=EXEC_ERRORS,
+)
+async def exec_in_session(
+    session_id: SessionId, request: SSHCommandRequest, manager: Manager
+) -> SSHExecResponse:
+    """Команды одной сессии выполняются по очереди; результат попадает и в ответ,
+    и в буфер вывода сессии (его видят подключённые WebSocket)."""
+    return _exec_response(await _execute(manager, session_id, request))
+
+
+@router.get(
+    "/sessions/{session_id}/output",
+    response_model=SSHOutputResponse,
+    summary="Буфер вывода сессии",
+    responses=NOT_FOUND,
+)
+async def session_output(
+    session_id: SessionId,
+    manager: Manager,
+    since: Annotated[int, Query(ge=0, description="Вернуть записи с seq больше этого")] = 0,
+    limit: Annotated[int | None, Query(ge=1, le=10_000)] = None,
+) -> SSHOutputResponse:
+    session = manager.get(session_id)
+    replay = session.buffer.since(since, limit)
+    return SSHOutputResponse(
+        session_id=session.id,
+        entries=[entry.as_dict() for entry in replay.entries],
+        gap=replay.gap,
+        first_seq=replay.first_seq,
+        last_seq=replay.last_seq,
+    )
+
+
+@router.websocket("/sessions/{session_id}/ws")
+async def session_websocket(
+    websocket: WebSocket,
+    session_id: str,
+    manager: Manager,
+    since: Annotated[int, Query(ge=0)] = 0,
+) -> None:
+    """Терминал сессии: живой вывод, команды из UI. Протокол в app/plugins/ssh/ws.py."""
+    await serve_session_socket(websocket, manager, session_id, since)
+
+
+# ----------------------------------------- одна «текущая» сессия (этап 1)
+
+
 @router.post(
     "/connect",
     response_model=SSHConnectResponse,
     status_code=201,
-    summary="Открыть SSH-сессию через synex_worker",
-    responses={
-        404: {"description": "Ключа key_id нет в хранилище"},
-        422: {"description": "Неверные параметры (например, нет файла ключа)"},
-        502: {"description": "Воркер не смог подключиться: хост недоступен, ключ не подошёл"},
-        503: {"description": "Воркер не запущен или IPC недоступен"},
-        504: {"description": "Воркер не ответил вовремя"},
-    },
+    summary="Открыть SSH-сессию (то же, что POST /sessions)",
+    responses=CONNECT_ERRORS,
 )
-async def connect(request: SSHConnectRequest, worker: Worker, keys: Keys) -> SSHConnectResponse:
-    """Каждый вызов открывает новую сессию, уже открытые продолжают работать.
+async def connect(request: SSHConnectRequest, manager: Manager, keys: Keys) -> SSHConnectResponse:
+    session = await _open(request, manager, keys)
+    return SSHConnectResponse(
+        session_id=session.id,
+        message="Connected successfully",
+        host=session.host,
+        port=session.port,
+        username=session.username,
+        auth=session.auth,
+        key_id=session.key_id,
+    )
 
-    Способ входа ровно один: `key_id` (ключ из хранилища), `key_path` (файл ключа, при
-    необходимости с `passphrase`) или `password`.
+
+@router.post(
+    "/exec",
+    response_model=SSHExecResponse,
+    summary="Выполнить команду (без session_id в последней открытой сессии)",
+    responses=EXEC_ERRORS,
+)
+async def exec_command(request: SSHExecRequest, manager: Manager) -> SSHExecResponse:
+    """Лимит `timeout` применяется на сервере (coreutils `timeout`): команда получает TERM,
+    через 3 секунды KILL, а ответ приходит с `timed_out=true`, кодом 124/137 и тем
+    выводом, что успел накопиться. 504 значит, что воркер не ответил вовсе.
     """
-    params = service.ConnectParams(
+    return _exec_response(await _execute(manager, request.session_id, request))
+
+
+@router.post(
+    "/disconnect",
+    response_model=SSHDisconnectResponse,
+    summary="Закрыть SSH-сессию (без session_id последнюю открытую)",
+    responses={**NOT_FOUND, 409: {"description": "Нет открытой сессии"}},
+)
+async def disconnect(
+    manager: Manager, request: SSHDisconnectRequest | None = None
+) -> SSHDisconnectResponse:
+    session_id = request.session_id if request is not None else None
+    session, message = await manager.close(session_id)
+    return SSHDisconnectResponse(session_id=session.id, message=message)
+
+
+@router.get(
+    "/status",
+    response_model=SSHStatusResponse,
+    summary="Состояние SSH-сессии",
+    responses=NOT_FOUND,
+)
+async def status(
+    manager: Manager,
+    session_id: Annotated[str | None, Query(pattern=SESSION_ID_PATTERN)] = None,
+) -> SSHStatusResponse:
+    """Без session_id показывает текущую (последнюю открытую) сессию."""
+    session = manager.get(session_id) if session_id else manager.current
+    if session is None:
+        return SSHStatusResponse(connected=False)
+    info = session.info()
+    fields = {name: info[name] for name in SSHStatusResponse.model_fields if name in info}
+    return SSHStatusResponse(connected=True, sessions=len(manager), **fields)
+
+
+# --------------------------------------------------------------- helpers
+
+
+async def _open(request: SSHConnectRequest, manager: SSHSessionManager, keys: Keys) -> SSHSession:
+    params = ConnectParams(
         host=request.host,
         port=request.port,
         username=request.username,
@@ -60,46 +240,21 @@ async def connect(request: SSHConnectRequest, worker: Worker, keys: Keys) -> SSH
         auth=params.auth,
         key_id=params.key_id,
     )
-    session = await service.connect(worker, keys, params)
-    return SSHConnectResponse(
-        session_id=session.id,
-        message="Connected successfully",
-        host=session.host,
-        port=session.port,
-        username=session.username,
-        auth=session.auth,
-        key_id=session.key_id,
+    return await manager.open(params, keys)
+
+
+async def _execute(
+    manager: SSHSessionManager, session_id: str | None, request: SSHCommandRequest
+) -> ExecResult:
+    return await manager.execute(
+        session_id, request.command, timeout=request.timeout, track_cwd=request.track_cwd
     )
 
 
-@router.post(
-    "/exec",
-    response_model=SSHExecResponse,
-    summary="Выполнить команду в открытой SSH-сессии",
-    responses={
-        404: {"description": "Сессии session_id нет"},
-        409: {"description": "Нет открытой сессии, или воркер её уже не знает"},
-        502: {"description": "Ошибка воркера"},
-        503: {"description": "Воркер не запущен или IPC недоступен"},
-        504: {"description": "Воркер не вернул результат даже после лимита команды"},
-    },
-)
-async def exec_command(request: SSHExecRequest, worker: Worker) -> SSHExecResponse:
-    """Команды выполняются по одной: следующая ждёт, пока закончится предыдущая.
-
-    Лимит `timeout` применяется на сервере (coreutils `timeout`): команда получает TERM,
-    через 3 секунды KILL, а ответ приходит с `timed_out=true`, кодом 124/137 и тем
-    выводом, что успел накопиться. 504 значит, что воркер не ответил вовсе.
-    """
-    result = await service.execute(
-        worker,
-        request.session_id,
-        request.command,
-        timeout=request.timeout,
-        track_cwd=request.track_cwd,
-    )
+def _exec_response(result: ExecResult) -> SSHExecResponse:
     return SSHExecResponse(
         session_id=result.session_id,
+        seq=result.seq,
         stdout=result.stdout,
         stderr=result.stderr,
         exit_code=result.exit_code,
@@ -109,38 +264,9 @@ async def exec_command(request: SSHExecRequest, worker: Worker) -> SSHExecRespon
     )
 
 
-@router.post(
-    "/disconnect",
-    response_model=SSHDisconnectResponse,
-    summary="Закрыть SSH-сессию",
-    responses={
-        404: {"description": "Сессии session_id нет"},
-        409: {"description": "Нет открытой сессии"},
-    },
-)
-async def disconnect(
-    worker: Worker, request: SSHDisconnectRequest | None = None
-) -> SSHDisconnectResponse:
-    session_id = request.session_id if request is not None else None
-    session, message = await service.disconnect(worker, session_id)
-    return SSHDisconnectResponse(session_id=session.id, message=message)
+def _info(session: SSHSession) -> SSHSessionInfo:
+    return SSHSessionInfo(**session.info())
 
 
-@router.get(
-    "/status",
-    response_model=SSHStatusResponse,
-    summary="Состояние SSH-сессии",
-    responses={404: {"description": "Сессии session_id нет"}},
-)
-async def status(
-    session_id: Annotated[str | None, Query(pattern=SESSION_ID_PATTERN)] = None,
-) -> SSHStatusResponse:
-    """Без session_id показывает текущую (последнюю открытую) сессию."""
-    session = ssh_sessions.get(session_id) if session_id else ssh_sessions.current
-    if session is None:
-        return SSHStatusResponse(connected=False)
-    return SSHStatusResponse(connected=True, sessions=len(ssh_sessions), **session.snapshot())
-
-
-def _secret(value) -> str | None:
+def _secret(value: SecretStr | None) -> str | None:
     return value.get_secret_value() if value is not None else None

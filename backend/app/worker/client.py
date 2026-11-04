@@ -241,6 +241,10 @@ class WorkerClient:
         """listener(reason) вызывается при НЕожиданном обрыве (не при disconnect())."""
         self._disconnect_listeners.append(listener)
 
+    def remove_disconnect_listener(self, listener: DisconnectListener) -> None:
+        with contextlib.suppress(ValueError):
+            self._disconnect_listeners.remove(listener)
+
     # ------------------------------------------------------------------ request
 
     async def request(

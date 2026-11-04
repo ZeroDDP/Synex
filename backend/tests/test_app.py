@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from app.core.app import create_app
-from app.plugins.ssh.session import ssh_sessions
+from app.plugins.ssh.manager import ssh_manager
 from app.worker import worker_manager
 from tests.conftest import FAKE_WORKER_SCRIPT
 
@@ -24,7 +24,7 @@ async def api(monkeypatch, worker_settings):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             yield client
-    ssh_sessions.clear(reason="test")
+    await ssh_manager.close_all(reason="test")
 
 
 async def test_only_ssh_api_is_exposed():
@@ -35,6 +35,10 @@ async def test_only_ssh_api_is_exposed():
         "/api/ssh/exec",
         "/api/ssh/disconnect",
         "/api/ssh/status",
+        "/api/ssh/sessions",
+        "/api/ssh/sessions/{session_id}",
+        "/api/ssh/sessions/{session_id}/exec",
+        "/api/ssh/sessions/{session_id}/output",
         "/api/keys",
         "/api/keys/generate",
         "/api/keys/{key_id}",
@@ -91,3 +95,18 @@ async def test_worker_is_stopped_after_shutdown(monkeypatch, worker_settings):
         assert process is not None and process.poll() is None
     assert process.poll() is not None
     assert worker_manager.client is None
+
+
+async def test_each_session_gets_its_own_worker_connection(api, tmp_path: Path):
+    """Весь путь: менеджер сессий берёт отдельное подключение у WorkerManager."""
+    key = tmp_path / "id_ed25519"
+    key.write_text("key")
+    body = {"host": "10.0.0.1", "username": "root", "key_path": str(key)}
+
+    first = (await api.post("/api/ssh/sessions", json=body)).json()
+    second = (await api.post("/api/ssh/sessions", json=body)).json()
+    assert first["channel"] == second["channel"] == "dedicated"
+    assert (await api.get("/api/health")).json()["worker"]["channels"] == 2
+
+    await api.delete(f"/api/ssh/sessions/{first['session_id']}")
+    assert (await api.get("/api/health")).json()["worker"]["channels"] == 1

@@ -271,6 +271,8 @@ class FakeWorkerProtocol(asyncio.Protocol):
         if error is not None:
             self.send(reply(msg_id, "error", stderr=error, exit_code=1))
             return
+        if self.transport is None or self.transport.is_closing():
+            return  # подключение уже закрыто: воркер закрыл и его сессии
         self.sessions[msg_id] = dict(connection)
         self.send(reply(msg_id, "ok", stdout=f"Connected successfully, id: {msg_id}"))
 

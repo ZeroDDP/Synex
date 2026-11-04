@@ -94,9 +94,34 @@ class SSHConnectResponse(BaseModel):
     key_id: str | None = None
 
 
-class SSHExecRequest(BaseModel):
+AuthMethodName = Literal["key_id", "key_path", "password"]
+
+
+class SSHSessionInfo(BaseModel):
+    session_id: str
+    host: str
+    port: int
+    username: str
+    auth: AuthMethodName
+    key_id: str | None = None
+    cwd: str | None = Field(default=None, description="Текущая директория (None = домашняя)")
+    created_at: datetime
+    last_activity_at: datetime
+    busy: bool = Field(..., description="Сейчас выполняется команда")
+    waiting: int = Field(..., description="Сколько команд ждут своей очереди")
+    attached: int = Field(..., description="Сколько WebSocket-подключений смотрят сессию")
+    last_seq: int = Field(..., description="Номер последней записи в буфере вывода")
+    channel: Literal["dedicated", "shared"] = Field(
+        ...,
+        description=(
+            "dedicated: своё подключение к воркеру, команды идут параллельно с другими "
+            "сессиями; shared: общее подключение, команды всех сессий по очереди"
+        ),
+    )
+
+
+class SSHCommandRequest(BaseModel):
     command: str = Field(..., min_length=1, max_length=4096, description="Команда для выполнения")
-    session_id: str | None = session_id_field()
     timeout: float | None = Field(
         default=None,
         gt=0,
@@ -115,8 +140,13 @@ class SSHExecRequest(BaseModel):
     )
 
 
+class SSHExecRequest(SSHCommandRequest):
+    session_id: str | None = session_id_field()
+
+
 class SSHExecResponse(BaseModel):
     session_id: str
+    seq: int = Field(..., description="Номер записи с этим результатом в буфере вывода")
     stdout: str = Field(default="", description="Стандартный вывод команды")
     stderr: str = Field(default="", description="Стандартный вывод ошибок")
     exit_code: int = Field(..., description="Код возврата (0 = успех; 124/137 при таймауте)")
@@ -146,3 +176,24 @@ class SSHStatusResponse(BaseModel):
     cwd: str | None = None
     created_at: datetime | None = None
     sessions: int = Field(default=0, description="Сколько сессий открыто всего")
+
+
+class SSHOutputEntry(BaseModel):
+    """Запись буфера вывода. Поля, кроме seq/ts/kind, зависят от kind:
+    opened {host, port, username}; command {command, cwd, source, request_id?};
+    result {stdout, stderr, exit_code, cwd, timed_out, duration_ms, request_id?,
+    truncated?}; error {error, detail, request_id?}."""
+
+    model_config = {"extra": "allow"}
+
+    seq: int
+    ts: int = Field(..., description="Unix, мс")
+    kind: Literal["opened", "command", "result", "error"]
+
+
+class SSHOutputResponse(BaseModel):
+    session_id: str
+    entries: list[SSHOutputEntry]
+    gap: bool = Field(..., description="Часть записей после since уже вытеснена из буфера")
+    first_seq: int = Field(..., description="Самая старая запись в буфере")
+    last_seq: int = Field(..., description="Последняя запись в буфере")

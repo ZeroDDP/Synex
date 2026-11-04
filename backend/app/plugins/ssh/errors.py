@@ -27,3 +27,8 @@ class SSHExecTimeoutError(AppError):
 
     code = "ssh_exec_timeout"
     status_code = 504
+
+
+class SSHTooManySessionsError(AppError):
+    code = "ssh_too_many_sessions"
+    status_code = 429
