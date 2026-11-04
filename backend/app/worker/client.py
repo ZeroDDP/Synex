@@ -368,6 +368,10 @@ class WorkerClient:
                 self._dispatch(body)
         except asyncio.IncompleteReadError:
             pass
+        except ConnectionError as e:
+            # Воркер завершился или упал: на Unix socket и pipe это часто RST, а не EOF.
+            # Это не ошибка клиента: выход воркера логирует и обрабатывает менеджер.
+            reason = f"connection reset by worker ({type(e).__name__})"
         except asyncio.CancelledError:
             reason = "reader cancelled"
             raise
