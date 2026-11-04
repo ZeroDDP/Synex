@@ -268,7 +268,7 @@ async def test_real_monitoring(real_worker_settings):
     app = create_app()
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as api:
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as api:
             ids = []
             for _ in range(2):
                 created = await api.post("/api/ssh/sessions", json=ssh_connection())
@@ -299,7 +299,7 @@ async def test_real_api(real_worker_settings):
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(
-            transport=transport, base_url="http://test", timeout=60
+            transport=transport, base_url="http://127.0.0.1", timeout=60
         ) as api:
             connection = ssh_connection()
             response = await api.post("/api/ssh/connect", json=connection)

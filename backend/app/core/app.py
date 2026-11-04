@@ -12,6 +12,12 @@ from app.api.router import build_api_router
 from app.core.config import settings
 from app.core.errors import register_error_handlers
 from app.core.logging import setup_logging
+from app.core.security import (
+    LocalAccessMiddleware,
+    allowed_hosts,
+    allowed_origins,
+    warn_if_exposed,
+)
 from app.plugins.manager import PluginManager
 from app.worker import worker_manager
 from app.ws import METRICS_EVENT, FakeMetricsPublisher, ws_hub
@@ -24,6 +30,7 @@ logger = structlog.get_logger()
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     plugins: PluginManager = app.state.plugins
     logger.info("Starting up", app=settings.APP_NAME, version=__version__)
+    warn_if_exposed(settings)
 
     await worker_manager.start()
     # До плагинов: событие, опубликованное в on_load, уже дойдёт до UI
@@ -65,13 +72,16 @@ def create_app() -> FastAPI:
         redoc_url=None,
         openapi_url="/api/openapi.json" if settings.DEBUG else None,
     )
-    # UI (будущая папка frontend) ходит в API с другого origin
+    # UI (будущая папка frontend) может ходить в API с другого origin: только из
+    # ALLOWED_ORIGINS. Чужие Origin и Host отсекает LocalAccessMiddleware (он снаружи).
+    origins = allowed_origins(settings)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=origins,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    app.add_middleware(LocalAccessMiddleware, origins=origins, hosts=allowed_hosts(settings))
     register_error_handlers(app)
 
     api_router = build_api_router()

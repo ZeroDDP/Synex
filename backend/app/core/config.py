@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     HOST: str = "127.0.0.1"
     PORT: int = 8000
+    # Веб-страницы (Origin), которым можно обращаться к API и WebSocket, через запятую,
+    # например http://localhost:5173 для dev-сервера UI. Сам backend разрешён всегда,
+    # запросы без Origin (curl, PowerShell, приложение) тоже. См. app/core/security.py.
+    ALLOWED_ORIGINS: str = ""
+    # Дополнительные имена в заголовке Host (127.0.0.1, localhost и HOST разрешены).
+    ALLOWED_HOSTS: str = ""
 
     # Rust-воркер (имена переменных совпадают с CoreDocs, раздел 3)
     RUST_IPC_SOCKET_PATH: str = "/tmp/synex_worker.sock"
