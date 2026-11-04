@@ -1,0 +1,123 @@
+"""Метрики одного сервера: замеры за окно, статус, сводка для UI.
+
+Сервер это host:port. Метрики машины не зависят от сессии, поэтому сколько бы сессий
+ни было открыто к серверу, он опрашивается один раз за период, через любую свободную.
+"""
+
+from __future__ import annotations
+
+import time
+from collections import deque
+from dataclasses import dataclass
+
+from app.plugins.monitor.values import Values
+from app.ws.metrics import CpuMetrics, MemoryMetrics, ServerMetrics, ServerStatus, percent_stats
+
+
+@dataclass(frozen=True)
+class Sample:
+    at: float  # time.monotonic()
+    wall_ms: int  # Unix, мс
+    cpu: float | None  # None: первый замер в сессии, CPU в нём от загрузки сервера
+    values: Values
+
+
+def server_key(host: str, port: int) -> str:
+    return f"{host.lower()}:{port}"
+
+
+class ServerState:
+    def __init__(self, host: str, port: int, window: float) -> None:
+        self.host = host
+        self.port = port
+        self.window = window
+        self.samples: deque[Sample] = deque()
+        self.last: Sample | None = None
+        self.error: str | None = None
+        self.busy = False
+        self.polling = False  # опрос уже идёт: следующий не запускается
+        self.preferred_session: str | None = None  # опрашиваем через неё, пока свободна
+        self.primed: set[str] = set()  # сессии, где у воркера уже есть прошлый замер CPU
+
+    @property
+    def key(self) -> str:
+        return server_key(self.host, self.port)
+
+    def record(self, sample: Sample) -> None:
+        self.samples.append(sample)
+        self.last = sample
+        self.error = None
+        self.busy = False
+        self._trim(sample.at)
+
+    def record_error(self, message: str) -> None:
+        self.error = message
+
+    def record_busy(self) -> None:
+        self.busy = True
+
+    def forget_session(self, session_id: str) -> None:
+        self.primed.discard(session_id)
+        if self.preferred_session == session_id:
+            self.preferred_session = None
+
+    def metrics(
+        self,
+        session_ids: list[str],
+        stale_after: float,
+        now: float | None = None,
+        now_ms: int | None = None,
+    ) -> ServerMetrics:
+        now = time.monotonic() if now is None else now
+        now_ms = time.time_ns() // 1_000_000 if now_ms is None else now_ms
+        self._trim(now)
+        last = self.last
+        base = {
+            "server": self.key,
+            "host": self.host,
+            "port": self.port,
+            "session_ids": session_ids,
+            "busy": self.busy,
+            "error": self.error,
+        }
+        if last is None:
+            return ServerMetrics(**base, status="error" if self.error else "waiting")
+
+        cpu_values = [s.cpu for s in self.samples if s.cpu is not None]
+        cpu_avg, cpu_min, cpu_max = percent_stats(cpu_values)
+        mem_avg, mem_min, mem_max = percent_stats([s.values.mem_percent for s in self.samples])
+        last_cpu = next((s.cpu for s in reversed(self.samples) if s.cpu is not None), None)
+        age_ms = max(0, round((now - last.at) * 1000))
+
+        status: ServerStatus
+        if self.error:
+            status = "error"
+        elif age_ms > stale_after * 1000:
+            status = "stale"
+        elif last_cpu is None:
+            status = "warming_up"
+        else:
+            status = "ok"
+
+        values = last.values
+        return ServerMetrics(
+            **base,
+            status=status,
+            updated_at=last.wall_ms,
+            age_ms=age_ms,
+            cpu=CpuMetrics(percent=last_cpu, avg=cpu_avg, min=cpu_min, max=cpu_max),
+            memory=MemoryMetrics(
+                total=values.mem_total,
+                used=values.mem_used,
+                available=values.mem_available,
+                percent=values.mem_percent,
+                avg=mem_avg,
+                min=mem_min,
+                max=mem_max,
+            ),
+        )
+
+    def _trim(self, now: float) -> None:
+        # Последний замер остаётся всегда: по нему видны значения устаревших метрик
+        while len(self.samples) > 1 and now - self.samples[0].at > self.window:
+            self.samples.popleft()

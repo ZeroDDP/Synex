@@ -5,13 +5,13 @@ hub.py: соединения, протокол и рассылка; metrics.py: 
 """
 
 from app.ws.hub import WebSocketHub, ws_hub
-from app.ws.metrics import METRICS_EVENT, FakeMetricsPublisher, Metrics
+from app.ws.metrics import METRICS_EVENT, FakeMetricsPublisher, MetricsSnapshot
 from app.ws.routes import router
 
 __all__ = [
     "METRICS_EVENT",
     "FakeMetricsPublisher",
-    "Metrics",
+    "MetricsSnapshot",
     "WebSocketHub",
     "router",
     "ws_hub",

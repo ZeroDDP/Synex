@@ -57,11 +57,25 @@ class Settings(BaseSettings):
     KEYSTORE_MASTER_KEY: SecretStr | None = None
 
     # Плагины через запятую.
-    PLUGINS_ENABLED: str = "ssh,keys"
+    PLUGINS_ENABLED: str = "ssh,keys,monitor"
 
-    # WebSocket /ws (поток данных для UI). Тестовые метрики: включены, пока нет
-    # настоящего мониторинга; период публикации, сек.
-    WS_FAKE_METRICS: bool = True
+    # Мониторинг серверов (плагин monitor). Как часто опрашивать сервер и как часто
+    # отправлять метрики в /ws, сек.
+    MONITOR_POLL_INTERVAL: float = Field(default=0.5, gt=0)
+    MONITOR_PUBLISH_INTERVAL: float = Field(default=0.5, gt=0)
+    # Окно, за которое считаются avg/min/max, сек.
+    MONITOR_WINDOW: float = Field(default=30.0, gt=0)
+    # Через сколько секунд без свежего замера метрики сервера считаются устаревшими.
+    MONITOR_STALE_AFTER: float = Field(default=3.0, gt=0)
+    # Сколько ждать ответа воркера на один опрос, сек.
+    MONITOR_POLL_TIMEOUT: float = Field(default=5.0, gt=0)
+    # Серверы опрашиваются, пока к /ws подключён UI или столько секунд после
+    # последнего GET /api/monitor/metrics.
+    MONITOR_DEMAND_TIMEOUT: float = Field(default=10.0, gt=0)
+
+    # WebSocket /ws (поток данных для UI). Тестовые метрики вместо настоящих: для
+    # разработки UI без SSH-сервера; период публикации, сек.
+    WS_FAKE_METRICS: bool = False
     WS_FAKE_METRICS_INTERVAL: float = Field(default=0.5, gt=0)
 
     @property

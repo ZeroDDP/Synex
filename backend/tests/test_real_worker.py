@@ -263,6 +263,36 @@ async def test_real_terminal_websocket(real_worker_settings):
 
 
 @needs_ssh
+async def test_real_monitoring(real_worker_settings):
+    """Плагин monitor опрашивает настоящий воркер: сервер один, сколько бы сессий ни было."""
+    app = create_app()
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as api:
+            ids = []
+            for _ in range(2):
+                created = await api.post("/api/ssh/sessions", json=ssh_connection())
+                assert created.status_code == 201, created.text
+                ids.append(created.json()["session_id"])
+
+            async with asyncio.timeout(15):
+                while True:
+                    snapshot = (await api.get("/api/monitor/metrics")).json()
+                    (server,) = snapshot["servers"]
+                    if server["status"] == "ok":
+                        break
+                    assert server["status"] in ("waiting", "warming_up"), server
+                    await asyncio.sleep(0.2)
+
+            assert sorted(server["session_ids"]) == sorted(ids)
+            assert 0 <= server["cpu"]["percent"] <= 100
+            memory = server["memory"]
+            assert 0 < memory["used"] < memory["total"]
+            assert 0 < memory["percent"] < 100
+            assert server["age_ms"] < 3_000
+
+
+@needs_ssh
 async def test_real_api(real_worker_settings):
     """Всё приложение целиком: HTTP → плагин ssh → synex_worker → сервер."""
     app = create_app()

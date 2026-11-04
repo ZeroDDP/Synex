@@ -29,6 +29,14 @@ def unique_pipe_name() -> str:
 
 
 @pytest.fixture(autouse=True)
+def default_app_settings(monkeypatch):
+    """Тесты не зависят от backend/.env разработчика: набор плагинов и источник метрик
+    всегда как по умолчанию (тест может переопределить)."""
+    monkeypatch.setattr(settings, "PLUGINS_ENABLED", "ssh,keys,monitor")
+    monkeypatch.setattr(settings, "WS_FAKE_METRICS", False)
+
+
+@pytest.fixture(autouse=True)
 def isolated_keystore(monkeypatch, tmp_path: Path) -> Path:
     """Тесты никогда не трогают настоящее хранилище ключей и системный keychain."""
     path = tmp_path / "keystore" / "keys.json"

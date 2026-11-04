@@ -19,7 +19,7 @@ from app.core.app import create_app
 from app.core.config import Settings, settings
 from app.core.event_bus import event_bus
 from app.worker import worker_manager
-from app.ws import METRICS_EVENT, Metrics, ws_hub
+from app.ws import METRICS_EVENT, MetricsSnapshot, ws_hub
 from app.ws.hub import WebSocketClient, WebSocketHub
 from app.ws.metrics import FakeMetricsPublisher, FakeMetricsSource
 from tests.conftest import FAKE_WORKER_SCRIPT, get_free_port
@@ -92,28 +92,24 @@ async def wait_for_no_clients(timeout: float = 5.0) -> None:
 def test_fake_metrics_are_plausible():
     source = FakeMetricsSource(seed=1)
     for _ in range(500):
-        m = source.sample()
-        assert m.source == "fake"
-        assert len(m.cpu.per_core) == FakeMetricsSource.CORES
-        assert all(0 <= core <= 100 for core in m.cpu.per_core)
-        assert m.cpu.percent == pytest.approx(sum(m.cpu.per_core) / len(m.cpu.per_core), abs=0.1)
-        assert 0 < m.memory.used < m.memory.total
-        assert m.memory.percent == pytest.approx(m.memory.used / m.memory.total * 100, abs=0.1)
-        (gpu,) = m.gpus
-        assert 0 <= gpu.percent <= 100
-        assert 0 < gpu.memory_used < gpu.memory_total
-        assert 30 <= gpu.temperature <= 90
-        assert [d.mount for d in m.disks] == ["/", "/data"]
-        for disk in m.disks:
-            assert 0 < disk.used < disk.total
-            assert disk.read_bytes_per_sec >= 0 and disk.write_bytes_per_sec >= 0
+        snapshot = source.sample()
+        assert snapshot.source == "fake" and snapshot.interval_ms == 500
+        (server,) = snapshot.servers
+        assert server.status == "ok" and server.server == "demo.synex.local:22"
+        cpu, memory = server.cpu, server.memory
+        assert 0 <= cpu.min <= cpu.percent <= cpu.max <= 100
+        assert cpu.min <= cpu.avg <= cpu.max
+        assert 0 < memory.used < memory.total
+        assert memory.used + memory.available == memory.total
+        assert memory.percent == pytest.approx(memory.used / memory.total * 100, abs=0.1)
+        assert memory.min <= memory.percent <= memory.max
 
 
 def test_fake_metrics_change_smoothly():
     source = FakeMetricsSource(seed=2)
-    samples = [source.sample() for _ in range(200)]
-    memory = [s.memory.percent for s in samples]
-    cpu = [s.cpu.per_core[0] for s in samples]
+    servers = [source.sample().servers[0] for _ in range(200)]
+    memory = [s.memory.percent for s in servers]
+    cpu = [s.cpu.percent for s in servers]
     # Значения живые...
     assert len(set(memory)) > 50 and len(set(cpu)) > 50
     # ...но без скачков: шаг ограничен (шум + притяжение к центру)
@@ -122,13 +118,18 @@ def test_fake_metrics_change_smoothly():
 
 
 def test_fake_metrics_seed_is_reproducible():
-    a, b = FakeMetricsSource(seed=7), FakeMetricsSource(seed=7)
-    assert [a.sample() for _ in range(5)] == [b.sample() for _ in range(5)]
+    def values(source: FakeMetricsSource) -> list[dict]:
+        return [
+            source.sample().model_dump(exclude={"servers": {0: {"updated_at"}}}) for _ in range(5)
+        ]
+
+    assert values(FakeMetricsSource(seed=7)) == values(FakeMetricsSource(seed=7))
 
 
 def test_default_interval_is_500_ms():
     assert Settings.model_fields["WS_FAKE_METRICS_INTERVAL"].default == 0.5
-    assert Settings.model_fields["WS_FAKE_METRICS"].default is True
+    assert Settings.model_fields["WS_FAKE_METRICS"].default is False  # настоящие метрики
+    assert Settings.model_fields["MONITOR_PUBLISH_INTERVAL"].default == 0.5
     with pytest.raises(ValueError):
         FakeMetricsPublisher(0)
 
@@ -136,8 +137,8 @@ def test_default_interval_is_500_ms():
 async def test_publisher_keeps_interval_and_stops():
     times: list[float] = []
 
-    async def on_metrics(data: Metrics) -> None:
-        assert isinstance(data, Metrics)
+    async def on_metrics(data: MetricsSnapshot) -> None:
+        assert isinstance(data, MetricsSnapshot)
         times.append(time.monotonic())
 
     event_bus.subscribe(METRICS_EVENT, on_metrics)
@@ -183,7 +184,7 @@ async def test_hub_forwards_bus_events_until_stopped():
         assert client.queue.empty()
         assert message["type"] == "demo"
         assert abs(message["ts"] - time.time() * 1000) < 5000
-        Metrics.model_validate(message["data"])
+        MetricsSnapshot.model_validate(message["data"])
     finally:
         hub.stop_forwarding()
 
@@ -209,7 +210,7 @@ async def test_ws_sends_hello_then_metrics(ws_url):
         messages = [await recv_json(ws) for _ in range(5)]
         assert [m["type"] for m in messages] == ["metrics"] * 5
         for message in messages:
-            assert Metrics.model_validate(message["data"]).source == "fake"
+            assert MetricsSnapshot.model_validate(message["data"]).source == "fake"
         stamps = [m["ts"] for m in messages]
         assert stamps == sorted(stamps)
 
