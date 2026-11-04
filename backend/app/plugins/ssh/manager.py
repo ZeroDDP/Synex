@@ -409,6 +409,47 @@ class SSHSessionManager:
     def _record_error(session: SSHSession, error: AppError, tag: dict[str, Any]) -> None:
         session.record("error", {"error": error.code, "detail": error.detail, **tag})
 
+    # ------------------------------------------------------ service requests
+
+    async def request_if_idle(
+        self,
+        session_id: str,
+        action: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        timeout: float,
+    ) -> dict[str, Any] | None:
+        """Служебный запрос к воркеру в сессии (например, monitor_get_values), если
+        она свободна. Возвращает payload ответа или None, если сессия занята.
+
+        Ждать нельзя: воркер выполняет запросы подключения по очереди, и опрос встал
+        бы за долгой командой, а следующая команда пользователя за опросом. Запрос в
+        буфер вывода сессии не пишется.
+        """
+        session = self.get(session_id)
+        lock = session.channel.lock
+        if session.closed or lock.locked():
+            return None
+        async with lock:
+            if session.closed:
+                return None
+            try:
+                return await session.channel.client.request(
+                    action, _session_payload(session, **(payload or {})), timeout=timeout,
+                    request_id=session.id,
+                )  # fmt: skip
+            except WorkerCommandError as e:
+                if is_session_missing(e.stderr):
+                    self._forget(session, CLOSED_LOST_IN_WORKER)
+                    raise SSHNotConnectedError(
+                        f"SSH session '{session.id}' is no longer open: {e.stderr}"
+                    ) from e
+                raise
+            except WorkerConnectionError as e:
+                if session.closed:
+                    raise SSHNotConnectedError(f"SSH session '{session.id}' was closed") from e
+                raise
+
     # --------------------------------------------------------------- close
 
     async def close(

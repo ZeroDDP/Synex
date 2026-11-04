@@ -39,6 +39,7 @@ async def test_only_ssh_api_is_exposed():
         "/api/ssh/sessions/{session_id}",
         "/api/ssh/sessions/{session_id}/exec",
         "/api/ssh/sessions/{session_id}/output",
+        "/api/monitor/metrics",
         "/api/keys",
         "/api/keys/generate",
         "/api/keys/{key_id}",
@@ -48,7 +49,7 @@ async def test_only_ssh_api_is_exposed():
 async def test_health_reports_worker(api):
     body = (await api.get("/api/health")).json()
     assert body["status"] == "ok"
-    assert body["plugins"] == ["ssh", "keys"]
+    assert body["plugins"] == ["ssh", "keys", "monitor"]
     assert body["worker"]["connected"] is True
     assert body["worker"]["worker_pid"]
 

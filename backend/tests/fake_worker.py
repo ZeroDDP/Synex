@@ -21,6 +21,10 @@ SSH-сервер воображаемый:
   * key_path: файл должен существовать; если в нём есть "ENCRYPTED", нужна парольная
     фраза PASSPHRASE.
 
+monitor_get_values, как сборка с исправленным CPU: первый вызов в сессии отдаёт CPU «от
+загрузки сервера» (BOOT_CPU), следующие 10, 11, 12 ... Хост "no-proc" имитирует сервер,
+где команда метрик не выполнилась; FakeWorkerState.monitor_error делает ok=false.
+
 Служебные action для тестов клиента:
   test_sleep {seconds, echo}    ответ с задержкой
   test_big {size}               большой stdout
@@ -45,6 +49,8 @@ from typing import Any
 import msgpack
 
 PASSWORD = "right-password"
+BOOT_CPU = 2.63  # CPU в первом замере сессии: среднее с загрузки сервера
+MEM_TOTAL_KB = 2014404
 PASSPHRASE = "right-phrase"
 NO_SESSION = "Session dont founded by key. Create session first!"
 
@@ -78,9 +84,11 @@ class FakeWorkerState:
         sequential: bool = True,
         log_to_stdout: bool = False,
         connect_delay: float = 0.0,
+        monitor_error: str | None = None,
     ) -> None:
         self.run_shell = run_shell
         self.connect_delay = connect_delay
+        self.monitor_error = monitor_error  # ok=false с этим текстом в monitor_get_values
         self.sequential = sequential
         self.lose_exit_status = lose_exit_status
         self.home = home
@@ -188,19 +196,11 @@ class FakeWorkerProtocol(asyncio.Protocol):
                 self.send(reply(msg_id, "ok", stdout=f"ran: {command}\n"))
 
         elif action == "monitor_get_values":
-            if msg_id not in self.sessions:
+            session = self.sessions.get(msg_id)
+            if session is None:
                 self.send(reply(msg_id, "error", stderr=NO_SESSION, exit_code=1))
                 return
-            values = {
-                "ok": True,
-                "cpu_usage_percent": 2.63,
-                "mem_total_kb": 2014404,
-                "mem_available_kb": 793976,
-                "mem_used_kb": 1220428,
-                "mem_usage_percent": 60.59,
-                "error": None,
-            }
-            self.send(reply(msg_id, "ok", stdout=json.dumps(values, separators=(",", ":"))))
+            self.send(self._monitor(msg_id, session))
 
         elif action == "ssh_disconnect":
             if self.sessions.pop(msg_id, None) is None:
@@ -275,6 +275,31 @@ class FakeWorkerProtocol(asyncio.Protocol):
             return  # подключение уже закрыто: воркер закрыл и его сессии
         self.sessions[msg_id] = dict(connection)
         self.send(reply(msg_id, "ok", stdout=f"Connected successfully, id: {msg_id}"))
+
+    def _monitor(self, msg_id: str, session: dict[str, Any]) -> dict[str, Any]:
+        if session.get("host") == "no-proc":
+            return reply(
+                msg_id,
+                "ok",
+                stdout="Пустой ответ от сервера (команда не выполнилась)",
+                stderr="bash: head: command not found",
+                exit_code=127,
+            )
+        if self.state.monitor_error:
+            values: dict[str, Any] = {"ok": False, "error": self.state.monitor_error}
+        else:
+            calls = session["monitor_calls"] = session.get("monitor_calls", 0) + 1
+            used = 1_200_000 + calls * 1_000
+            values = {
+                "ok": True,
+                "cpu_usage_percent": BOOT_CPU if calls == 1 else 8.0 + calls,
+                "mem_total_kb": MEM_TOTAL_KB,
+                "mem_available_kb": MEM_TOTAL_KB - used,
+                "mem_used_kb": used,
+                "mem_usage_percent": round(used / MEM_TOTAL_KB * 100, 2),
+                "error": None,
+            }
+        return reply(msg_id, "ok", stdout=json.dumps(values, separators=(",", ":")))
 
     def _run_shell(self, command: str) -> tuple[str, str, int]:
         env = dict(os.environ)
