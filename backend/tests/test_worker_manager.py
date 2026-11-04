@@ -66,7 +66,11 @@ async def test_start_connect_stop(monkeypatch, worker_settings, events):
         assert status["connected"] is True
         assert status["transport"] == "tcp"  # по строке "Listening on tcp ..." от воркера
         assert status["worker_pid"]
-        assert any("Listening on tcp" in line for line in manager.worker_output_tail)
+        # Вывод воркера читает отдельный поток: под нагрузкой строка может дойти до лога
+        # чуть позже, чем клиент успел подключиться
+        await wait_until(
+            lambda: any("Listening on tcp" in line for line in manager.worker_output_tail)
+        )
         assert {"status": STATUS_CONNECTED, "transport": "tcp"} in events
 
         with pytest.raises(WorkerCommandError, match="Session dont founded"):

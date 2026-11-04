@@ -313,7 +313,9 @@ async def test_publishes_snapshot_every_interval(rig):
         event_bus.unsubscribe(METRICS_EVENT, collect)
 
     times = [t for t, _ in snapshots]
-    assert 0.25 <= times[7] - times[2] <= 0.5  # 5 периодов по 50 мс
+    # 5 периодов по 50 мс. Тики без дрейфа, но любой из них может начаться на пару мс
+    # позже (event loop занят), поэтому точное 0.25 как нижняя граница даёт ложные падения
+    assert 0.2 <= times[7] - times[2] <= 0.5
     last = snapshots[-1][1]
     assert isinstance(last, MetricsSnapshot) and last.source == "ssh"
     assert last.servers[0].status == "ok"
