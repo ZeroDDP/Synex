@@ -23,3 +23,16 @@ data/*.db-journal
 *.dll
 
 .idea/
+
+#Rust
+
+target/
+synex_worker
+synex_worker.exe
+*.pdb
+*.tmp
+*.log
+*.sock
+
+RustDocumentation.md
+rust_tests.py

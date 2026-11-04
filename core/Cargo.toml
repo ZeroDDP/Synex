@@ -1,0 +1,7 @@
+
+[workspace]
+members = [
+    "crates/synex_core",
+    "crates/synex_worker"
+]
+resolver = "2"
