@@ -425,6 +425,18 @@ async def test_cwd_persists_between_commands(shell_worker, missing_socket_path, 
     await worker.disconnect()
 
 
+async def test_windows_line_endings_are_normalized(api, fake_worker, connect_body):
+    """Многострочная команда из Windows (CRLF): CR не должен уйти на сервер."""
+    session_id = (await api.post("/api/ssh/connect", json=connect_body)).json()["session_id"]
+    body = {"command": "cd /tmp\r\necho done\r\n", "track_cwd": False}
+    assert (await api.post("/api/ssh/exec", json=body)).status_code == 200
+
+    sent = [r for r in fake_worker.requests if r["action"] == "ssh_exec"][-1]
+    assert sent["payload"]["command"] == "cd /tmp\necho done\n"
+    output = (await api.get(f"/api/ssh/sessions/{session_id}/output")).json()
+    assert output["entries"][1]["command"] == "cd /tmp\necho done\n"
+
+
 async def test_cwd_is_kept_per_session(shell_worker, missing_socket_path, connect_body):
     client, worker = await make_api(shell_worker.port, missing_socket_path)
     async with client:
@@ -435,7 +447,7 @@ async def test_cwd_is_kept_per_session(shell_worker, missing_socket_path, connec
             body = {"command": command, "session_id": session_id}
             return (await client.post("/api/ssh/exec", json=body)).json()
 
-        assert (await run("cd /tmp", first))["cwd"] == "/tmp"
+        assert (await run("cd /tmp\r\n", first))["cwd"] == "/tmp"  # CRLF из Windows
         assert (await run("cd /", second))["cwd"] == "/"
         assert (await run("pwd", first))["stdout"] == "/tmp"
         assert (await run("pwd", second))["stdout"] == "/"

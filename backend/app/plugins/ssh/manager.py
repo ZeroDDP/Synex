@@ -45,7 +45,12 @@ from app.plugins.ssh.session import (
     WorkerChannel,
     new_session_id,
 )
-from app.plugins.ssh.wrapper import KILL_AFTER, build_command, parse_output
+from app.plugins.ssh.wrapper import (
+    KILL_AFTER,
+    build_command,
+    normalize_newlines,
+    parse_output,
+)
 from app.worker import WorkerClient, worker_manager
 from app.worker.manager import STATUS_WORKER_EXITED, STATUS_WORKER_STARTED
 
@@ -287,6 +292,7 @@ class SSHSessionManager:
         (wrapper.py): сохранённая cwd, точный exit_code и лимит на сервере.
         """
         session = self.resolve(session_id)
+        command = normalize_newlines(command)
         session.waiting += 1
         acquired = False
         try:
