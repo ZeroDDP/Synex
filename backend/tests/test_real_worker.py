@@ -1,12 +1,13 @@
-"""Тесты с настоящим synex_worker.
+"""Тесты с настоящим synex_worker на уровне его протокола и API backend.
 
-По умолчанию запускаются на Windows, если exe лежит по пути из настроек. На Linux/macOS
-воркер можно запустить командой из SYNEX_TEST_WORKER (например, скриптом, который
-запускает exe через wine): тогда pipe заведомо не создаётся и воркер уходит на TCP.
+Где берётся воркер, см. tests/real_worker.py: сборка для этой ОС (Windows: exe из
+репозитория; Linux/macOS: synex_worker, собранный cargo) или команда из
+SYNEX_TEST_WORKER (например, exe через wine).
 
 SSH-сценарии включаются переменными окружения:
     SYNEX_TEST_SSH_HOST, SYNEX_TEST_SSH_USER, SYNEX_TEST_SSH_KEY, [SYNEX_TEST_SSH_PORT]
     SYNEX_TEST_SSH_PASSWORD      дополнительно проверить вход по паролю
+Полный цикл UI → FastAPI → воркер → SSH-сервер с локальным sshd: tests/integration/.
 """
 
 from __future__ import annotations
@@ -14,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import sys
 import time
 
 import httpx
@@ -22,22 +22,13 @@ import pytest
 from websockets.asyncio.client import connect
 
 from app.core.app import create_app
-from app.core.config import settings
 from app.core.errors import WorkerCommandError
 from app.plugins.ssh.wrapper import build_command, new_marker, parse_output
-from app.worker import manager as manager_module
 from app.worker.manager import WorkerManager
-from tests.conftest import unique_pipe_name
+from tests import real_worker as rw
 from tests.ssh_helpers import recv_json, send_json, serve
 
-WORKER_COMMAND = os.environ.get("SYNEX_TEST_WORKER")
-EXE = next((p for p in WorkerManager.executable_candidates() if p.is_file()), None)
-ON_WINDOWS = sys.platform == "win32" and EXE is not None and not WORKER_COMMAND
-
-pytestmark = pytest.mark.skipif(
-    not (ON_WINDOWS or WORKER_COMMAND),
-    reason="needs Windows and synex_worker.exe, or SYNEX_TEST_WORKER",
-)
+pytestmark = pytest.mark.skipif(not rw.AVAILABLE, reason=rw.SKIP_REASON)
 
 needs_ssh = pytest.mark.skipif(
     not os.environ.get("SYNEX_TEST_SSH_HOST"), reason="SYNEX_TEST_SSH_* not set"
@@ -55,17 +46,9 @@ def ssh_connection(**auth) -> dict:
 
 
 @pytest.fixture
-def real_worker_settings(monkeypatch, free_port):
-    # Своё имя pipe и порт, чтобы не столкнуться с запущенным dev-бэкендом
-    pipe = unique_pipe_name() if ON_WINDOWS else "no-pipe-use-tcp"  # wine: сразу TCP
-    monkeypatch.setattr(settings, "RUST_IPC_PIPE_NAME", pipe)
-    monkeypatch.setattr(settings, "RUST_IPC_TCP_FALLBACK_PORT", free_port)
-    monkeypatch.setattr(settings, "RUST_IPC_REQUEST_TIMEOUT", 10.0)
-    monkeypatch.setattr(settings, "RUST_IPC_CONNECT_TIMEOUT", 30.0)  # wine стартует долго
-    if WORKER_COMMAND:
-        monkeypatch.setattr(
-            manager_module.WorkerManager, "_worker_command", lambda self: [WORKER_COMMAND]
-        )
+def real_worker_settings(monkeypatch):
+    with rw.real_worker_settings(monkeypatch):
+        yield
 
 
 @pytest.fixture
@@ -79,7 +62,7 @@ async def real_worker(real_worker_settings):
 async def test_real_worker_roundtrip(real_worker):
     status = real_worker.status()
     assert status["connected"], real_worker.worker_output_tail
-    assert status["transport"] == ("pipe" if ON_WINDOWS else "tcp"), status
+    assert status["transport"] == rw.EXPECTED_TRANSPORT, status
 
     client = real_worker.client
     with pytest.raises(WorkerCommandError, match="Session dont founded"):

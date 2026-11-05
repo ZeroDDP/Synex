@@ -246,6 +246,8 @@ ws.onopen = () => ws.send(JSON.stringify({type: "exec", data: {command: "uptime"
 |---|---|---|
 | `hello` | сервер, сразу после подключения | `{app, version, protocol, streams}` |
 | `metrics` | сервер, каждые 500 мс | метрики серверов, пример ниже |
+| `ssh.session` | сервер, при открытии и закрытии SSH-сессии | `{action: opened\|closed, session_id, host, port, username, reason?}` |
+| `worker.status` | сервер, когда меняется состояние воркера | `{status, ...}`: `connected`, `connection_lost`, `worker_exited`, `worker_started` |
 | `ping` | UI | что угодно, вернётся в `pong` |
 | `pong` | сервер, в ответ на `ping` | `data` из `ping` |
 | `error` | сервер, если не разобрал сообщение UI | `{error, detail}`: `bad_message` или `unknown_type` |
@@ -264,6 +266,13 @@ ws.onopen = () => ws.send(JSON.stringify({type: "exec", data: {command: "uptime"
   }]
 }}
 ```
+
+`ssh.session` приходит и тогда, когда сессию закрыл другой клиент или она потеряна:
+`reason` — `closed` (закрыли через API), `worker_connection_lost` (воркер упал или
+оборвалось его подключение), `lost_in_worker`, `shutdown` (бэкенд останавливается).
+UI обновляет по нему список сессий, даже если терминал сессии не открыт.
+`worker.status` показывает состояние ядра: например, после `worker_exited` бэкенд
+перезапускает воркер (`worker_started` с `restarts`), затем `connected`.
 
 #### Мониторинг (плагин `monitor`)
 
@@ -347,6 +356,7 @@ app/
                        (окно, статусы), values (ответ воркера)
     keys/              /api/keys/*
 tests/                 pytest; fake_worker.py имитирует synex_worker
+  integration/         полный цикл UI → FastAPI → воркер → SSH-сервер
 ```
 
 Новый функционал добавляется плагином: `app/plugins/<name>/plugin.py` с подклассом
@@ -385,9 +395,10 @@ Windows, Linux и macOS, а на Linux ещё раз с `SYNEX_TEST_SHELL=emulat
 uv run ruff check . && uv run ruff format --check . && uv run pytest
 ```
 
-`tests/test_real_worker.py` запускает настоящий `synex_worker.exe` (Windows; на Linux
-можно указать команду запуска exe через wine в `SYNEX_TEST_WORKER`). Проверки с
-реальным SSH-сервером включаются переменными окружения:
+`tests/test_real_worker.py` запускает настоящий воркер: `synex_worker.exe` на Windows,
+сборку `synex_worker` под Linux/macOS (ищется так же, как при запуске бэкенда) или
+команду из `SYNEX_TEST_WORKER` (например, скрипт, который запускает exe через wine).
+Проверки с реальным SSH-сервером включаются переменными окружения:
 
 ```powershell
 $env:SYNEX_TEST_SSH_HOST="1.2.3.4"; $env:SYNEX_TEST_SSH_USER="root"
@@ -395,6 +406,38 @@ $env:SYNEX_TEST_SSH_KEY="C:/Users/me/.ssh/id_ed25519"
 $env:SYNEX_TEST_SSH_PASSWORD="..."   # необязательно: проверить вход по паролю
 uv run pytest tests/test_real_worker.py -v
 ```
+
+### Интеграционные тесты: полный цикл
+
+`tests/integration/` проверяет цепочку **UI → FastAPI → synex_worker → SSH-сервер →
+ответ в UI** целиком: бэкенд запущен на uvicorn с настоящим воркером, а клиент ведёт
+себя как UI — REST и оба WebSocket (`/ws` и терминал сессии) с заголовком `Origin`
+страницы UI. Что проверяется:
+
+- терминал: команда через WebSocket, вывод, stderr, код возврата, cwd, таймаут на
+  сервере, закрытие сессии доходит до терминала и до `/ws`;
+- метрики сервера в `/ws`: один сервер на все его сессии, пропадает с последней;
+- две сессии выполняют команды параллельно;
+- вход по ключу с парольной фразой, по ключу из хранилища, по паролю; ошибки входа и
+  подключения доходят до UI как 502;
+- удалённая папка сессии: команда не выполняется в домашней папке;
+- переподключение терминала с `since`: UI получает пропущенный вывод по порядку;
+- падение воркера: терминал и `/ws` узнают о потере сессии, бэкенд перезапускает
+  воркер, новая сессия работает.
+
+Нужны воркер (как для `test_real_worker.py`) и SSH-сервер. Если `SYNEX_TEST_SSH_*`
+не заданы, на Linux и macOS тесты сами поднимают `sshd` на `127.0.0.1` со случайным
+портом и своими ключами (вход под текущим пользователем, система не меняется). Без
+воркера или SSH-сервера тесты пропускаются.
+
+```bash
+uv run pytest -m integration            # только интеграционные
+uv run pytest -m "not integration"      # всё, кроме них
+SYNEX_TEST_WORKER=./run_worker.sh uv run pytest -m integration   # exe через wine
+```
+
+В GitHub Actions их запускает отдельный джоб `integration`: Linux-воркер из
+репозитория и `sshd` на раннере. Обычные джобы `test` идут с `-m "not integration"`.
 
 `test_real_worker_raw_exit_codes` помечен `xfail`: воркер возвращает `exit_code=0` для
 любой команды. Это баг на стороне Rust. Пока он не исправлен, `/api/ssh/exec` берёт

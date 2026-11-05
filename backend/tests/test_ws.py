@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
 import sys
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
+import httpx
 import pytest
 import uvicorn
 from websockets.asyncio.client import ClientConnection, connect
@@ -18,7 +22,8 @@ from app import __version__
 from app.core.app import create_app
 from app.core.config import Settings, settings
 from app.core.event_bus import event_bus
-from app.worker import worker_manager
+from app.plugins.ssh.manager import SSH_SESSION_EVENT
+from app.worker import WORKER_STATUS_EVENT, worker_manager
 from app.ws import METRICS_EVENT, MetricsSnapshot, ws_hub
 from app.ws.hub import WebSocketClient, WebSocketHub
 from app.ws.metrics import FakeMetricsPublisher, FakeMetricsSource
@@ -172,6 +177,17 @@ def test_slow_client_keeps_only_freshest_messages():
     assert client.dropped == 2
 
 
+async def test_hub_forward_can_transform_event():
+    hub = WebSocketHub()
+    client = hub.register(websocket=None)  # type: ignore[arg-type]
+    hub.forward("demo.status", lambda event: event["payload"])
+    try:
+        await event_bus.publish("demo.status", {"event_type": "x", "payload": {"status": "ok"}})
+        assert json.loads(client.queue.get_nowait())["data"] == {"status": "ok"}
+    finally:
+        hub.stop_forwarding()
+
+
 async def test_hub_forwards_bus_events_until_stopped():
     hub = WebSocketHub()
     client = hub.register(websocket=None)  # type: ignore[arg-type]
@@ -204,7 +220,7 @@ async def test_ws_sends_hello_then_metrics(ws_url):
             "app": settings.APP_NAME,
             "version": __version__,
             "protocol": 1,
-            "streams": [METRICS_EVENT],
+            "streams": [WORKER_STATUS_EVENT, METRICS_EVENT, SSH_SESSION_EVENT],
         }
 
         messages = [await recv_json(ws) for _ in range(5)]
@@ -264,3 +280,37 @@ async def test_server_shutdown_closes_ws(app_settings):
         assert closed.value.rcvd is not None and closed.value.rcvd.code == 1012
     assert ws_hub.client_count == 0
     assert ws_hub.streams == []
+
+
+async def test_ws_reports_sessions_and_worker_status(app_settings, tmp_path: Path):
+    """UI узнаёт из /ws об открытии сессии, падении воркера, потере сессии и
+    перезапуске воркера, даже если терминал сессии не открыт."""
+    key = tmp_path / "id_ed25519"
+    key.write_text("key")
+    async with running_server() as (url, _):
+        base = url.removesuffix("/ws").replace("ws://", "http://")
+        async with connect(url) as ws, httpx.AsyncClient(base_url=base) as api:
+            body = {"host": "10.0.0.1", "username": "root", "key_path": str(key)}
+            created = await api.post("/api/ssh/sessions", json=body)
+            assert created.status_code == 201, created.text
+            session_id = created.json()["session_id"]
+
+            opened = await recv_type(ws, SSH_SESSION_EVENT)
+            assert opened["data"] | {"port": 22} == {
+                "action": "opened",
+                "session_id": session_id,
+                "host": "10.0.0.1",
+                "port": 22,
+                "username": "root",
+            }
+
+            os.kill(worker_manager.status()["worker_pid"], signal.SIGTERM)
+            closed = await recv_type(ws, SSH_SESSION_EVENT, timeout=15)
+            assert closed["data"]["action"] == "closed"
+            assert closed["data"]["reason"] == "worker_connection_lost"
+
+            statuses = []
+            async with asyncio.timeout(15):
+                while "connected" not in statuses:
+                    statuses.append((await recv_type(ws, WORKER_STATUS_EVENT))["data"]["status"])
+            assert "worker_exited" in statuses and "worker_started" in statuses

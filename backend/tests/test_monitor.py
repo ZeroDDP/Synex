@@ -377,6 +377,14 @@ def app_settings(monkeypatch, worker_settings, fast_monitor):
     return settings
 
 
+async def recv_metrics(ws) -> dict:
+    """Следующее сообщение metrics: в /ws идут и другие события (ssh.session и т.п.)."""
+    while True:
+        message = await recv_json(ws)
+        if message["type"] == METRICS_EVENT:
+            return message
+
+
 async def test_ws_streams_server_metrics(app_settings, key_file):
     """Всё приложение: SSH-сессия через REST, метрики её сервера приходят в /ws."""
     async with serve(create_app()) as base:
@@ -385,9 +393,9 @@ async def test_ws_streams_server_metrics(app_settings, key_file):
             httpx.AsyncClient(base_url=base.replace("ws://", "http://")) as api,
         ):
             hello = await recv_json(ws)
-            assert hello["data"]["streams"] == [METRICS_EVENT]
-            empty = await recv_json(ws)
-            assert empty["type"] == "metrics" and empty["data"]["servers"] == []
+            assert METRICS_EVENT in hello["data"]["streams"]
+            empty = await recv_metrics(ws)
+            assert empty["data"]["servers"] == []
 
             body = {"host": "10.0.0.1", "username": "root", "key_path": key_file}
             created = await api.post("/api/ssh/sessions", json=body)
@@ -397,7 +405,7 @@ async def test_ws_streams_server_metrics(app_settings, key_file):
             stamps = []
             async with asyncio.timeout(5):
                 while True:
-                    message = await recv_json(ws)
+                    message = await recv_metrics(ws)  # ssh.session opened пропускается
                     stamps.append(message["ts"])
                     data = MetricsSnapshot.model_validate(message["data"])
                     if data.servers and data.servers[0].status == "ok":

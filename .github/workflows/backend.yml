@@ -1,6 +1,8 @@
 # Проверки backend на каждый push в main и pull request: ruff и pytest на Windows,
 # Linux и macOS. Отдельный прогон на Linux с эмулятором shell (SYNEX_TEST_SHELL=emulated)
-# проверяет тот же путь, по которому тесты команд идут на Windows.
+# проверяет тот же путь, по которому тесты команд идут на Windows. Интеграционные тесты
+# (полный цикл UI → FastAPI → synex_worker → SSH-сервер) идут на Linux: synex_worker
+# для Linux из репозитория и локальный sshd, который тесты поднимают сами.
 name: backend
 
 on:
@@ -57,4 +59,21 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv sync --locked
-      - run: uv run pytest -ra
+      - run: uv run pytest -m "not integration" -ra
+
+  integration:
+    name: integration (Linux, real worker)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Install OpenSSH server
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends openssh-server
+          sudo mkdir -p /run/sshd
+      - run: uv sync --locked
+      - run: uv run pytest -m integration -ra
