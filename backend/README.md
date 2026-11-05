@@ -373,6 +373,15 @@ SYNEX_TEST_SHELL=emulated uv run pytest
 sh/bash/dash/zsh и права файлов (Linux/macOS), Unix socket и процесс воркера
 (Linux/macOS), таймаут через coreutils `timeout` (его нет на macOS).
 
+GitHub Actions (`.github/workflows/backend.yml`) на каждый push в `main` и pull request
+с изменениями в `backend/` запускает `ruff check`, `ruff format --check` и pytest на
+Windows, Linux и macOS, а на Linux ещё раз с `SYNEX_TEST_SHELL=emulated`. Перед push
+то же самое локально:
+
+```bash
+uv run ruff check . && uv run ruff format --check . && uv run pytest
+```
+
 `tests/test_real_worker.py` запускает настоящий `synex_worker.exe` (Windows; на Linux
 можно указать команду запуска exe через wine в `SYNEX_TEST_WORKER`). Проверки с
 реальным SSH-сервером включаются переменными окружения:
