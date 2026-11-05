@@ -16,7 +16,7 @@ import pytest
 
 from app.core.config import settings
 from app.worker.manager import WorkerManager
-from app.worker.process import WorkerPidFile, is_alive
+from app.worker.process import WorkerPidFile, is_alive, process_executable, same_file
 from tests.conftest import FAKE_WORKER_SCRIPT
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX processes")
@@ -204,3 +204,19 @@ def test_pid_file_of_another_worker_is_kept(tmp_path: Path):
     assert pid_file.read()["worker_pid"] == 123
     pid_file.clear(123)
     assert pid_file.read() is None
+
+
+def test_same_file_compares_files_not_strings(tmp_path: Path):
+    """На macOS путь процесса и записанный путь могут отличаться строкой (firmlink
+    /System/Volumes/Data, папки-ссылки uv), а файл тот же."""
+    real = tmp_path / "real" / "synex_worker"
+    real.parent.mkdir()
+    real.write_text("x")
+    (tmp_path / "alias").symlink_to(tmp_path / "real")
+    assert same_file(str(tmp_path / "alias" / "synex_worker"), str(real))
+    assert not same_file(str(real), sys.executable)
+
+
+def test_current_process_executable_is_found():
+    found = process_executable(os.getpid())
+    assert found is not None and same_file(found, sys.executable)

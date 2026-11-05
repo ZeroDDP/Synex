@@ -26,6 +26,7 @@ import ctypes.util
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 from collections.abc import Callable
@@ -97,19 +98,41 @@ def process_executable(pid: int) -> str | None:
             return None
         return path.removesuffix(" (deleted)")  # бинарник пересобрали, пока он работал
     if sys.platform == "darwin":
-        try:
-            libproc = ctypes.CDLL(ctypes.util.find_library("proc") or "libproc.dylib")
-            buffer = ctypes.create_string_buffer(4096)
-            if libproc.proc_pidpath(pid, buffer, len(buffer)) <= 0:
-                return None
-        except (OSError, AttributeError):
-            return None
-        return os.fsdecode(buffer.value)
+        return _macos_proc_pidpath(pid) or _ps_command(pid)
     return None
 
 
+def _macos_proc_pidpath(pid: int) -> str | None:
+    for library in ("/usr/lib/libproc.dylib", ctypes.util.find_library("proc"), None):
+        try:
+            proc_pidpath = ctypes.CDLL(library).proc_pidpath
+        except (OSError, AttributeError, TypeError):
+            continue
+        buffer = ctypes.create_string_buffer(4096)
+        if proc_pidpath(ctypes.c_int(pid), buffer, ctypes.c_uint32(len(buffer))) > 0:
+            return os.fsdecode(buffer.value)
+        return None
+    return None
+
+
+def _ps_command(pid: int) -> str | None:
+    """Запасной путь: имя команды из ps (на macOS это путь, с которым её запустили)."""
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "comm=", "-p", str(pid)], capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.strip() or None
+
+
 def same_file(a: str, b: str) -> bool:
-    return os.path.realpath(a) == os.path.realpath(b)
+    """Один и тот же файл. По inode, а не по строке: на macOS путь процесса бывает
+    вида /System/Volumes/Data/Users/..., а записанный — /Users/..."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return os.path.realpath(a) == os.path.realpath(b)
 
 
 def stop_process(pid: int, timeout: float = 3.0) -> bool:
@@ -185,6 +208,12 @@ class WorkerPidFile:
             return
         executable = process_executable(worker_pid)
         if executable is None or not same_file(executable, data["executable"]):
+            logger.info(
+                "Worker PID file points to another program, leaving it alone",
+                pid=worker_pid,
+                expected=data["executable"],
+                found=executable,
+            )
             self._remove()  # PID уже занят другим процессом
             return
         stopped = stop_process(worker_pid)
