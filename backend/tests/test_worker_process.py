@@ -16,7 +16,7 @@ import pytest
 
 from app.core.config import settings
 from app.worker.manager import WorkerManager
-from app.worker.process import WorkerPidFile, is_alive, process_executable, same_file
+from app.worker.process import WorkerPidFile, is_alive, process_start_time, same_file
 from tests.conftest import FAKE_WORKER_SCRIPT
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX processes")
@@ -217,6 +217,46 @@ def test_same_file_compares_files_not_strings(tmp_path: Path):
     assert not same_file(str(real), sys.executable)
 
 
-def test_current_process_executable_is_found():
-    found = process_executable(os.getpid())
-    assert found is not None and same_file(found, sys.executable)
+def test_process_start_time_identifies_process():
+    mine = process_start_time(os.getpid())
+    assert mine is not None and process_start_time(os.getpid()) == mine
+    sleeper = spawn_detached_sleep()
+    try:
+        assert process_start_time(sleeper) not in (None, mine)
+    finally:
+        os.kill(sleeper, 9)
+    assert process_start_time(finished_pid()) is None
+
+
+def test_orphan_is_recognised_by_start_time_even_if_binary_path_differs(tmp_path: Path):
+    """Python с python.org на macOS перезапускает себя в Python.app: путь к бинарнику
+    у процесса другой, но время запуска то же. Такой воркер тоже останавливается."""
+    sleeper = spawn_detached_sleep()
+    pid_file = tmp_path / "worker.sock.pid"
+    data = {
+        "worker_pid": sleeper,
+        "backend_pid": finished_pid(),
+        "executable": "/elsewhere/synex_worker",
+        "started": process_start_time(sleeper),
+    }
+    pid_file.write_text(json.dumps(data))
+    WorkerPidFile(pid_file).stop_orphan()
+    assert wait_dead(sleeper, 1)
+
+
+def test_reused_pid_is_recognised_by_start_time(tmp_path: Path):
+    sleeper = spawn_detached_sleep()
+    pid_file = tmp_path / "worker.sock.pid"
+    data = {
+        "worker_pid": sleeper,
+        "backend_pid": finished_pid(),
+        "executable": shutil.which("sleep") or "/bin/sleep",  # бинарник совпадает
+        "started": "1",  # а время запуска другое: это уже другой процесс
+    }
+    pid_file.write_text(json.dumps(data))
+    try:
+        WorkerPidFile(pid_file).stop_orphan()
+        assert is_alive(sleeper)
+        assert not pid_file.exists()
+    finally:
+        os.kill(sleeper, 9)
