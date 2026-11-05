@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
 import socket
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -51,8 +54,16 @@ def free_port() -> int:
 
 
 @pytest.fixture
-def missing_socket_path(tmp_path: Path) -> str:
-    return str(tmp_path / "no-such-worker.sock")
+def missing_socket_path(tmp_path: Path):
+    """Путь к сокету, который никто не слушает."""
+    path = tmp_path / "no-such-worker.sock"
+    if len(os.fsencode(path)) <= 100:
+        yield str(path)
+        return
+    # macOS: tmp_path длиннее лимита sockaddr_un (104 байта)
+    directory = Path(tempfile.mkdtemp(prefix="sx"))
+    yield str(directory / "none.sock")
+    shutil.rmtree(directory, ignore_errors=True)
 
 
 async def start_fake_worker(state: FakeWorkerState) -> asyncio.Server:
@@ -73,14 +84,33 @@ async def fake_worker():
     await server.wait_closed()
 
 
-@pytest.fixture
-async def shell_worker(tmp_path: Path):
-    """Фейковый воркер, который реально выполняет команды через `sh -c`."""
-    if sys.platform == "win32":
-        pytest.skip("needs a POSIX shell")
+# Чем фейковый воркер выполняет команды: "sh" (настоящий `sh -c`, Linux/macOS) или
+# "emulated" (tests/fake_shell.py, есть везде). На Windows sh нет, там всегда emulated.
+SHELL_MODE = os.environ.get("SYNEX_TEST_SHELL") or ("emulated" if sys.platform == "win32" else "sh")
+
+
+# Таймаут команды на сервере делает coreutils `timeout`. На macOS его нет (brew install
+# coreutils даёт только gtimeout): с настоящим sh такие тесты там пропускаются.
+needs_timeout_utility = pytest.mark.skipif(
+    SHELL_MODE == "sh" and shutil.which("timeout") is None,
+    reason="no coreutils timeout (macOS)",
+)
+
+
+def shell_worker_state(tmp_path: Path, **options) -> FakeWorkerState:
+    """Состояние фейкового воркера, который выполняет команды (см. SHELL_MODE)."""
     home = tmp_path / "home"
     home.mkdir()
-    state = FakeWorkerState(run_shell=True, home=str(home))
+    return FakeWorkerState(
+        run_shell=True, home=str(home), emulate_shell=SHELL_MODE == "emulated", **options
+    )
+
+
+@pytest.fixture
+async def shell_worker(tmp_path: Path):
+    """Фейковый воркер, который выполняет команды: `sh -c` или эмулятор shell.
+    Домашняя папка shell: shell_worker.shell_home."""
+    state = shell_worker_state(tmp_path)
     server = await start_fake_worker(state)
     yield state
     state.close_all()

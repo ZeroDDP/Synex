@@ -45,9 +45,12 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import msgpack
+
+if TYPE_CHECKING:
+    from tests.fake_shell import FakeShell
 
 PASSWORD = "right-password"
 BOOT_CPU = 2.63  # CPU в первом замере сессии: среднее с загрузки сервера
@@ -81,6 +84,7 @@ class FakeWorkerState:
         *,
         run_shell: bool = False,
         home: str | None = None,
+        emulate_shell: bool = False,
         lose_exit_status: bool = True,
         sequential: bool = True,
         log_to_stdout: bool = False,
@@ -93,6 +97,17 @@ class FakeWorkerState:
         self.sequential = sequential
         self.lose_exit_status = lose_exit_status
         self.home = home
+        # Команды выполняет FakeShell (Windows, SYNEX_TEST_SHELL=emulated) или `sh -c`.
+        # shell_home: домашняя папка так, как её видит shell (что печатает pwd).
+        self.shell: FakeShell | None = None
+        self.shell_home = str(Path(home).resolve()) if home else None
+        if emulate_shell:
+            if home is None:
+                raise ValueError("emulate_shell needs home: the root of the virtual FS")
+            from tests.fake_shell import FakeShell  # процессу-воркеру эмулятор не нужен
+
+            self.shell = FakeShell(Path(home))
+            self.shell_home = self.shell.home
         self.log_to_stdout = log_to_stdout
         # Содержимое файла ключа на момент ssh_connect (None, если файла нет)
         self.connect_key_files: list[bytes | None] = []
@@ -303,6 +318,8 @@ class FakeWorkerProtocol(asyncio.Protocol):
         return reply(msg_id, "ok", stdout=json.dumps(values, separators=(",", ":")))
 
     def _run_shell(self, command: str) -> tuple[str, str, int]:
+        if self.state.shell is not None:
+            return self.state.shell.run(command)
         env = dict(os.environ)
         env["SHELL"] = "/bin/sh"
         if self.state.home:

@@ -357,8 +357,21 @@ uv run pytest
 
 Тесты используют временное хранилище и свой мастер-ключ: настоящий `keys.json` и
 Credential Manager они не трогают. От `backend/.env` они тоже не зависят: набор плагинов
-и источник метрик тесты задают сами. Тесты мониторинга (`tests/test_monitor.py`) не
-требуют shell и одинаково идут на Windows и Linux.
+и источник метрик тесты задают сами.
+
+Тесты идут на Windows, Linux и macOS. Команды SSH фейковый воркер на Linux и macOS
+выполняет настоящим `sh -c`, а на Windows — эмулятором shell (`tests/fake_shell.py`):
+виртуальная файловая система с `/tmp` и `/home/synex` и ровно те команды, что нужны
+тестам. Что эмулятор отвечает так же, как настоящий sh, проверяет
+`tests/test_fake_shell.py`. Эмулятор можно включить и на Linux/macOS:
+
+```bash
+SYNEX_TEST_SHELL=emulated uv run pytest
+```
+
+Пропускаются только тесты, которым нужна конкретная ОС: обёртка команды в настоящих
+sh/bash/dash/zsh и права файлов (Linux/macOS), Unix socket и процесс воркера
+(Linux/macOS), таймаут через coreutils `timeout` (его нет на macOS).
 
 `tests/test_real_worker.py` запускает настоящий `synex_worker.exe` (Windows; на Linux
 можно указать команду запуска exe через wine в `SYNEX_TEST_WORKER`). Проверки с
@@ -379,4 +392,5 @@ uv run pytest tests/test_real_worker.py -v
 `tests/fake_worker.py` повторяет поведение воркера сборки 2026-11-03: сессия = `id`
 запроса, сессии принадлежат подключению, запросы подключения по очереди, `exit_code`
 всегда 0. `tests/ssh_helpers.py` собирает плагин ssh поверх него и запускает uvicorn
-для тестов WebSocket.
+для тестов WebSocket. `tests/worker_host.py` — отдельный процесс-«бэкенд» для тестов,
+где его убивают через `kill -9`.
