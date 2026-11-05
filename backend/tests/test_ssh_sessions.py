@@ -189,7 +189,9 @@ async def test_falls_back_to_shared_connection(shell_worker, missing_socket_path
                     json={"command": "sleep 0.4"},
                 ),
             )
-            assert time.monotonic() - started >= 0.8  # по очереди
+            # По очереди: 2 × 0.4 с, параллельно было бы ~0.4 с. Запас на грубый таймер
+            # Windows (~15 мс): там два sleep 0.4 измерялись как 0.797 с
+            assert time.monotonic() - started >= 0.7
 
             await client.delete(f"/api/ssh/sessions/{first['session_id']}")
             assert harness.provider.main.connected  # общее подключение не закрывается

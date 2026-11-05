@@ -141,6 +141,7 @@ def test_cwd_and_exit_codes(shell: str, tmp_path: Path):
 
 
 @posix_only
+@pytest.mark.skipif(shutil.which("timeout") is None, reason="no coreutils timeout (macOS)")
 @pytest.mark.parametrize("shell", SHELLS)
 def test_timeout_stops_command_on_server(shell: str, tmp_path: Path):
     s = Session(shell, tmp_path)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import posixpath
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -147,7 +148,9 @@ def default_socket_path(
     if platform == "darwin" and env.get("TMPDIR"):
         return Path(env["TMPDIR"]) / SOCKET_DIR_NAME / SOCKET_FILE_NAME
     runtime = env.get("XDG_RUNTIME_DIR")
-    if platform != "darwin" and runtime and Path(runtime).is_absolute():
+    # posixpath: путь Linux проверяется по правилам Linux на любой ОС (на Windows у
+    # Path("/run/user/1000") нет диска, и is_absolute() дал бы False)
+    if platform != "darwin" and runtime and posixpath.isabs(runtime):
         return Path(runtime) / SOCKET_DIR_NAME / SOCKET_FILE_NAME
     if uid is None:
         uid = os.getuid() if hasattr(os, "getuid") else 0

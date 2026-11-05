@@ -2,14 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import re
-import sys
 from pathlib import Path
 
 import httpx
 import pytest
 
 from app.keystore import get_keystore
-from tests.conftest import start_fake_worker
+from tests.conftest import needs_timeout_utility, shell_worker_state, start_fake_worker
 from tests.fake_worker import PASSPHRASE, PASSWORD, FakeWorkerState
 from tests.ssh_helpers import make_api
 
@@ -335,6 +334,7 @@ async def test_no_reply_from_worker_is_504(ssh, api, connect_body):
     assert len(ssh.manager) == 1  # сессия в воркере жива
 
 
+@needs_timeout_utility
 async def test_timeout_stops_command_on_server(shell_worker, missing_socket_path, connect_body):
     client, worker = await make_api(shell_worker.port, missing_socket_path)
     async with client:
@@ -390,7 +390,7 @@ async def test_shared_connection_runs_commands_one_at_a_time(
 
 async def test_cwd_persists_between_commands(shell_worker, missing_socket_path, connect_body):
     client, worker = await make_api(shell_worker.port, missing_socket_path)
-    home = str(Path(shell_worker.home).resolve())
+    home = shell_worker.shell_home
     async with client:
         connected = await client.post("/api/ssh/connect", json=connect_body)
         session_id = connected.json()["session_id"]
@@ -456,11 +456,7 @@ async def test_cwd_is_kept_per_session(shell_worker, missing_socket_path, connec
 
 async def test_exit_code_survives_worker_bug(tmp_path: Path, missing_socket_path, connect_body):
     """Воркер отдаёт exit_code=0 для любой команды, а API всё равно возвращает настоящий."""
-    if sys.platform == "win32":
-        pytest.skip("needs a POSIX shell")
-    home = tmp_path / "home"
-    home.mkdir()
-    state = FakeWorkerState(run_shell=True, home=str(home), lose_exit_status=True)
+    state = shell_worker_state(tmp_path, lose_exit_status=True)
     server = await start_fake_worker(state)
     client, worker = await make_api(state.port, missing_socket_path)
     try:
@@ -472,7 +468,7 @@ async def test_exit_code_survives_worker_bug(tmp_path: Path, missing_socket_path
                 return (await client.post("/api/ssh/exec", json=body)).json()["exit_code"]
 
             assert await exit_code("false") == 1
-            assert await exit_code("ls /definitely/missing") == 2
+            assert await exit_code("nosuchcommand") == 127
             assert await exit_code("sh -c 'exit 42'") == 42
             assert await exit_code("true") == 0
             # Без отслеживания cwd маркера нет, остаётся код от воркера
