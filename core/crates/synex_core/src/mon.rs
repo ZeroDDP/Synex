@@ -1,5 +1,3 @@
-// TODO
-// "echo '===CPU==='; head -n 1 /proc/stat; echo '===MEM==='; grep -E 'MemTotal|MemAvailable' /proc/meminfo"
 use crate::{SshOutput, errors::SynexError, ssh::SshSession};
 
 pub struct SshMonitoring {

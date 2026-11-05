@@ -22,3 +22,9 @@ jobs:
     - name: Run tests
       run: cargo test --verbose
       working-directory: ./core
+
+    - name: Upload binary artifact
+      uses: actions/upload-artifact@v7.0.2
+      with:
+        name: synex-worker-linux
+        path: core/target/release/synex_worker
