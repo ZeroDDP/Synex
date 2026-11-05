@@ -436,6 +436,9 @@ uv run pytest -m "not integration"      # всё, кроме них
 SYNEX_TEST_WORKER=./run_worker.sh uv run pytest -m integration   # exe через wine
 ```
 
+В GitHub Actions их запускает отдельный джоб `integration`: Linux-воркер из
+репозитория и `sshd` на раннере. Обычные джобы `test` идут с `-m "not integration"`.
+
 `test_real_worker_raw_exit_codes` помечен `xfail`: воркер возвращает `exit_code=0` для
 любой команды. Это баг на стороне Rust. Пока он не исправлен, `/api/ssh/exec` берёт
 настоящий код возврата из shell (при `track_cwd=true`). Когда баг исправят, тест
