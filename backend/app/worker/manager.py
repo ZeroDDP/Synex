@@ -334,7 +334,7 @@ class WorkerManager:
             prefer = self._current_transport
             if proc.poll() is not None:
                 if initial:
-                    hint = startup_failure_hint(proc.returncode)
+                    hint = startup_failure_hint(proc.returncode, self.worker_output_tail)
                     logger.error(
                         "Rust worker exited during startup",
                         returncode=proc.returncode,
@@ -438,11 +438,13 @@ class WorkerManager:
         if self._pid_file is not None:
             self._pid_file.clear(proc.pid)
         await asyncio.to_thread(self._join_pumps)
+        hint = startup_failure_hint(returncode, self.worker_output_tail)
         logger.error(
             "Rust worker exited",
             pid=proc.pid,
             returncode=returncode,
             last_output=self.worker_output_tail[-15:],
+            **({"hint": hint} if hint else {}),
         )
         if self.client is not None:
             await self.client.disconnect()

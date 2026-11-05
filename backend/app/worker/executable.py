@@ -171,8 +171,16 @@ def ensure_executable(path: Path) -> bool:
     return True
 
 
-def startup_failure_hint(returncode: int | None) -> str | None:
-    """Подсказка, почему воркер умер сразу после запуска."""
+def startup_failure_hint(returncode: int | None, output: list[str] | None = None) -> str | None:
+    """Подсказка, почему воркер умер сразу после запуска (по коду выхода и его выводу)."""
+    text = "\n".join(output or [])
+    if "GLIBC_" in text and "not found" in text:
+        return (
+            "The worker was built against a newer glibc than this system has (Linux "
+            "synex_worker from the repository needs glibc 2.38+: Ubuntu 24.04, Debian 13, "
+            "Fedora 39 or newer). Build it here with `cargo build --release`, or build a "
+            "static one: `cargo build --release --target x86_64-unknown-linux-musl`"
+        )
     if sys.platform == "darwin" and returncode == -9:
         return (
             "macOS may have blocked an unsigned binary downloaded from the internet. "

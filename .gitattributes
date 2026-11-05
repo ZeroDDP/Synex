@@ -1,3 +1,5 @@
 # В репозитории переводы строк LF, Git на Windows сам отдаёт файлы с CRLF
 * text=auto
 *.exe binary
+# Linux/macOS-сборка воркера без расширения: тоже бинарник, а не текст
+backend/app/core/target/**/synex_worker binary

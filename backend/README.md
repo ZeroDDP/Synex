@@ -32,9 +32,12 @@ uv sync
 uv run python -m app.main
 ```
 
-Бинарника для Linux и macOS в репозитории пока нет: его нужно собрать
-(`cargo build --release`) и положить в `app/core/target/release/synex_worker` или
-указать путь в `RUST_EXECUTABLE_PATH_UNIX`. Бэкенд ищет воркер так:
+В репозитории лежит `app/core/target/release/synex_worker` для Linux x86_64. Ему нужна
+glibc 2.38 или новее (Ubuntu 24.04, Debian 13, Fedora 39 и новее). На более старом
+дистрибутиве воркер сразу завершается с «version `GLIBC_2.38' not found», и бэкенд
+пишет в лог подсказку: собрать воркер на этой машине (`cargo build --release`) или
+статически (`cargo build --release --target x86_64-unknown-linux-musl`). Для macOS
+и ARM воркер нужно собрать самому. Бэкенд ищет воркер так:
 
 1. `RUST_EXECUTABLE_PATH_UNIX` (относительно `backend/`, затем текущей папки);
 2. сборку под конкретную платформу (`cargo build --release --target <triple>`):
@@ -324,7 +327,7 @@ ws.onmessage = (e) => console.log(JSON.parse(e.data));
 app/
   main.py              точка входа (uvicorn)
   core/                платформа: config, app factory, ошибки, шина событий, логи
-    target/release/    synex_worker.exe
+    target/release/    synex_worker.exe (Windows), synex_worker (Linux x86_64)
   worker/              Rust-ядро: client.py (IPC-протокол), manager.py (процесс),
                        executable.py (поиск бинарника для ОС и процессора),
                        unix_socket.py (путь и папка сокета на Linux/macOS),

@@ -23,6 +23,7 @@ from app.worker.executable import (
     find_executable,
     format_problem,
     read_format,
+    startup_failure_hint,
     target_triples,
 )
 from app.worker.manager import WorkerManager
@@ -165,3 +166,14 @@ async def test_worker_without_exec_bit_starts(monkeypatch, worker_settings, tmp_
         assert result["stdout"] == "hi"
     finally:
         await manager.stop()
+
+
+def test_hint_for_too_old_glibc():
+    """Linux-сборка из репозитория на старом дистрибутиве: загрузчик пишет про glibc."""
+    output = [
+        "[stderr] /opt/synex_worker: /lib/x86_64-linux-gnu/libc.so.6: "
+        "version `GLIBC_2.38' not found (required by /opt/synex_worker)"
+    ]
+    hint = startup_failure_hint(1, output)
+    assert hint is not None and "glibc 2.38" in hint and "musl" in hint
+    assert startup_failure_hint(1, ["[stdout] something else"]) is None
