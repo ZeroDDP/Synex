@@ -162,6 +162,11 @@ def test_timeout_stops_command_on_server(shell: str, tmp_path: Path):
     assert stderr == ""
     assert elapsed < 6
 
+    # Команда умерла от TERM, а её дочерний процесс TERM игнорирует и держит вывод:
+    # обёртка добивает группу (GNU timeout здесь KILL не шлёт, uutils шлёт только ребёнку)
+    result, _, elapsed = s.run("sh -c \"trap '' TERM; sleep 30\" & wait", timeout=1)
+    assert result.timed_out and elapsed < 5
+
     # Быстрая команда в пределах лимита
     result, _, _ = s.run("echo fast", timeout=10)
     assert (result.stdout, result.timed_out) == ("fast", False)

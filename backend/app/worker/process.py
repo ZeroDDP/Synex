@@ -11,8 +11,8 @@
 * macOS такого механизма не имеет. Поэтому PID воркера записывается в файл рядом с
   сокетом (worker.sock.pid). При следующем запуске backend находит воркер, оставшийся
   от прошлого раза, и останавливает его: иначе тот держал бы сокет и порт. Процесс
-  останавливается, только если его backend уже не работает и это тот же бинарник
-  (защита от повторно использованного PID).
+  останавливается, только если его backend уже не работает и это тот же процесс:
+  совпадает время запуска (защита от повторно использованного PID).
 * stdin воркера это пайп, который backend держит открытым. Когда backend завершается
   любым способом, ОС закрывает пайп, и воркер видит EOF. Сейчас воркер stdin не читает;
   если научится завершаться по EOF (вопрос Rust-стороне), это заработает и на macOS.
@@ -26,6 +26,7 @@ import ctypes.util
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 from collections.abc import Callable
@@ -97,19 +98,64 @@ def process_executable(pid: int) -> str | None:
             return None
         return path.removesuffix(" (deleted)")  # бинарник пересобрали, пока он работал
     if sys.platform == "darwin":
+        return _macos_proc_pidpath(pid) or _ps_command(pid)
+    return None
+
+
+def _macos_proc_pidpath(pid: int) -> str | None:
+    for library in ("/usr/lib/libproc.dylib", ctypes.util.find_library("proc"), None):
         try:
-            libproc = ctypes.CDLL(ctypes.util.find_library("proc") or "libproc.dylib")
-            buffer = ctypes.create_string_buffer(4096)
-            if libproc.proc_pidpath(pid, buffer, len(buffer)) <= 0:
-                return None
-        except (OSError, AttributeError):
+            proc_pidpath = ctypes.CDLL(library).proc_pidpath
+        except (OSError, AttributeError, TypeError):
+            continue
+        buffer = ctypes.create_string_buffer(4096)
+        if proc_pidpath(ctypes.c_int(pid), buffer, ctypes.c_uint32(len(buffer))) > 0:
+            return os.fsdecode(buffer.value)
+        return None
+    return None
+
+
+def _ps_command(pid: int) -> str | None:
+    """Запасной путь: имя команды из ps (на macOS это путь, с которым её запустили)."""
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "comm=", "-p", str(pid)], capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return out.stdout.strip() or None
+
+
+def process_start_time(pid: int) -> str | None:
+    """Когда процесс запущен (None: узнать не удалось). Пара (PID, время запуска)
+    однозначно задаёт процесс: повторно выданный PID будет с другим временем. exec
+    время запуска не меняет (Python из python.org на macOS перезапускает себя в
+    Python.app, и путь к бинарнику у процесса уже другой)."""
+    if sys.platform.startswith("linux"):
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text()
+        except OSError:
             return None
-        return os.fsdecode(buffer.value)
+        fields = stat.rsplit(")", 1)[1].split()
+        return fields[19] if len(fields) > 19 else None  # starttime, такты с загрузки
+    if sys.platform == "darwin":
+        try:
+            out = subprocess.run(
+                ["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True, timeout=5
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return " ".join(out.stdout.split()) or None
     return None
 
 
 def same_file(a: str, b: str) -> bool:
-    return os.path.realpath(a) == os.path.realpath(b)
+    """Один и тот же файл. По inode, а не по строке: на macOS путь процесса бывает
+    вида /System/Volumes/Data/Users/..., а записанный — /Users/..."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return os.path.realpath(a) == os.path.realpath(b)
 
 
 def stop_process(pid: int, timeout: float = 3.0) -> bool:
@@ -129,7 +175,7 @@ def stop_process(pid: int, timeout: float = 3.0) -> bool:
 
 
 class WorkerPidFile:
-    """worker.sock.pid: {worker_pid, backend_pid, executable} запущенного воркера."""
+    """worker.sock.pid: {worker_pid, backend_pid, executable, started} запущенного воркера."""
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -139,6 +185,7 @@ class WorkerPidFile:
             "worker_pid": worker_pid,
             "backend_pid": os.getpid(),
             "executable": os.path.realpath(executable),
+            "started": process_start_time(worker_pid),
         }
         try:
             tmp = self.path.with_name(self.path.name + ".tmp")
@@ -183,8 +230,7 @@ class WorkerPidFile:
         if not is_alive(worker_pid):
             self._remove()
             return
-        executable = process_executable(worker_pid)
-        if executable is None or not same_file(executable, data["executable"]):
+        if not self._same_process(worker_pid, data):
             self._remove()  # PID уже занят другим процессом
             return
         stopped = stop_process(worker_pid)
@@ -195,6 +241,32 @@ class WorkerPidFile:
         )
         if stopped:
             self._remove()
+
+    @staticmethod
+    def _same_process(pid: int, data: dict[str, Any]) -> bool:
+        """Тот ли это процесс: по времени запуска, а без него (старый файл) по бинарнику."""
+        recorded = data.get("started")
+        started = process_start_time(pid)
+        if recorded and started:
+            if started == recorded:
+                return True
+            logger.info(
+                "Worker PID now belongs to another process, leaving it alone",
+                pid=pid,
+                recorded_start=recorded,
+                start=started,
+            )
+            return False
+        executable = process_executable(pid)
+        if executable is not None and same_file(executable, data["executable"]):
+            return True
+        logger.info(
+            "Worker PID file points to another program, leaving it alone",
+            pid=pid,
+            expected=data["executable"],
+            found=executable,
+        )
+        return False
 
     def _remove(self) -> None:
         with contextlib.suppress(OSError):

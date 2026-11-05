@@ -16,7 +16,7 @@ import pytest
 
 from app.core.config import settings
 from app.worker.manager import WorkerManager
-from app.worker.process import WorkerPidFile, is_alive
+from app.worker.process import WorkerPidFile, is_alive, process_start_time, same_file
 from tests.conftest import FAKE_WORKER_SCRIPT
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="POSIX processes")
@@ -204,3 +204,59 @@ def test_pid_file_of_another_worker_is_kept(tmp_path: Path):
     assert pid_file.read()["worker_pid"] == 123
     pid_file.clear(123)
     assert pid_file.read() is None
+
+
+def test_same_file_compares_files_not_strings(tmp_path: Path):
+    """На macOS путь процесса и записанный путь могут отличаться строкой (firmlink
+    /System/Volumes/Data, папки-ссылки uv), а файл тот же."""
+    real = tmp_path / "real" / "synex_worker"
+    real.parent.mkdir()
+    real.write_text("x")
+    (tmp_path / "alias").symlink_to(tmp_path / "real")
+    assert same_file(str(tmp_path / "alias" / "synex_worker"), str(real))
+    assert not same_file(str(real), sys.executable)
+
+
+def test_process_start_time_identifies_process():
+    mine = process_start_time(os.getpid())
+    assert mine is not None and process_start_time(os.getpid()) == mine
+    sleeper = spawn_detached_sleep()
+    try:
+        assert process_start_time(sleeper) not in (None, mine)
+    finally:
+        os.kill(sleeper, 9)
+    assert process_start_time(finished_pid()) is None
+
+
+def test_orphan_is_recognised_by_start_time_even_if_binary_path_differs(tmp_path: Path):
+    """Python с python.org на macOS перезапускает себя в Python.app: путь к бинарнику
+    у процесса другой, но время запуска то же. Такой воркер тоже останавливается."""
+    sleeper = spawn_detached_sleep()
+    pid_file = tmp_path / "worker.sock.pid"
+    data = {
+        "worker_pid": sleeper,
+        "backend_pid": finished_pid(),
+        "executable": "/elsewhere/synex_worker",
+        "started": process_start_time(sleeper),
+    }
+    pid_file.write_text(json.dumps(data))
+    WorkerPidFile(pid_file).stop_orphan()
+    assert wait_dead(sleeper, 1)
+
+
+def test_reused_pid_is_recognised_by_start_time(tmp_path: Path):
+    sleeper = spawn_detached_sleep()
+    pid_file = tmp_path / "worker.sock.pid"
+    data = {
+        "worker_pid": sleeper,
+        "backend_pid": finished_pid(),
+        "executable": shutil.which("sleep") or "/bin/sleep",  # бинарник совпадает
+        "started": "1",  # а время запуска другое: это уже другой процесс
+    }
+    pid_file.write_text(json.dumps(data))
+    try:
+        WorkerPidFile(pid_file).stop_orphan()
+        assert is_alive(sleeper)
+        assert not pid_file.exists()
+    finally:
+        os.kill(sleeper, 9)
