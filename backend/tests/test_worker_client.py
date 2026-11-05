@@ -217,6 +217,11 @@ async def test_connection_reset_by_dying_worker_is_not_an_error(fake_worker, mis
     client = await make_client(fake_worker.port, missing_socket_path, timeout=10)
     lost: list[str] = []
     client.add_disconnect_listener(lost.append)
+    # Клиент уже подключён, а сервер мог ещё не вызвать connection_made (на macOS
+    # это заметно): ждём, пока у протокола появится transport
+    async with asyncio.timeout(5):
+        while not fake_worker.protocols or fake_worker.protocols[0].transport is None:
+            await asyncio.sleep(0.01)
     (protocol,) = fake_worker.protocols
     sock = protocol.transport.get_extra_info("socket")
     linger = struct.pack("HH" if sys.platform == "win32" else "ii", 1, 0)
