@@ -246,6 +246,8 @@ ws.onopen = () => ws.send(JSON.stringify({type: "exec", data: {command: "uptime"
 |---|---|---|
 | `hello` | сервер, сразу после подключения | `{app, version, protocol, streams}` |
 | `metrics` | сервер, каждые 500 мс | метрики серверов, пример ниже |
+| `ssh.session` | сервер, при открытии и закрытии SSH-сессии | `{action: opened\|closed, session_id, host, port, username, reason?}` |
+| `worker.status` | сервер, когда меняется состояние воркера | `{status, ...}`: `connected`, `connection_lost`, `worker_exited`, `worker_started` |
 | `ping` | UI | что угодно, вернётся в `pong` |
 | `pong` | сервер, в ответ на `ping` | `data` из `ping` |
 | `error` | сервер, если не разобрал сообщение UI | `{error, detail}`: `bad_message` или `unknown_type` |
@@ -264,6 +266,13 @@ ws.onopen = () => ws.send(JSON.stringify({type: "exec", data: {command: "uptime"
   }]
 }}
 ```
+
+`ssh.session` приходит и тогда, когда сессию закрыл другой клиент или она потеряна:
+`reason` — `closed` (закрыли через API), `worker_connection_lost` (воркер упал или
+оборвалось его подключение), `lost_in_worker`, `shutdown` (бэкенд останавливается).
+UI обновляет по нему список сессий, даже если терминал сессии не открыт.
+`worker.status` показывает состояние ядра: например, после `worker_exited` бэкенд
+перезапускает воркер (`worker_started` с `restarts`), затем `connected`.
 
 #### Мониторинг (плагин `monitor`)
 

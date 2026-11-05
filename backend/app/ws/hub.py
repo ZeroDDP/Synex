@@ -3,8 +3,10 @@
 Протокол: JSON в текстовых фреймах, каждое сообщение в конверте
 {"type": str, "ts": int (Unix, мс), "data": ...}.
 
-* Сервер → UI: "hello" сразу после подключения, затем потоки из шины событий
-  (сейчас "metrics" каждые 500 мс), "pong" в ответ на "ping", "error", если
+* Сервер → UI: "hello" сразу после подключения (в нём список streams), затем потоки
+  из шины событий: "metrics" каждые 500 мс (плагин monitor), "ssh.session" при
+  открытии и закрытии SSH-сессии (плагин ssh), "worker.status" при подключении,
+  обрыве, падении и перезапуске воркера. "pong" в ответ на "ping", "error", если
   сообщение клиента не разобрано.
 * UI → сервер: {"type": "ping", "data": <что угодно>}; data вернётся в "pong".
 
@@ -104,15 +106,18 @@ class WebSocketHub:
         for client in list(self._clients):
             client.push(text)
 
-    def forward(self, event_type: str) -> None:
-        """Пересылать клиентам события шины event_type как сообщения того же типа."""
+    def forward(self, event_type: str, transform: Callable[[Any], Any] | None = None) -> None:
+        """Пересылать клиентам события шины event_type как сообщения того же типа.
+
+        transform: что из события положить в data (по умолчанию событие целиком).
+        """
         if event_type in self._forwarded:
             return
 
         # Только async: синхронные обработчики EventBus выполняет в пуле потоков,
         # а asyncio.Queue не потокобезопасна.
         async def handler(data: Any) -> None:
-            self.broadcast(event_type, data)
+            self.broadcast(event_type, transform(data) if transform else data)
 
         self._forwarded[event_type] = handler
         event_bus.subscribe(event_type, handler)

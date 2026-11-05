@@ -19,7 +19,7 @@ from app.core.security import (
     warn_if_exposed,
 )
 from app.plugins.manager import PluginManager
-from app.worker import worker_manager
+from app.worker import WORKER_STATUS_EVENT, worker_manager
 from app.ws import METRICS_EVENT, FakeMetricsPublisher, ws_hub
 from app.ws import router as ws_router
 
@@ -32,6 +32,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Starting up", app=settings.APP_NAME, version=__version__)
     warn_if_exposed(settings)
 
+    # Подключение, обрыв, падение и перезапуск воркера: UI показывает состояние ядра
+    ws_hub.forward(WORKER_STATUS_EVENT, lambda event: event["payload"])
     await worker_manager.start()
     # До плагинов: событие, опубликованное в on_load, уже дойдёт до UI
     ws_hub.forward(METRICS_EVENT)
