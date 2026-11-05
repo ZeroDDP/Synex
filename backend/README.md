@@ -394,9 +394,10 @@ Windows, Linux и macOS, а на Linux ещё раз с `SYNEX_TEST_SHELL=emulat
 uv run ruff check . && uv run ruff format --check . && uv run pytest
 ```
 
-`tests/test_real_worker.py` запускает настоящий `synex_worker.exe` (Windows; на Linux
-можно указать команду запуска exe через wine в `SYNEX_TEST_WORKER`). Проверки с
-реальным SSH-сервером включаются переменными окружения:
+`tests/test_real_worker.py` запускает настоящий воркер: `synex_worker.exe` на Windows,
+сборку `synex_worker` под Linux/macOS (ищется так же, как при запуске бэкенда) или
+команду из `SYNEX_TEST_WORKER` (например, скрипт, который запускает exe через wine).
+Проверки с реальным SSH-сервером включаются переменными окружения:
 
 ```powershell
 $env:SYNEX_TEST_SSH_HOST="1.2.3.4"; $env:SYNEX_TEST_SSH_USER="root"
