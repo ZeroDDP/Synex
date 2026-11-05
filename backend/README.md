@@ -24,6 +24,54 @@ uv run python -m app.main    # http://127.0.0.1:8000
 Не запускайте uvicorn с `--reload` или `--workers` на Windows: тогда uvicorn
 использует SelectorEventLoop, на котором Named Pipe не работает.
 
+### Linux и macOS
+
+```bash
+cd backend
+uv sync
+uv run python -m app.main
+```
+
+В репозитории лежит `app/core/target/release/synex_worker` для Linux x86_64. Ему нужна
+glibc 2.38 или новее (Ubuntu 24.04, Debian 13, Fedora 39 и новее). На более старом
+дистрибутиве воркер сразу завершается с «version `GLIBC_2.38' not found», и бэкенд
+пишет в лог подсказку: собрать воркер на этой машине (`cargo build --release`) или
+статически (`cargo build --release --target x86_64-unknown-linux-musl`). Для macOS
+и ARM воркер нужно собрать самому. Бэкенд ищет воркер так:
+
+1. `RUST_EXECUTABLE_PATH_UNIX` (относительно `backend/`, затем текущей папки);
+2. сборку под конкретную платформу (`cargo build --release --target <triple>`):
+   `app/core/target/<triple>/release/synex_worker`, где `<triple>` —
+   `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`
+   (Apple Silicon) или `x86_64-apple-darwin`.
+
+Файл проверяется по заголовку: `synex_worker.exe` или сборка под другой процессор
+пропускается, а в логе написано, для чего она собрана (вместо «Exec format error»).
+Скрипт-обёртка (`#!/bin/sh`) тоже подходит. Право на запуск (`chmod +x`) бэкенд ставит
+сам. macOS может заблокировать неподписанный бинарник, скачанный из интернета (воркер
+умирает сразу с кодом -9): `xattr -d com.apple.quarantine <путь к synex_worker>`.
+
+Воркер слушает Unix socket. По умолчанию (`RUST_IPC_SOCKET_PATH` пустой) он лежит в
+личной папке пользователя, а не в общем `/tmp`: `$XDG_RUNTIME_DIR/synex/worker.sock`
+(Linux, обычно `/run/user/<uid>`), без `XDG_RUNTIME_DIR` — `/tmp/synex-<uid>/worker.sock`,
+на macOS — `$TMPDIR/synex/worker.sock`. Перед запуском воркера бэкенд:
+
+- создаёт папку с правами `0700` и проверяет, что она его и не symlink; иначе берёт
+  временную папку со случайным именем;
+- удаляет файл сокета, который никто не слушает (остался после падения воркера):
+  иначе воркер не смог бы занять путь и ушёл бы на TCP;
+- проверяет длину пути: не больше 103 байт на macOS и 107 на Linux.
+
+Чтобы воркер не оставался работать без бэкенда (на Windows это делает Job Object):
+
+- воркер запускается в своей сессии: Ctrl+C в терминале останавливает только бэкенд,
+  а тот штатно закрывает SSH-сессии и затем воркер;
+- Linux: если бэкенд убит (`kill -9`, падение, IDE), ядро сразу посылает воркеру SIGTERM
+  (`PR_SET_PDEATHSIG`);
+- macOS такого механизма не имеет. PID воркера записывается в `worker.sock.pid` рядом
+  с сокетом, и при следующем запуске бэкенд останавливает воркер, оставшийся от
+  прошлого раза: только если тот бэкенд уже не работает и это тот же бинарник.
+
 ### Доступ к API
 
 Авторизации у API нет: он слушает только `127.0.0.1` и доверяет программам на этой
@@ -279,8 +327,11 @@ ws.onmessage = (e) => console.log(JSON.parse(e.data));
 app/
   main.py              точка входа (uvicorn)
   core/                платформа: config, app factory, ошибки, шина событий, логи
-    target/release/    synex_worker.exe
-  worker/              Rust-ядро: client.py (IPC-протокол), manager.py (процесс)
+    target/release/    synex_worker.exe (Windows), synex_worker (Linux x86_64)
+  worker/              Rust-ядро: client.py (IPC-протокол), manager.py (процесс),
+                       executable.py (поиск бинарника для ОС и процессора),
+                       unix_socket.py (путь и папка сокета на Linux/macOS),
+                       process.py (процесс воркера на Linux/macOS)
   keystore/            хранилище ключей: store.py, ssh_keys.py, master_key.py
   api/                 корневой роутер /api, /api/health, зависимости
   ws/                  WebSocket /ws: hub.py (протокол, рассылка), metrics.py (формат

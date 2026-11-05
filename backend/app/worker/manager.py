@@ -15,7 +15,9 @@
   воркер перезапускается с экспоненциальной задержкой. Если оборвалось только
   соединение, менеджер переподключается.
 * На Windows воркер помещается в Job Object с KILL_ON_JOB_CLOSE: если Python упадёт
-  или его убьют из IDE, воркер умрёт вместе с ним и не будет держать имя pipe.
+  или его убьют из IDE, воркер умрёт вместе с ним и не будет держать имя pipe. На Linux
+  и macOS то же самое делает process.py (своя сессия, PDEATHSIG, PID-файл), а сокет
+  готовит unix_socket.py.
 * Кроме основного подключения (client) менеджер открывает дополнительные
   (open_channel): воркер выполняет запросы одного подключения по очереди, а разных
   параллельно, поэтому у каждой SSH-сессии своё подключение. При остановке менеджер
@@ -40,10 +42,20 @@ from typing import IO, Any
 
 import structlog
 
-from app.core.config import settings
+from app.core.config import default_socket_path, settings
 from app.core.errors import WorkerConnectionError
 from app.core.event_bus import event_bus
 from app.worker.client import WorkerClient
+from app.worker.executable import (
+    candidates,
+    ensure_executable,
+    find_executable,
+    host_arch,
+    host_os,
+    startup_failure_hint,
+)
+from app.worker.process import WorkerPidFile, popen_options
+from app.worker.unix_socket import SocketLocation
 
 logger = structlog.get_logger()
 
@@ -122,6 +134,8 @@ class WorkerManager:
         self._restarts = 0
         self._connect_failures = 0
         self._job: Any = None
+        self._socket: SocketLocation | None = None  # Linux/macOS: путь и папка сокета
+        self._pid_file: WorkerPidFile | None = None  # Linux/macOS: воркер прошлого запуска
 
     # ------------------------------------------------------------- public API
 
@@ -129,8 +143,14 @@ class WorkerManager:
         self._stopping = False
         self._loop = asyncio.get_running_loop()
         self._wake = asyncio.Event()
+        if sys.platform != "win32":
+            self._socket = SocketLocation(settings.RUST_IPC_SOCKET_PATH, default_socket_path())
+            socket_path = self._socket.choose()
+            self._pid_file = WorkerPidFile(socket_path.with_name(socket_path.name + ".pid"))
+            # Воркер, оставшийся от прошлого запуска (backend убили), держит сокет и порт
+            await asyncio.to_thread(self._pid_file.stop_orphan)
 
-        client = WorkerClient()
+        client = WorkerClient(socket_path=self.socket_path)
         client.add_disconnect_listener(self._on_connection_lost)
         self.client = client
 
@@ -157,6 +177,8 @@ class WorkerManager:
                 await self.client.disconnect()
 
         await self._terminate_worker()
+        if self._socket is not None:
+            self._socket.cleanup()
         self._close_job()
         self.client = None
         logger.info("Rust worker manager stopped")
@@ -182,10 +204,17 @@ class WorkerManager:
         main = self.client
         if main is None or not main.connected:
             raise WorkerConnectionError("Rust worker is not connected")
-        channel = WorkerClient()
+        channel = WorkerClient(socket_path=self.socket_path)
         await channel.connect(timeout=timeout, prefer=main.transport)
         self._channels.add(channel)
         return channel
+
+    @property
+    def socket_path(self) -> str:
+        """Unix socket воркера (Linux/macOS), тот же, что передан ему в окружении."""
+        if self._socket is not None:
+            return str(self._socket.path)
+        return settings.ipc_socket_path
 
     @property
     def worker_output_tail(self) -> list[str]:
@@ -193,23 +222,25 @@ class WorkerManager:
 
     @staticmethod
     def executable_candidates() -> list[Path]:
-        raw = Path(settings.rust_executable_path)
-        if raw.is_absolute():
-            return [raw]
-        # Сначала относительно backend/ (не зависит от того, откуда запущен Python),
-        # затем относительно cwd, как было раньше.
-        return [settings.BASE_DIR / raw, Path.cwd() / raw]
+        """Где ищется бинарник (см. executable.py): сначала относительно backend/."""
+        return candidates(settings.rust_executable_path, settings.BASE_DIR)
 
     # ----------------------------------------------------------- spawn / stop
 
     def _worker_command(self) -> list[str] | None:
-        candidates = self.executable_candidates()
-        for path in candidates:
-            if path.is_file():
-                return [str(path.resolve())]
+        found = find_executable(settings.rust_executable_path, settings.BASE_DIR)
+        if found.path is not None:
+            return [str(found.path)] if ensure_executable(found.path) else None
+        if found.skipped:
+            logger.error(
+                "Rust worker executable is not built for this platform. Build it with "
+                "`cargo build --release` or set RUST_EXECUTABLE_PATH_UNIX / _WIN32",
+                platform=f"{host_os()}-{host_arch()}",
+                skipped=found.skipped,
+            )
         logger.warning(
             "Rust worker executable not found. Will try to connect to an already running worker.",
-            tried=[str(p) for p in candidates],
+            tried=found.tried,
         )
         return None
 
@@ -219,7 +250,7 @@ class WorkerManager:
             {
                 "RUST_BRIDGE_MODE": "ipc",
                 "RUST_IPC_PIPE_NAME": settings.RUST_IPC_PIPE_NAME,
-                "RUST_IPC_SOCKET_PATH": settings.RUST_IPC_SOCKET_PATH,
+                "RUST_IPC_SOCKET_PATH": self.socket_path,
                 "RUST_IPC_TCP_FALLBACK_PORT": str(settings.RUST_IPC_TCP_FALLBACK_PORT),
             }
         )
@@ -229,6 +260,8 @@ class WorkerManager:
         command = self._worker_command()
         if command is None:
             return False
+        if self._socket is not None:
+            self._socket.prepare()  # до запуска: папка 0700, мёртвый сокет удалён
 
         self._listening = asyncio.Event()
         self._listening_transport = None
@@ -237,10 +270,12 @@ class WorkerManager:
             proc = subprocess.Popen(
                 command,
                 env=self._worker_env(),
-                stdin=subprocess.DEVNULL,
+                # stdin держим открытым: ОС закроет его, когда backend завершится любым
+                # способом, и воркер увидит EOF (process.py)
+                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                **popen_options(),
             )
         except OSError as e:
             logger.error("Failed to start Rust worker", error=repr(e), command=command)
@@ -250,6 +285,8 @@ class WorkerManager:
         self._process = proc
         self._started_at = time.monotonic()
         self._attach_to_job(proc)
+        if self._pid_file is not None:
+            self._pid_file.write(proc.pid, command[0])
         self._start_pumps(proc)
         logger.info("Rust worker started", pid=proc.pid, path=command[0])
         return True
@@ -259,6 +296,7 @@ class WorkerManager:
         if proc is None:
             return
 
+        self._close_stdin(proc)
         if proc.poll() is None:
             logger.info("Terminating Rust worker", pid=proc.pid)
             proc.terminate()
@@ -271,7 +309,15 @@ class WorkerManager:
                     await asyncio.to_thread(proc.wait, 2.0)
 
         await asyncio.to_thread(self._join_pumps)
+        if self._pid_file is not None:
+            self._pid_file.clear(proc.pid)
         logger.info("Rust worker stopped", pid=proc.pid, returncode=proc.returncode)
+
+    @staticmethod
+    def _close_stdin(proc: subprocess.Popen[bytes]) -> None:
+        if proc.stdin is not None:
+            with contextlib.suppress(OSError):
+                proc.stdin.close()
 
     # ------------------------------------------------------------ connection
 
@@ -288,10 +334,12 @@ class WorkerManager:
             prefer = self._current_transport
             if proc.poll() is not None:
                 if initial:
+                    hint = startup_failure_hint(proc.returncode, self.worker_output_tail)
                     logger.error(
                         "Rust worker exited during startup",
                         returncode=proc.returncode,
                         last_output=self.worker_output_tail[-15:],
+                        **({"hint": hint} if hint else {}),
                     )
                 self._wake.set()  # супервизор обработает выход и перезапустит
                 return False
@@ -386,12 +434,17 @@ class WorkerManager:
     async def _handle_worker_exit(self, proc: subprocess.Popen[bytes]) -> None:
         returncode = proc.returncode
         self._process = None
+        self._close_stdin(proc)
+        if self._pid_file is not None:
+            self._pid_file.clear(proc.pid)
         await asyncio.to_thread(self._join_pumps)
+        hint = startup_failure_hint(returncode, self.worker_output_tail)
         logger.error(
             "Rust worker exited",
             pid=proc.pid,
             returncode=returncode,
             last_output=self.worker_output_tail[-15:],
+            **({"hint": hint} if hint else {}),
         )
         if self.client is not None:
             await self.client.disconnect()

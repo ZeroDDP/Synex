@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 from pydantic import Field, SecretStr
@@ -35,7 +36,10 @@ class Settings(BaseSettings):
     ALLOWED_HOSTS: str = ""
 
     # Rust-воркер (имена переменных совпадают с CoreDocs, раздел 3)
-    RUST_IPC_SOCKET_PATH: str = "/tmp/synex_worker.sock"
+    # Unix socket воркера на Linux/macOS. Пусто: личная папка пользователя
+    # ($XDG_RUNTIME_DIR/synex, /tmp/synex-<uid> или $TMPDIR/synex на macOS), см.
+    # app/worker/unix_socket.py и свойство ipc_socket_path.
+    RUST_IPC_SOCKET_PATH: str = ""
     RUST_IPC_PIPE_NAME: str = r"\\.\pipe\synex_worker"
     RUST_IPC_TCP_FALLBACK_PORT: int = 9100
     RUST_EXECUTABLE_PATH_UNIX: str = "./app/core/target/release/synex_worker"
@@ -104,6 +108,11 @@ class Settings(BaseSettings):
         return BASE_DIR / self.KEYSTORE_PATH
 
     @property
+    def ipc_socket_path(self) -> str:
+        """RUST_IPC_SOCKET_PATH или путь по умолчанию в личной папке пользователя."""
+        return self.RUST_IPC_SOCKET_PATH or str(default_socket_path())
+
+    @property
     def rust_executable_path(self) -> str:
         if sys.platform == "win32":
             return self.RUST_EXECUTABLE_PATH_WIN32
@@ -119,6 +128,30 @@ def user_data_dir() -> Path:
         return Path.home() / "Library" / "Application Support" / "Synex"
     base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
     return Path(base) / "synex"
+
+
+SOCKET_DIR_NAME = "synex"
+SOCKET_FILE_NAME = "worker.sock"
+
+
+def default_socket_path(
+    platform: str = sys.platform,
+    env: Mapping[str, str] = os.environ,
+    uid: int | None = None,
+) -> Path:
+    """Unix socket воркера в папке, доступной только текущему пользователю.
+
+    Linux: $XDG_RUNTIME_DIR/synex (/run/user/<uid>, создаёт systemd), без него
+    /tmp/synex-<uid>. macOS: $TMPDIR/synex ($TMPDIR у каждого пользователя свой).
+    """
+    if platform == "darwin" and env.get("TMPDIR"):
+        return Path(env["TMPDIR"]) / SOCKET_DIR_NAME / SOCKET_FILE_NAME
+    runtime = env.get("XDG_RUNTIME_DIR")
+    if platform != "darwin" and runtime and Path(runtime).is_absolute():
+        return Path(runtime) / SOCKET_DIR_NAME / SOCKET_FILE_NAME
+    if uid is None:
+        uid = os.getuid() if hasattr(os, "getuid") else 0
+    return Path("/tmp") / f"{SOCKET_DIR_NAME}-{uid}" / SOCKET_FILE_NAME
 
 
 settings = Settings()

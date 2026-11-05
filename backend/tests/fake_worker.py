@@ -13,7 +13,8 @@
   * как asyncio.Protocol внутри теста (TCP, Unix socket или Named Pipe);
   * отдельным процессом: `python tests/fake_worker.py`. Слушает TCP 127.0.0.1 на
     RUST_IPC_TCP_FALLBACK_PORT и печатает те же строки, что настоящий воркер после
-    перехода с pipe на TCP.
+    перехода с pipe на TCP. С FAKE_WORKER_TRANSPORT=unix (Linux/macOS) слушает
+    RUST_IPC_SOCKET_PATH; если файл по этому пути уже есть, уходит на TCP.
 
 SSH-сервер воображаемый:
   * host "unreachable": "Connection failed: Connection refused";
@@ -326,13 +327,27 @@ async def _serve_forever() -> None:
     )
     state.accept_once = os.environ.get("FAKE_WORKER_ACCEPT_ONCE") == "1"
     loop = asyncio.get_running_loop()
-    server = await loop.create_server(lambda: FakeWorkerProtocol(state), "127.0.0.1", port)
-    state.server = server
-    # Как настоящий воркер: сначала объявляет pipe, потом уходит на TCP
-    pipe = os.environ.get("RUST_IPC_PIPE_NAME", r"\\.\pipe\synex_worker")
-    print(f"🔌 Listening on pipe: {pipe}", flush=True)
-    print("Pipe failed (fake worker), falling back to TCP", flush=True)
-    print(f"🔌 Listening on tcp 127.0.0.1:{port}", flush=True)
+
+    def protocol() -> FakeWorkerProtocol:
+        return FakeWorkerProtocol(state)
+
+    socket_path = os.environ.get("RUST_IPC_SOCKET_PATH", "")
+    if os.environ.get("FAKE_WORKER_TRANSPORT") == "unix" and socket_path:
+        # Как UnixListener::bind в Rust: занятый путь (даже мёртвым сокетом) это ошибка,
+        # тогда воркер уходит на TCP. asyncio сам удалил бы старый сокет, поэтому проверка.
+        if os.path.exists(socket_path):
+            print(f"Socket failed (Address in use: {socket_path}), falling back to TCP")
+        else:
+            state.server = await loop.create_unix_server(protocol, socket_path)
+            print(f"🔌 Listening on unix: {socket_path}", flush=True)
+    else:
+        # Как настоящий воркер на Windows: сначала объявляет pipe, потом уходит на TCP
+        pipe = os.environ.get("RUST_IPC_PIPE_NAME", r"\\.\pipe\synex_worker")
+        print(f"🔌 Listening on pipe: {pipe}", flush=True)
+        print("Pipe failed (fake worker), falling back to TCP", flush=True)
+    if state.server is None:
+        state.server = await loop.create_server(protocol, "127.0.0.1", port)
+        print(f"🔌 Listening on tcp 127.0.0.1:{port}", flush=True)
 
     spam = int(os.environ.get("FAKE_WORKER_SPAM", "0"))
     if spam:
