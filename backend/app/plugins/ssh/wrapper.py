@@ -9,7 +9,10 @@
 Что уходит на сервер (упрощённо, <M> это маркер со случайной частью):
 
     if timeout -k 3 1 true >/dev/null 2>&1; then          # есть ли рабочий timeout
-      ( timeout -k 3 <N> "$SHELL" -c '<inner>'; exit $? ) 3>&2 2>/dev/null
+      ( timeout -k 3 <N> "$SHELL" -c '<inner>' &           # в фоне: нужен его PID
+        pid=$!; wait $pid; rc=$?
+        case $rc in 124|137) kill -KILL -$pid;; esac        # добить группу
+        exit $rc ) 3>&2 2>/dev/null
     else
       "$SHELL" -c '<inner>'                                # таймаут только в Python
     fi
@@ -22,6 +25,10 @@
 
 * `timeout` (coreutils) по истечении N секунд шлёт TERM всей группе процессов
   команды, через 3 секунды KILL. Код 124 (TERM) или 137 (KILL) значит «прервано».
+* После прерывания обёртка сама шлёт KILL всей группе timeout (её номер = PID timeout).
+  Иначе процесс, который игнорирует TERM, держал бы вывод открытым, и канал SSH не
+  закрылся бы: timeout из uutils (Ubuntu 26.04 и новее) шлёт KILL только своему
+  дочернему процессу, а GNU timeout не трогает группу, если команда умерла от TERM.
 * Маркер C печатается, только если команда дошла до конца: в нём код и новая cwd.
   Маркер E печатает внешняя оболочка всегда: он даёт код даже после `exit 3`.
 * `3>&2 2>/dev/null` и `exec 2>&3` в начале <inner>: stderr команды идёт как обычно,
@@ -42,6 +49,7 @@ import shlex
 from dataclasses import dataclass
 
 RC_VAR = "__synex_rc"
+PID_VAR = "__synex_pid"
 KILL_AFTER = 3  # сек между TERM и KILL
 TIMEOUT_EXIT_CODES = frozenset({124, 137})  # timeout: TERM / KILL
 
@@ -78,9 +86,15 @@ def build_command(
     shell = '"${SHELL:-/bin/sh}"'
     if timeout:
         body_with_stderr = shlex.quote("exec 2>&3 3>&-\n" + body)
+        # timeout в фоне, чтобы знать его PID: это и номер его группы процессов. stdin
+        # сохраняется через fd 4 (фоновой команде sh иначе подставит /dev/null).
         run = (
             f"if timeout -k {kill_after} 1 true >/dev/null 2>&1; then "
-            f"( timeout -k {kill_after} {timeout} {shell} -c {body_with_stderr}; exit $? ) "
+            f"( exec 4<&0; "
+            f"timeout -k {kill_after} {timeout} {shell} -c {body_with_stderr} 0<&4 4<&- & "
+            f"{PID_VAR}=$!; wait ${PID_VAR}; {RC_VAR}=$?; "
+            f"case ${RC_VAR} in 124|137) kill -KILL -${PID_VAR} 2>/dev/null;; esac; "
+            f"exit ${RC_VAR} ) "
             f"3>&2 2>/dev/null; "
             f"else {shell} -c {shlex.quote(body)}; fi"
         )
