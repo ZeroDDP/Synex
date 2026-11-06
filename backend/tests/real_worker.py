@@ -25,7 +25,11 @@ from app.worker.executable import ensure_executable, find_executable
 from tests.conftest import get_free_port, unique_pipe_name
 
 WORKER_COMMAND = os.environ.get("SYNEX_TEST_WORKER")
-_FOUND = find_executable(settings.rust_executable_path, settings.BASE_DIR)
+_FOUND = find_executable(
+    settings.rust_executable_path,
+    settings.BASE_DIR,
+    include_core=settings.rust_executable_path_is_default,
+)
 NATIVE_WORKER = None if WORKER_COMMAND else _FOUND.path
 AVAILABLE = bool(WORKER_COMMAND or NATIVE_WORKER)
 SKIP_REASON = (
