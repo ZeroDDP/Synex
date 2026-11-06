@@ -169,7 +169,7 @@ Invoke-RestMethod -Method Delete "$api/ssh/sessions/$($s.session_id)"
 |---|---|---|
 | `hello` | сервер, сразу после подключения | `{protocol, session, replay: {since, count, gap, first_seq, last_seq}}` |
 | `output` | сервер: сначала записи буфера после `since`, потом новые | запись буфера `{seq, ts, kind, ...}` |
-| `closed` | сервер, когда сессию закрыли; затем закрывает подключение | `{reason}`: `closed`, `worker_connection_lost`, `lost_in_worker`, `shutdown` |
+| `closed` | сервер, когда сессию закрыли; затем закрывает подключение | `{reason}`: `closed`, `worker_connection_lost`, `lost_in_worker`, `exec_timeout`, `shutdown` |
 | `error` | сервер, если сообщение не разобрано или команда не запустилась | `{error, detail, request_id?}` |
 | `pong` | сервер, в ответ на `ping` | `data` из `ping` |
 | `exec` | UI | `{command, timeout?, track_cwd?, id?}`: `id` вернётся в записях как `request_id` |
@@ -217,7 +217,10 @@ ws.onopen = () => ws.send(JSON.stringify({type: "exec", data: {command: "uptime"
   завершаются, а не ждут до таймаута. Для `sudo` нужен NOPASSWD, для apt — `-y`.
 - 504 `ssh_exec_timeout` означает, что воркер не вернул результат даже через
   `timeout + 3 + SSH_EXEC_TIMEOUT_GRACE` секунд. Например, на сервере нет coreutils
-  `timeout` (macOS, старый busybox): тогда команда могла продолжить работать.
+  `timeout` (macOS, старый busybox) или команда без `track_cwd`. Воркер выполняет
+  запросы сессии по очереди и отменять команду не умеет, поэтому все следующие команды
+  встали бы за зависшей: сессия закрывается (`ssh.session` с `reason: exec_timeout`,
+  терминал получает `closed`), UI открывает новую.
 
 ### Хранилище ключей
 
@@ -272,7 +275,8 @@ ws.onopen = () => ws.send(JSON.stringify({type: "exec", data: {command: "uptime"
 
 `ssh.session` приходит и тогда, когда сессию закрыл другой клиент или она потеряна:
 `reason` — `closed` (закрыли через API), `worker_connection_lost` (воркер упал или
-оборвалось его подключение), `lost_in_worker`, `shutdown` (бэкенд останавливается).
+оборвалось его подключение), `lost_in_worker`, `exec_timeout` (команда не ответила и
+после лимита, см. 504 ниже), `shutdown` (бэкенд останавливается).
 UI обновляет по нему список сессий, даже если терминал сессии не открыт.
 `worker.status` показывает состояние ядра: например, после `worker_exited` бэкенд
 перезапускает воркер (`worker_started` с `restarts`), затем `connected`.

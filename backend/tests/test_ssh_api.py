@@ -330,8 +330,13 @@ async def test_no_reply_from_worker_is_504(ssh, api, connect_body):
     )
     assert response.status_code == 504
     assert response.json()["error"] == "ssh_exec_timeout"
-    assert "may still be running" in response.json()["detail"]
-    assert len(ssh.manager) == 1  # сессия в воркере жива
+    assert "session was closed" in response.json()["detail"]
+    # Воркер не умеет отменять команду: следующие встали бы за ней. Сессия закрыта
+    # вместе со своим подключением, новая работает сразу.
+    assert len(ssh.manager) == 0
+    await api.post("/api/ssh/connect", json=connect_body)
+    fresh = await api.post("/api/ssh/exec", json={"command": "echo", "timeout": 5})
+    assert fresh.status_code == 200, fresh.text
 
 
 @needs_timeout_utility

@@ -63,6 +63,7 @@ CLOSED_BY_USER = "closed"
 CLOSED_WORKER_LOST = "worker_connection_lost"
 CLOSED_LOST_IN_WORKER = "lost_in_worker"
 CLOSED_SHUTDOWN = "shutdown"
+CLOSED_EXEC_TIMEOUT = "exec_timeout"
 
 # Тексты ошибок воркера, когда сессии с таким id у него нет: сборка 2026-11 и CoreDocs.
 SESSION_MISSING_MARKERS = ("Session dont founded", "Not connected", "Session not found")
@@ -362,11 +363,19 @@ class SSHSessionManager:
                 else "Without track_cwd the command is not limited on the server"
             )
             logger.warning("SSH exec timed out without a reply", session_id=session.id, waited=wait)
+            if session.channel.dedicated:
+                # Воркер выполняет запросы подключения по очереди и отменять команду не
+                # умеет: все следующие команды сессии встали бы за зависшей. Сессия
+                # закрывается вместе со своим подключением, UI откроет новую.
+                outcome = "The session was closed so that it does not stay blocked; open a new one."
+            else:
+                outcome = "The command may still be running and keep the session busy."
             error = SSHExecTimeoutError(
-                f"No result from the worker within {wait:g}s. {hint}; the command may still be "
-                "running and keep the session busy."
+                f"No result from the worker within {wait:g}s. {hint}. {outcome}"
             )
             self._record_error(session, error, tag)
+            if session.channel.dedicated:
+                self._forget(session, CLOSED_EXEC_TIMEOUT)
             raise error from e
         except WorkerConnectionError as e:
             if session.closed:
