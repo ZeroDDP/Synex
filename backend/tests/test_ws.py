@@ -125,7 +125,10 @@ def test_fake_metrics_change_smoothly():
 def test_fake_metrics_seed_is_reproducible():
     def values(source: FakeMetricsSource) -> list[dict]:
         return [
-            source.sample().model_dump(exclude={"servers": {0: {"updated_at"}}}) for _ in range(5)
+            source.sample().model_dump(
+                exclude={"servers": {0: {"updated_at", "hardware_updated_at"}}}
+            )
+            for _ in range(5)
         ]
 
     assert values(FakeMetricsSource(seed=7)) == values(FakeMetricsSource(seed=7))

@@ -276,6 +276,10 @@ ws.onopen = () => ws.send(JSON.stringify({type: "exec", data: {command: "uptime"
     "cpu": {"percent": 4.48, "avg": 3.9, "min": 2.05, "max": 7.65},
     "memory": {"total": 2062749696, "used": 1272385536, "available": 790364160,
                "percent": 61.71, "avg": 61.2, "min": 59.89, "max": 61.85},
+    "disks": [{"mount": "/", "filesystem": "/dev/vda1", "total": 41152736256,
+               "used": 21070200832, "available": 18906349568, "percent": 52.71}],
+    "gpus": [],
+    "hardware_updated_at": 1762329600123,
     "error": null
   }]
 }}
@@ -298,6 +302,13 @@ UI обновляет по нему список сессий, даже если
   параллельно.
 - `cpu.percent`: загрузка с прошлого замера; `memory`: байты и проценты. `avg`, `min`,
   `max` в процентах за окно `window_s` (`MONITOR_WINDOW`, 30 с).
+- `disks` и `gpus` обновляются реже, раз в `MONITOR_HARDWARE_INTERVAL` (10 с): воркер их
+  не отдаёт, бэкенд выполняет на сервере `df -kP` и `nvidia-smi` через ту же свободную
+  сессию (в терминал сессии это не попадает). `disks`: реальные устройства `/dev/...`
+  (без loop-образов snap) и корень `/`, одно устройство один раз; `percent` как в `df`.
+  `gpus`: только NVIDIA, значения, которые карта не сообщает, приходят как `null`; `[]`
+  значит карт нет. До первого замера оба поля `null`, время замера в
+  `hardware_updated_at`.
 - `status`:
   - `waiting`: замеров ещё нет;
   - `warming_up`: память уже есть, CPU появится со второго замера. Первый замер в
@@ -369,7 +380,7 @@ app/
                        подключение к воркеру), buffer (буфер вывода), ws (терминал),
                        wrapper (cwd, таймаут), routes, schemas, errors
     monitor/           /api/monitor/*: service (опрос и публикация), aggregator
-                       (окно, статусы), values (ответ воркера)
+                       (окно, статусы), values (ответ воркера), hardware (диски, GPU)
     keys/              /api/keys/*
 tests/                 pytest; fake_worker.py имитирует synex_worker
   integration/         полный цикл UI → FastAPI → воркер → SSH-сервер

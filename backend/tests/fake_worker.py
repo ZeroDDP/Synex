@@ -78,6 +78,16 @@ def reply(msg_id: str, status: str, stdout: str = "", stderr: str = "", exit_cod
     }
 
 
+# Что выдал бы сервер на команду дисков и GPU мониторинга (df -kP; nvidia-smi)
+HARDWARE_OUTPUT = """Filesystem     1024-blocks     Used Available Capacity Mounted on
+/dev/sda1         41152736 20576368  18463232      53% /
+tmpfs              1024000        0   1024000       0% /dev/shm
+/dev/sdb1        102400000 51200000  51200000      50% /data
+__SYNEX_GPU__
+0, NVIDIA GeForce RTX 3080, 37, 2048, 10240, 61
+"""
+
+
 class FakeWorkerState:
     def __init__(
         self,
@@ -90,10 +100,13 @@ class FakeWorkerState:
         log_to_stdout: bool = False,
         connect_delay: float = 0.0,
         monitor_error: str | None = None,
+        hardware_output: str | None = None,
     ) -> None:
         self.run_shell = run_shell
         self.connect_delay = connect_delay
         self.monitor_error = monitor_error  # ok=false с этим текстом в monitor_get_values
+        # Ответ на команду дисков и GPU мониторинга (без run_shell), см. HARDWARE_OUTPUT
+        self.hardware_output = HARDWARE_OUTPUT if hardware_output is None else hardware_output
         self.sequential = sequential
         self.lose_exit_status = lose_exit_status
         self.home = home
@@ -206,6 +219,8 @@ class FakeWorkerProtocol(asyncio.Protocol):
                 if self.state.lose_exit_status:
                     code = 0
                 self.send(reply(msg_id, "ok", stdout=stdout, stderr=stderr, exit_code=code))
+            elif "__SYNEX_GPU__" in command:  # диски и GPU для мониторинга
+                self.send(reply(msg_id, "ok", stdout=self.state.hardware_output))
             else:
                 if command.startswith("sleep "):
                     await asyncio.sleep(float(command.split()[1]))
