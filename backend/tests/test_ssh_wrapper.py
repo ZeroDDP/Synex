@@ -141,6 +141,48 @@ def test_cwd_and_exit_codes(shell: str, tmp_path: Path):
 
 
 @posix_only
+@pytest.mark.parametrize("shell", SHELLS)
+def test_trailing_backslash_does_not_eat_the_wrapper(shell: str, tmp_path: Path):
+    """`\\` в конце команды продолжает строку: без пустой строки-разделителя служебная
+    строка с маркером стала бы аргументом команды (было: stdout "a __synex_rc=0")."""
+    s = Session(shell, tmp_path)
+    result, stderr, _ = s.run("cd / && echo a \\")
+    assert (result.stdout, result.exit_code, result.cwd, stderr) == ("a", 0, "/", "")
+
+
+@posix_only
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("timeout", [5, None])
+def test_command_does_not_wait_for_input(shell: str, timeout: int | None, tmp_path: Path):
+    """Воркер не закрывает stdin канала SSH. Без </dev/null `cat` или `read` (а с ними
+    sudo с паролем, apt install с вопросом) ждали бы ввода до таймаута."""
+    s = Session(shell, tmp_path)
+    script = build_command("cat; read x || echo no-input", None, s.marker, timeout)
+    started = time.monotonic()
+    proc = subprocess.Popen(
+        [s.shell, "-c", script],
+        cwd=tmp_path,
+        env=s.env,
+        stdin=subprocess.PIPE,  # открыт и пуст, как у канала SSH
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        proc.wait(timeout=10)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.stdin.close()
+    stdout = proc.stdout.read()
+    proc.stdout.close()
+    proc.stderr.close()
+    result = parse_output(stdout, s.marker, timeout_applied=timeout is not None)
+    assert (result.stdout, result.exit_code, result.timed_out) == ("no-input", 0, False)
+    assert time.monotonic() - started < 3
+
+
+@posix_only
 @pytest.mark.skipif(shutil.which("timeout") is None, reason="no coreutils timeout (macOS)")
 @pytest.mark.parametrize("shell", SHELLS)
 def test_timeout_stops_command_on_server(shell: str, tmp_path: Path):

@@ -34,6 +34,7 @@ from app.keystore import KeyStore
 from app.plugins.ssh.buffer import OutputBuffer
 from app.plugins.ssh.errors import (
     SSHConnectError,
+    SSHConnectTimeoutError,
     SSHExecTimeoutError,
     SSHNotConnectedError,
     SSHSessionNotFoundError,
@@ -63,6 +64,7 @@ CLOSED_BY_USER = "closed"
 CLOSED_WORKER_LOST = "worker_connection_lost"
 CLOSED_LOST_IN_WORKER = "lost_in_worker"
 CLOSED_SHUTDOWN = "shutdown"
+CLOSED_EXEC_TIMEOUT = "exec_timeout"
 
 # Тексты ошибок воркера, когда сессии с таким id у него нет: сборка 2026-11 и CoreDocs.
 SESSION_MISSING_MARKERS = ("Session dont founded", "Not connected", "Session not found")
@@ -136,6 +138,7 @@ class SSHSessionManager:
         # Принимает ли воркер дополнительные подключения: None, пока не пробовали
         self._channels_supported: bool | None = None
         self._background: set[asyncio.Task[Any]] = set()
+        self._opening = 0  # подключения, которые ещё идут: тоже занимают место в лимите
 
     # -------------------------------------------------------------- lookup
 
@@ -167,20 +170,26 @@ class SSHSessionManager:
     # ---------------------------------------------------------------- open
 
     async def open(self, params: ConnectParams, keys: KeyStore) -> SSHSession:
-        if len(self._sessions) >= settings.SSH_MAX_SESSIONS:
+        # Считаются и подключения, которые ещё идут: иначе одновременные запросы прошли
+        # бы проверку все разом и открыли больше SSH_MAX_SESSIONS сессий
+        if len(self._sessions) + self._opening >= settings.SSH_MAX_SESSIONS:
             raise SSHTooManySessionsError(
                 f"Too many open SSH sessions (limit {settings.SSH_MAX_SESSIONS}). "
                 "Close unused ones first."
             )
 
-        channel = await self._acquire_channel()
-        session_id = new_session_id()
+        self._opening += 1
         try:
-            await self._connect_in_worker(channel, session_id, params, keys)
-        except BaseException:
-            if channel.dedicated:
-                await channel.client.disconnect()
-            raise
+            channel = await self._acquire_channel()
+            session_id = new_session_id()
+            try:
+                await self._connect_in_worker(channel, session_id, params, keys)
+            except BaseException:
+                if channel.dedicated:
+                    await channel.client.disconnect()
+                raise
+        finally:
+            self._opening -= 1
 
         session = SSHSession(
             id=session_id,
@@ -229,18 +238,26 @@ class SSHSessionManager:
             else:
                 connection["password"] = params.password
 
+            timeout = settings.SSH_CONNECT_TIMEOUT
             try:
                 await channel.client.request(
-                    "ssh_connect", {"connection": connection}, request_id=session_id
+                    "ssh_connect",
+                    {"connection": connection},
+                    request_id=session_id,
+                    timeout=timeout,
                 )
             except WorkerCommandError as e:
                 raise SSHConnectError(e.stderr) from e
-            except WorkerTimeoutError:
+            except WorkerTimeoutError as e:
                 # Воркер может довести подключение до конца уже после таймаута. Отдельное
                 # подключение закроется целиком, а в общем сессию надо закрыть явно.
                 if not channel.dedicated:
                     self._spawn(self._quiet_disconnect(channel.client, session_id))
-                raise
+                raise SSHConnectTimeoutError(
+                    f"No SSH connection to {params.host}:{params.port} within {timeout:g}s: "
+                    "the server does not answer (wrong address or port, firewall, or it is "
+                    "down). The limit is SSH_CONNECT_TIMEOUT"
+                ) from e
 
     async def _acquire_channel(self) -> WorkerChannel:
         shared = self.provider.shared()  # 503, если воркер не подключён
@@ -355,11 +372,19 @@ class SSHSessionManager:
                 else "Without track_cwd the command is not limited on the server"
             )
             logger.warning("SSH exec timed out without a reply", session_id=session.id, waited=wait)
+            if session.channel.dedicated:
+                # Воркер выполняет запросы подключения по очереди и отменять команду не
+                # умеет: все следующие команды сессии встали бы за зависшей. Сессия
+                # закрывается вместе со своим подключением, UI откроет новую.
+                outcome = "The session was closed so that it does not stay blocked; open a new one."
+            else:
+                outcome = "The command may still be running and keep the session busy."
             error = SSHExecTimeoutError(
-                f"No result from the worker within {wait:g}s. {hint}; the command may still be "
-                "running and keep the session busy."
+                f"No result from the worker within {wait:g}s. {hint}. {outcome}"
             )
             self._record_error(session, error, tag)
+            if session.channel.dedicated:
+                self._forget(session, CLOSED_EXEC_TIMEOUT)
             raise error from e
         except WorkerConnectionError as e:
             if session.closed:

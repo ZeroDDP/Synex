@@ -237,6 +237,9 @@ async def test_timeout_error_is_delivered_as_output(fake_term, connect_body):
         )
         error = messages[-1]["data"]
         assert (error["error"], error["request_id"]) == ("ssh_exec_timeout", "t1")
+        # Сессия закрыта, чтобы не висеть за командой, которую воркер не может отменить
+        closed = await recv_until(ws, lambda m: m["type"] == "closed")
+        assert closed[-1]["data"] == {"reason": "exec_timeout"}
 
 
 async def test_session_lost_in_worker(fake_term, fake_worker, connect_body):

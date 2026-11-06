@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     # Перезапускать воркер, если он упал.
     RUST_WORKER_AUTORESTART: bool = True
 
+    # SSH: сколько ждать подключения к серверу (сеть, рукопожатие, вход), сек.
+    SSH_CONNECT_TIMEOUT: float = Field(default=20.0, gt=0)
     # SSH: лимит выполнения команды по умолчанию, сек (можно передать свой в запросе).
     SSH_EXEC_TIMEOUT: float = 30.0
     # Сколько ещё ждать ответа воркера сверх лимита команды, сек.

@@ -131,6 +131,29 @@ async def test_session_limit(ssh, connect_body, monkeypatch):
     assert ssh.provider.open_channels == 2  # лишнее подключение не открывалось
 
 
+async def test_session_limit_holds_for_simultaneous_opens(
+    ssh, fake_worker, connect_body, monkeypatch
+):
+    """Пять одновременных подключений при лимите 2: проверка лимита не должна
+    пропустить все запросы, пока ни одна сессия ещё не открылась."""
+    monkeypatch.setattr(settings, "SSH_MAX_SESSIONS", 2)
+    fake_worker.connect_delay = 0.2
+    responses = await asyncio.gather(
+        *[ssh.api.post("/api/ssh/sessions", json=connect_body) for _ in range(5)]
+    )
+    assert sorted(r.status_code for r in responses) == [201, 201, 429, 429, 429]
+    assert len((await ssh.api.get("/api/ssh/sessions")).json()) == 2
+
+    # Неудачное подключение место в лимите не занимает
+    for session in (await ssh.api.get("/api/ssh/sessions")).json():
+        await ssh.api.delete(f"/api/ssh/sessions/{session['session_id']}")
+    fake_worker.connect_delay = 0
+    await open_session(ssh, connect_body)
+    failed = await ssh.api.post("/api/ssh/sessions", json={**connect_body, "host": "unreachable"})
+    assert failed.status_code == 502
+    await open_session(ssh, connect_body)
+
+
 async def test_failed_connect_closes_its_channel(ssh, connect_body):
     response = await ssh.api.post("/api/ssh/sessions", json={**connect_body, "host": "unreachable"})
     assert response.status_code == 502
@@ -245,16 +268,39 @@ async def test_output_is_buffered(shell_ssh, connect_body):
     assert (info["last_seq"], info["cwd"]) == (5, "/tmp")
 
 
-async def test_worker_errors_are_buffered(ssh, connect_body):
+async def test_worker_errors_are_buffered(fake_worker, missing_socket_path, connect_body):
+    # Общее подключение: там сессия после таймаута остаётся (своё подключение закрылось
+    # бы вместе с сессией, см. test_exec_timeout_closes_blocked_session)
+    client, harness = await make_api(fake_worker.port, missing_socket_path, channels=False)
+    async with client:
+        harness.api = client
+        session_id = (await open_session(harness, connect_body))["session_id"]
+        response = await client.post(
+            f"/api/ssh/sessions/{session_id}/exec",
+            json={"command": "sleep 1", "timeout": 0.1, "track_cwd": False},
+        )
+        assert response.status_code == 504
+        assert "may still be running" in response.json()["detail"]
+        output = (await client.get(f"/api/ssh/sessions/{session_id}/output?since=1")).json()
+    await harness.disconnect()
+    kinds = [(e["kind"], e.get("error")) for e in output["entries"]]
+    assert kinds == [("command", None), ("error", "ssh_exec_timeout")]
+
+
+async def test_exec_timeout_closes_blocked_session(ssh, connect_body, events):
+    """Команда не ответила и после лимита: воркер не умеет её отменить, и следующие
+    команды сессии встали бы за ней. Сессия закрывается, подписчики и /ws узнают."""
     session_id = (await open_session(ssh, connect_body))["session_id"]
     response = await ssh.api.post(
         f"/api/ssh/sessions/{session_id}/exec",
-        json={"command": "sleep 1", "timeout": 0.1, "track_cwd": False},
+        json={"command": "sleep 5", "timeout": 0.1, "track_cwd": False},
     )
     assert response.status_code == 504
-    output = (await ssh.api.get(f"/api/ssh/sessions/{session_id}/output?since=1")).json()
-    kinds = [(e["kind"], e.get("error")) for e in output["entries"]]
-    assert kinds == [("command", None), ("error", "ssh_exec_timeout")]
+    assert (await ssh.api.get(f"/api/ssh/sessions/{session_id}")).status_code == 404
+    await asyncio.sleep(0)
+    closed = [e for e in events if e["action"] == "closed"]
+    assert closed == [{**closed[0], "session_id": session_id, "reason": "exec_timeout"}]
+    assert ssh.provider.open_channels == 0  # подключение сессии закрыто
 
 
 async def test_busy_and_waiting(ssh, connect_body):

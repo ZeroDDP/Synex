@@ -7,6 +7,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from app.core.config import settings
 from app.keystore import get_keystore
 from tests.conftest import needs_timeout_utility, shell_worker_state, start_fake_worker
 from tests.fake_worker import PASSPHRASE, PASSWORD, FakeWorkerState
@@ -192,22 +193,24 @@ async def test_connect_when_worker_is_down(fake_worker, missing_socket_path, con
 
 
 @pytest.mark.parametrize("channels", [True, False], ids=["dedicated", "shared"])
-async def test_connect_timeout_closes_late_session(missing_socket_path, connect_body, channels):
+async def test_connect_timeout_closes_late_session(
+    missing_socket_path, connect_body, channels, monkeypatch
+):
     """Воркер довёл подключение до конца уже после таймаута: сессия не должна повиснуть.
 
     Отдельное подключение закрывается целиком (воркер закроет его сессии сам), а в общем
     подключении уходит ssh_disconnect с тем же id.
     """
+    monkeypatch.setattr(settings, "SSH_CONNECT_TIMEOUT", 0.2)
     state = FakeWorkerState(connect_delay=0.5)
     server = await start_fake_worker(state)
-    client, harness = await make_api(
-        state.port, missing_socket_path, request_timeout=0.2, channels=channels
-    )
+    client, harness = await make_api(state.port, missing_socket_path, channels=channels)
     try:
         async with client:
             response = await client.post("/api/ssh/connect", json=connect_body)
             assert response.status_code == 504
-            assert response.json()["error"] == "worker_timeout"
+            assert response.json()["error"] == "ssh_connect_timeout"
+            assert "10.0.0.1:22 within 0.2s" in response.json()["detail"]
             assert len(harness.manager) == 0
 
             expected = ["ssh_connect"] if channels else ["ssh_connect", "ssh_disconnect"]
@@ -330,8 +333,13 @@ async def test_no_reply_from_worker_is_504(ssh, api, connect_body):
     )
     assert response.status_code == 504
     assert response.json()["error"] == "ssh_exec_timeout"
-    assert "may still be running" in response.json()["detail"]
-    assert len(ssh.manager) == 1  # сессия в воркере жива
+    assert "session was closed" in response.json()["detail"]
+    # Воркер не умеет отменять команду: следующие встали бы за ней. Сессия закрыта
+    # вместе со своим подключением, новая работает сразу.
+    assert len(ssh.manager) == 0
+    await api.post("/api/ssh/connect", json=connect_body)
+    fresh = await api.post("/api/ssh/exec", json={"command": "echo", "timeout": 5})
+    assert fresh.status_code == 200, fresh.text
 
 
 @needs_timeout_utility

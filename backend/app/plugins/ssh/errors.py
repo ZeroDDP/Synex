@@ -10,6 +10,13 @@ class SSHConnectError(AppError):
     status_code = 502
 
 
+class SSHConnectTimeoutError(AppError):
+    """Сервер не ответил за SSH_CONNECT_TIMEOUT: неверный адрес, файрвол или он выключен."""
+
+    code = "ssh_connect_timeout"
+    status_code = 504
+
+
 class SSHNotConnectedError(AppError):
     """Нет открытой сессии, или воркер её уже не знает (например, после перезапуска)."""
 

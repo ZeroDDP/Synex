@@ -10,9 +10,11 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import socket
 import sys
 import time
 
+from app.core.config import settings
 from tests.conftest import get_free_port
 from tests.integration.sshd import PASSPHRASE, SSHTarget
 from tests.integration.ui import UI
@@ -162,6 +164,22 @@ async def test_connection_errors_reach_ui(ui: UI, ssh_target: SSHTarget):
     assert refused.json()["detail"]
 
 
+async def test_silent_server_gives_connect_timeout(ui: UI, ssh_target: SSHTarget, monkeypatch):
+    """Порт открыт, но SSH не отвечает (файрвол, зависший сервер): понятный 504
+    ssh_connect_timeout через SSH_CONNECT_TIMEOUT, а не «воркер не ответил»."""
+    monkeypatch.setattr(settings, "SSH_CONNECT_TIMEOUT", 2.0)
+    with socket.create_server(("127.0.0.1", 0)) as silent:  # принимает TCP и молчит
+        body = {**ssh_target.connection(), "host": "127.0.0.1", "port": silent.getsockname()[1]}
+        started = time.monotonic()
+        response = await ui.api.post("/api/ssh/sessions", json=body)
+        assert response.status_code == 504, response.text
+        assert response.json()["error"] == "ssh_connect_timeout"
+        assert time.monotonic() - started < 10
+    # Воркер после этого работает как обычно
+    session_id = await ui.open_session(ssh_target.connection())
+    assert (await ui.exec(session_id, "echo alive"))["stdout"] == "alive"
+
+
 async def test_removed_cwd_does_not_run_command_in_home(ui: UI, ssh_target: SSHTarget):
     """Папку сессии удалили из другой сессии: команда не выполняется (иначе `rm` сработал
     бы в домашней папке), UI получает код 1 и объяснение, сессия переходит в home."""
@@ -177,6 +195,16 @@ async def test_removed_cwd_does_not_run_command_in_home(ui: UI, ssh_target: SSHT
     home = (await ui.exec(second, "cd ~ && pwd"))["stdout"]
     assert result["cwd"] == home
     assert (await ui.exec(second, "ls must-not-exist"))["exit_code"] != 0
+
+
+async def test_command_does_not_wait_for_input(ui: UI, ssh_target: SSHTarget):
+    """Команда, которая читает ввод (cat, read, sudo с паролем), сразу получает конец
+    ввода и не держит сессию до таймаута."""
+    session_id = await ui.open_session(ssh_target.connection())
+    started = time.monotonic()
+    result = await ui.exec(session_id, "cat; read x || echo no-input", timeout=30)
+    assert (result["stdout"], result["exit_code"], result["timed_out"]) == ("no-input", 0, False)
+    assert time.monotonic() - started < 10
 
 
 async def test_terminal_reconnect_replays_missed_output(ui: UI, ssh_target: SSHTarget):
