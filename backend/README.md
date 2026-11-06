@@ -120,7 +120,8 @@ glibc 2.38 или новее (Ubuntu 24.04, Debian 13, Fedora 39 и новее).
 | PATCH | `/api/keys/{id}` | Переименовать или сменить комментарий: `{name?, comment?}` |
 | DELETE | `/api/keys/{id}` | Удалить → 204 |
 | GET | `/api/monitor/metrics` | Метрики серверов сейчас (то же, что `metrics` в `/ws`) |
-| GET | `/api/health` | Состояние бэкенда и воркера |
+| GET | `/api/health` | Состояние бэкенда и воркера, загруженные плагины |
+| GET | `/api/plugins` | Плагины: версия, описание, зависимости, `status` и причина сбоя (см. ниже) |
 | WS | `/ws` | Поток данных для UI: метрики серверов каждые 500 мс (см. ниже) |
 
 С `DEBUG=true` Swagger доступен на `/api/docs`.
@@ -355,6 +356,7 @@ ws.onmessage = (e) => console.log(JSON.parse(e.data));
 | 502 | `ssh_connect_failed` | Воркер не смог подключиться (хост, ключ, пароль, фраза) |
 | 504 | `ssh_connect_timeout` | Сервер не ответил за `SSH_CONNECT_TIMEOUT` (20 с): адрес, порт, файрвол |
 | 502 | `worker_command_failed` | Воркер вернул ошибку |
+| 503 | `plugin_unavailable` | Плагин включён, но не загрузился (причина в `/api/plugins`) |
 | 503 | `worker_unavailable` | Воркер не запущен или IPC недоступен |
 | 503 | `keystore_unavailable` | Нет доступа к Credential Manager / неверный `KEYSTORE_MASTER_KEY` |
 | 504 | `ssh_exec_timeout` | Воркер не вернул результат команды |
@@ -394,7 +396,25 @@ tests/                 pytest; fake_worker.py имитирует synex_worker
 * Плагин, который не установлен, не импортируется или чья зависимость недоступна,
   пропускается с предупреждением в логе; остальные работают.
 * Если `on_load` плагина упал, он и зависящие от него плагины не загружаются, а
-  backend продолжает работать без них.
+  backend продолжает работать без них. Их эндпоинты (и WebSocket) отвечают 503
+  `plugin_unavailable`.
+
+`GET /api/plugins` показывает UI, что работает:
+
+```json
+[
+  {"name": "ssh", "version": "0.5.0", "description": "SSH-сессии и терминал через Rust-воркер",
+   "requires": [], "status": "loaded", "error": null},
+  {"name": "monitor", "version": "0.1.0", "description": "Метрики серверов: CPU, память, диски, видеокарты",
+   "requires": ["ssh"], "status": "loaded", "error": null},
+  {"name": "sftp", "version": null, "description": "", "requires": [],
+   "status": "skipped", "error": "not installed"}
+]
+```
+
+`status`: `loaded` работает; `failed` включён, но `on_load` упал или не загрузилась
+зависимость; `skipped` не установлен, не импортируется или нет зависимости;
+`registered` ещё не загружен (приложение стартует).
 
 ## Тесты
 

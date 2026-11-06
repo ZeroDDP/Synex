@@ -12,14 +12,16 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from types import ModuleType
 
 import structlog
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from app.core.config import settings
+from app.core.errors import AppError
 from app.plugins.base import BasePlugin
 
 logger = structlog.get_logger()
@@ -41,6 +43,13 @@ class PluginState:
     status: PluginStatus
     plugin: BasePlugin | None = None
     error: str | None = None
+
+
+class PluginUnavailableError(AppError):
+    """Плагин включён, но не загрузился: его эндпоинты отвечают 503."""
+
+    code = "plugin_unavailable"
+    status_code = 503
 
 
 class PluginManager:
@@ -67,6 +76,12 @@ class PluginManager:
     def state(self, name: str) -> PluginState | None:
         return self._states.get(name)
 
+    def states(self) -> list[PluginState]:
+        """Подключённые плагины в порядке загрузки, затем пропущенные."""
+        registered = [self._states[name] for name in self.plugins]
+        skipped = [s for s in self._states.values() if s.status == PluginStatus.SKIPPED]
+        return registered + skipped
+
     # ------------------------------------------------------------ discover
 
     def discover(self, api_router: APIRouter, enabled: list[str] | None = None) -> None:
@@ -90,7 +105,12 @@ class PluginManager:
         for name in self._order(found):
             plugin = found[name]
             if plugin.router is not None:
-                api_router.include_router(plugin.router, prefix=f"/{name}", tags=[name])
+                api_router.include_router(
+                    plugin.router,
+                    prefix=f"/{name}",
+                    tags=[name],
+                    dependencies=[Depends(self._availability_check(name))],
+                )
             self.plugins[name] = plugin
             self._states[name] = PluginState(name, PluginStatus.REGISTERED, plugin)
             logger.debug("Plugin registered", plugin=name, version=plugin.version)
@@ -145,6 +165,16 @@ class PluginManager:
             order.append(ready)
             del pending[ready]
         return order
+
+    def _availability_check(self, name: str) -> Callable[[], None]:
+        """Зависимость для всех эндпоинтов плагина: 503, если он не загрузился."""
+
+        def plugin_is_available() -> None:
+            state = self._states.get(name)
+            if state is not None and state.status == PluginStatus.FAILED:
+                raise PluginUnavailableError(f"Plugin '{name}' is not available: {state.error}")
+
+        return plugin_is_available
 
     def _skip(self, name: str, reason: str) -> None:
         logger.warning("Plugin is enabled but skipped", plugin=name, reason=reason)

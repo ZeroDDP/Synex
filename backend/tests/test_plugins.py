@@ -7,14 +7,20 @@ import textwrap
 import uuid
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi import APIRouter, FastAPI
+from websockets.asyncio.client import connect
+from websockets.exceptions import InvalidStatus
 
+from app.api.router import build_api_router
+from app.core.errors import register_error_handlers
 from app.plugins.manager import PluginManager, PluginStatus
+from tests.ssh_helpers import recv_json, serve
 
 # Плагины для тестов: имя -> (requires, код on_load). Пакет создаётся во временной папке.
 PLUGIN_TEMPLATE = """
-from fastapi import APIRouter
+from fastapi import APIRouter, WebSocket
 
 import {package} as journal
 from app.plugins.base import BasePlugin
@@ -25,6 +31,13 @@ router = APIRouter()
 @router.get("/ping")
 async def ping():
     return {{"plugin": {name!r}}}
+
+
+@router.websocket("/ws")
+async def ws(websocket: WebSocket):
+    await websocket.accept()
+    await websocket.send_json({{"plugin": {name!r}}})
+    await websocket.close()
 
 
 class TestPlugin(BasePlugin):
@@ -183,3 +196,87 @@ def test_builtin_plugins_declare_dependencies():
     assert manager.names == ["ssh", "monitor"]
     for plugin in manager.plugins.values():
         assert plugin.description
+
+
+async def build_app(package: str, enabled: list[str]) -> FastAPI:
+    app = FastAPI()
+    register_error_handlers(app)
+    api_router = build_api_router()
+    app.state.plugins = PluginManager(package)
+    app.state.plugins.discover(api_router, enabled=enabled)
+    app.include_router(api_router)
+    await app.state.plugins.load_all()
+    return app
+
+
+async def test_plugins_api_and_unavailable_plugin(make_plugins):
+    package = make_plugins(
+        {
+            "good": ((), ""),
+            "broken": ((), "raise RuntimeError('no docker here')"),
+            "user": (("broken",), ""),
+        }
+    )
+    app = await build_app(package, ["good", "user", "missing"])
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as api:
+        plugins = (await api.get("/api/plugins")).json()
+        assert plugins == [
+            {
+                "name": "good",
+                "version": "1.0.0",
+                "description": "Plugin good",
+                "requires": [],
+                "status": "loaded",
+                "error": None,
+            },
+            {
+                "name": "broken",
+                "version": "1.0.0",
+                "description": "Plugin broken",
+                "requires": [],
+                "status": "failed",
+                "error": "on_load failed: RuntimeError: no docker here",
+            },
+            {
+                "name": "user",
+                "version": "1.0.0",
+                "description": "Plugin user",
+                "requires": ["broken"],
+                "status": "failed",
+                "error": "required plugin 'broken' is not loaded",
+            },
+            {
+                "name": "missing",
+                "version": None,
+                "description": "",
+                "requires": [],
+                "status": "skipped",
+                "error": "not installed",
+            },
+        ]
+
+        assert (await api.get("/api/good/ping")).json() == {"plugin": "good"}
+        response = await api.get("/api/broken/ping")
+        assert response.status_code == 503
+        assert response.json() == {
+            "error": "plugin_unavailable",
+            "detail": "Plugin 'broken' is not available: on_load failed: RuntimeError: "
+            "no docker here",
+        }
+        assert (await api.get("/api/user/ping")).json()["error"] == "plugin_unavailable"
+        assert (await api.get("/api/health")).json()["plugins"] == ["good"]
+
+
+async def test_websocket_of_unavailable_plugin_is_rejected(make_plugins):
+    package = make_plugins({"good": ((), ""), "broken": ((), "raise RuntimeError('boom')")})
+    app = await build_app(package, ["good", "broken"])
+    async with serve(app) as base:
+        async with connect(f"{base}/api/good/ws") as ws:
+            assert await recv_json(ws) == {"plugin": "good"}
+        with pytest.raises(InvalidStatus) as rejected:
+            await connect(f"{base}/api/broken/ws")
+        # Рукопожатие отклоняется тем же ответом 503, что и обычный запрос
+        assert rejected.value.response.status_code == 503
+        assert b"plugin_unavailable" in rejected.value.response.body
