@@ -1,8 +1,9 @@
 # Проверки backend на каждый push в main и pull request: ruff и pytest на Windows,
 # Linux и macOS. Отдельный прогон на Linux с эмулятором shell (SYNEX_TEST_SHELL=emulated)
 # проверяет тот же путь, по которому тесты команд идут на Windows. Интеграционные тесты
-# (полный цикл UI → FastAPI → synex_worker → SSH-сервер) идут на Linux: synex_worker
-# для Linux из репозитория и локальный sshd, который тесты поднимают сами.
+# (полный цикл UI → FastAPI → synex_worker → SSH-сервер) идут на Linux дважды: с
+# synex_worker из репозитория и с воркером, собранным из core/, против локального sshd,
+# который тесты поднимают сами. Поэтому workflow запускается и при изменениях в core/.
 name: backend
 
 on:
@@ -10,10 +11,12 @@ on:
     branches: [main]
     paths:
       - "backend/**"
+      - "core/**"
       - ".github/workflows/backend.yml"
   pull_request:
     paths:
       - "backend/**"
+      - "core/**"
       - ".github/workflows/backend.yml"
   workflow_dispatch:
 
@@ -75,5 +78,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends openssh-server
           sudo mkdir -p /run/sshd
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
       - run: uv sync --locked
-      - run: uv run pytest -m integration -ra
+      - name: Integration tests, bundled worker (backend/app/core/target/release)
+        run: uv run pytest -m integration -ra
+        env:
+          # Путь не по умолчанию: бэкенд берёт ровно этот файл, без сборки из core/
+          RUST_EXECUTABLE_PATH_UNIX: ${{ github.workspace }}/backend/app/core/target/release/synex_worker
+      - name: Build the worker from core/
+        run: cargo build --release --locked
+        working-directory: core
+      - name: Integration tests, worker built from core/
+        # Сборка свежее бинарника из репозитория, бэкенд выберет её сам
+        run: uv run pytest -m integration -ra

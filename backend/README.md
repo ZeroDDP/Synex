@@ -453,8 +453,10 @@ uv run pytest -m "not integration"      # всё, кроме них
 SYNEX_TEST_WORKER=./run_worker.sh uv run pytest -m integration   # exe через wine
 ```
 
-В GitHub Actions их запускает отдельный джоб `integration`: Linux-воркер из
-репозитория и `sshd` на раннере. Обычные джобы `test` идут с `-m "not integration"`.
+В GitHub Actions их запускает отдельный джоб `integration`, дважды: с Linux-воркером из
+репозитория и с воркером, собранным из `core/` (`cargo build --release`), против `sshd`
+на раннере. Поэтому workflow запускается и при изменениях в `core/`: правка Rust-кода
+сразу проверяется вместе с бэкендом. Обычные джобы `test` идут с `-m "not integration"`.
 
 `test_real_worker_raw_exit_codes` помечен `xfail`: воркер возвращает `exit_code=0` для
 любой команды. Это баг на стороне Rust. Пока он не исправлен, `/api/ssh/exec` берёт
