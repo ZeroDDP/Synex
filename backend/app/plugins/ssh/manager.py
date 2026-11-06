@@ -34,6 +34,7 @@ from app.keystore import KeyStore
 from app.plugins.ssh.buffer import OutputBuffer
 from app.plugins.ssh.errors import (
     SSHConnectError,
+    SSHConnectTimeoutError,
     SSHExecTimeoutError,
     SSHNotConnectedError,
     SSHSessionNotFoundError,
@@ -237,18 +238,26 @@ class SSHSessionManager:
             else:
                 connection["password"] = params.password
 
+            timeout = settings.SSH_CONNECT_TIMEOUT
             try:
                 await channel.client.request(
-                    "ssh_connect", {"connection": connection}, request_id=session_id
+                    "ssh_connect",
+                    {"connection": connection},
+                    request_id=session_id,
+                    timeout=timeout,
                 )
             except WorkerCommandError as e:
                 raise SSHConnectError(e.stderr) from e
-            except WorkerTimeoutError:
+            except WorkerTimeoutError as e:
                 # Воркер может довести подключение до конца уже после таймаута. Отдельное
                 # подключение закроется целиком, а в общем сессию надо закрыть явно.
                 if not channel.dedicated:
                     self._spawn(self._quiet_disconnect(channel.client, session_id))
-                raise
+                raise SSHConnectTimeoutError(
+                    f"No SSH connection to {params.host}:{params.port} within {timeout:g}s: "
+                    "the server does not answer (wrong address or port, firewall, or it is "
+                    "down). The limit is SSH_CONNECT_TIMEOUT"
+                ) from e
 
     async def _acquire_channel(self) -> WorkerChannel:
         shared = self.provider.shared()  # 503, если воркер не подключён

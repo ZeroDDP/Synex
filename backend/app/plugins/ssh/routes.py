@@ -42,7 +42,7 @@ CONNECT_ERRORS = {
     429: {"description": "Открыто слишком много сессий (SSH_MAX_SESSIONS)"},
     502: {"description": "Воркер не смог подключиться: хост недоступен, ключ или пароль"},
     503: {"description": "Воркер не запущен или IPC недоступен"},
-    504: {"description": "Воркер не ответил вовремя"},
+    504: {"description": "Сервер не ответил за SSH_CONNECT_TIMEOUT (ssh_connect_timeout)"},
 }
 EXEC_ERRORS = {
     404: {"description": "Сессии session_id нет"},
