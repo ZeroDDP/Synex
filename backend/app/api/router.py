@@ -25,7 +25,7 @@ def build_api_router() -> APIRouter:
         plugins = getattr(request.app.state, "plugins", None)
         return HealthResponse(
             status="ok",
-            plugins=plugins.names if plugins is not None else [],
+            plugins=plugins.loaded if plugins is not None else [],
             worker=worker_manager.status(),
         )
 

@@ -16,6 +16,8 @@ class MonitorPlugin(BasePlugin):
 
     name = "monitor"
     version = "0.1.0"
+    description = "Метрики серверов: CPU, память, диски, видеокарты"
+    requires = ("ssh",)
     router = router
 
     async def on_load(self) -> None:
