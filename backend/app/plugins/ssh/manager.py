@@ -136,6 +136,7 @@ class SSHSessionManager:
         # Принимает ли воркер дополнительные подключения: None, пока не пробовали
         self._channels_supported: bool | None = None
         self._background: set[asyncio.Task[Any]] = set()
+        self._opening = 0  # подключения, которые ещё идут: тоже занимают место в лимите
 
     # -------------------------------------------------------------- lookup
 
@@ -167,20 +168,26 @@ class SSHSessionManager:
     # ---------------------------------------------------------------- open
 
     async def open(self, params: ConnectParams, keys: KeyStore) -> SSHSession:
-        if len(self._sessions) >= settings.SSH_MAX_SESSIONS:
+        # Считаются и подключения, которые ещё идут: иначе одновременные запросы прошли
+        # бы проверку все разом и открыли больше SSH_MAX_SESSIONS сессий
+        if len(self._sessions) + self._opening >= settings.SSH_MAX_SESSIONS:
             raise SSHTooManySessionsError(
                 f"Too many open SSH sessions (limit {settings.SSH_MAX_SESSIONS}). "
                 "Close unused ones first."
             )
 
-        channel = await self._acquire_channel()
-        session_id = new_session_id()
+        self._opening += 1
         try:
-            await self._connect_in_worker(channel, session_id, params, keys)
-        except BaseException:
-            if channel.dedicated:
-                await channel.client.disconnect()
-            raise
+            channel = await self._acquire_channel()
+            session_id = new_session_id()
+            try:
+                await self._connect_in_worker(channel, session_id, params, keys)
+            except BaseException:
+                if channel.dedicated:
+                    await channel.client.disconnect()
+                raise
+        finally:
+            self._opening -= 1
 
         session = SSHSession(
             id=session_id,

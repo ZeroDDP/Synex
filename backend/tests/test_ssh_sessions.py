@@ -131,6 +131,29 @@ async def test_session_limit(ssh, connect_body, monkeypatch):
     assert ssh.provider.open_channels == 2  # лишнее подключение не открывалось
 
 
+async def test_session_limit_holds_for_simultaneous_opens(
+    ssh, fake_worker, connect_body, monkeypatch
+):
+    """Пять одновременных подключений при лимите 2: проверка лимита не должна
+    пропустить все запросы, пока ни одна сессия ещё не открылась."""
+    monkeypatch.setattr(settings, "SSH_MAX_SESSIONS", 2)
+    fake_worker.connect_delay = 0.2
+    responses = await asyncio.gather(
+        *[ssh.api.post("/api/ssh/sessions", json=connect_body) for _ in range(5)]
+    )
+    assert sorted(r.status_code for r in responses) == [201, 201, 429, 429, 429]
+    assert len((await ssh.api.get("/api/ssh/sessions")).json()) == 2
+
+    # Неудачное подключение место в лимите не занимает
+    for session in (await ssh.api.get("/api/ssh/sessions")).json():
+        await ssh.api.delete(f"/api/ssh/sessions/{session['session_id']}")
+    fake_worker.connect_delay = 0
+    await open_session(ssh, connect_body)
+    failed = await ssh.api.post("/api/ssh/sessions", json={**connect_body, "host": "unreachable"})
+    assert failed.status_code == 502
+    await open_session(ssh, connect_body)
+
+
 async def test_failed_connect_closes_its_channel(ssh, connect_body):
     response = await ssh.api.post("/api/ssh/sessions", json={**connect_body, "host": "unreachable"})
     assert response.status_code == 502
