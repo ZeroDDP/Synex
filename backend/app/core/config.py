@@ -88,6 +88,8 @@ class Settings(BaseSettings):
     # Серверы опрашиваются, пока к /ws подключён UI или столько секунд после
     # последнего GET /api/monitor/metrics.
     MONITOR_DEMAND_TIMEOUT: float = Field(default=10.0, gt=0)
+    # Как часто обновлять диски и видеокарты сервера (df, nvidia-smi), сек.
+    MONITOR_HARDWARE_INTERVAL: float = Field(default=10.0, gt=0)
 
     # WebSocket /ws (поток данных для UI). Тестовые метрики вместо настоящих: для
     # разработки UI без SSH-сервера; период публикации, сек.

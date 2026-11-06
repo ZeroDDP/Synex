@@ -56,6 +56,24 @@ class MemoryMetrics(BaseModel):
     max: float | None = None
 
 
+class DiskMetrics(BaseModel):
+    mount: str = Field(description="Точка монтирования")
+    filesystem: str = Field(description="Устройство, например /dev/sda1")
+    total: int
+    used: int
+    available: int
+    percent: float = Field(description="Занято от доступного, как в df")
+
+
+class GpuMetrics(BaseModel):
+    index: int
+    name: str
+    utilization: float | None = Field(description="Загрузка, %; null: карта не сообщает")
+    memory_used: int | None
+    memory_total: int | None
+    temperature: float | None = Field(description="°C")
+
+
 class ServerMetrics(BaseModel):
     server: str = Field(description='"host:port": один сервер, сколько бы сессий к нему ни было')
     host: str
@@ -67,6 +85,13 @@ class ServerMetrics(BaseModel):
     age_ms: int | None = Field(default=None, description="Сколько прошло с последнего замера")
     cpu: CpuMetrics | None = None
     memory: MemoryMetrics | None = None
+    disks: list[DiskMetrics] | None = Field(
+        default=None, description="Диски (df), раз в MONITOR_HARDWARE_INTERVAL; null: ещё нет"
+    )
+    gpus: list[GpuMetrics] | None = Field(
+        default=None, description="Видеокарты NVIDIA (nvidia-smi); []: их нет; null: ещё нет"
+    )
+    hardware_updated_at: int | None = Field(default=None, description="Время замера дисков, мс")
     error: str | None = None
 
 
@@ -111,11 +136,13 @@ class _Walk:
 
 
 class FakeMetricsSource:
-    """Тестовый сервер на 8 ГиБ RAM: CPU и память меняются плавно."""
+    """Тестовый сервер на 8 ГиБ RAM и диском 256 ГиБ: CPU и память меняются плавно."""
 
     HOST = "demo.synex.local"
     PORT = 22
     MEMORY_TOTAL = 8 * GIB
+    DISK_TOTAL = 256 * GIB
+    DISK_USED = 100 * GIB
 
     def __init__(
         self, seed: int | None = None, interval: float = 0.5, window: float = 30.0
@@ -137,13 +164,14 @@ class FakeMetricsSource:
         cpu_avg, cpu_min, cpu_max = percent_stats(list(self._cpu_history))
         mem_avg, mem_min, mem_max = percent_stats(list(self._memory_history))
         used = int(self.MEMORY_TOTAL * memory / 100)
+        updated_at = time.time_ns() // 1_000_000
         server = ServerMetrics(
             server=f"{self.HOST}:{self.PORT}",
             host=self.HOST,
             port=self.PORT,
             session_ids=[],
             status="ok",
-            updated_at=time.time_ns() // 1_000_000,
+            updated_at=updated_at,
             age_ms=0,
             cpu=CpuMetrics(percent=cpu, avg=cpu_avg, min=cpu_min, max=cpu_max),
             memory=MemoryMetrics(
@@ -155,6 +183,18 @@ class FakeMetricsSource:
                 min=mem_min,
                 max=mem_max,
             ),
+            disks=[
+                DiskMetrics(
+                    mount="/",
+                    filesystem="/dev/sda1",
+                    total=self.DISK_TOTAL,
+                    used=self.DISK_USED,
+                    available=self.DISK_TOTAL - self.DISK_USED,
+                    percent=round(self.DISK_USED / self.DISK_TOTAL * 100, 2),
+                )
+            ],
+            gpus=[],
+            hardware_updated_at=updated_at,
         )
         return MetricsSnapshot(
             source="fake",

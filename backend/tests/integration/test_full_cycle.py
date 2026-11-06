@@ -97,6 +97,10 @@ async def test_metrics_full_cycle(ui: UI, ssh_target: SSHTarget):
         assert 0 <= metrics["cpu"]["percent"] <= 100
         assert 0 < metrics["memory"]["used"] < metrics["memory"]["total"]
         assert metrics["age_ms"] < 3_000
+        # Диски (df) приходят вместе с первым замером; корень есть всегда
+        root = next(d for d in metrics["disks"] if d["mount"] == "/")
+        assert 0 < root["used"] < root["total"] and 0 <= root["percent"] <= 100
+        assert isinstance(metrics["gpus"], list)  # [] без NVIDIA
 
         await ui.api.delete(f"/api/ssh/sessions/{first}")
         await events.wait_for("metrics", ok_with(1), timeout=30)

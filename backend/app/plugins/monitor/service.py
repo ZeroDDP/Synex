@@ -12,6 +12,8 @@
   в событие metrics, а хаб /ws рассылает её UI.
 * Серверы опрашиваются, только пока метрики кому-то нужны: к /ws подключён UI или
   недавно был GET /api/monitor/metrics.
+* Диски и видеокарты (hardware.py) обновляются реже, раз в MONITOR_HARDWARE_INTERVAL:
+  после удачного замера CPU и памяти, через ту же свободную сессию.
 """
 
 from __future__ import annotations
@@ -30,6 +32,8 @@ from app.core.errors import AppError, WorkerTimeoutError
 from app.core.event_bus import event_bus
 from app.core.periodic import Periodic
 from app.plugins.monitor.aggregator import Sample, ServerState, server_key
+from app.plugins.monitor.hardware import COMMAND as HARDWARE_COMMAND
+from app.plugins.monitor.hardware import parse_hardware
 from app.plugins.monitor.values import MonitorValuesError, parse_values
 from app.plugins.ssh.errors import SSHNotConnectedError, SSHSessionNotFoundError
 from app.plugins.ssh.manager import SSH_SESSION_EVENT, SSHSessionManager, ssh_manager
@@ -164,6 +168,8 @@ class MetricsMonitor:
                         values=values,
                     )
                 )
+                if state.hardware_due(time.monotonic(), settings.MONITOR_HARDWARE_INTERVAL):
+                    await self._poll_hardware(state, session)
                 return
             state.record_busy()
         except Exception as e:
@@ -171,6 +177,25 @@ class MetricsMonitor:
             state.record_error(repr(e))
         finally:
             state.polling = False
+
+    async def _poll_hardware(self, state: ServerState, session: SSHSession) -> None:
+        """Диски и GPU одной командой. Неудача не мешает CPU и памяти: следующая попытка
+        через MONITOR_HARDWARE_INTERVAL."""
+        started, wall_ms = time.monotonic(), time.time_ns() // 1_000_000
+        try:
+            response = await self.sessions.request_if_idle(
+                session.id,
+                "ssh_exec",
+                {"command": HARDWARE_COMMAND},
+                timeout=settings.MONITOR_POLL_TIMEOUT,
+            )
+        except AppError as e:
+            logger.debug("Disk and GPU poll failed", server=state.key, error=e.detail)
+            state.hardware_at = started
+            return
+        if response is None:
+            return  # сессию успели занять: попробуем на следующем тике
+        state.record_hardware(parse_hardware(str(response.get("stdout") or "")), started, wall_ms)
 
     def _sync(self) -> dict[str, list[SSHSession]]:
         """Группирует открытые сессии по серверам и забывает серверы без сессий."""

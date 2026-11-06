@@ -6,12 +6,22 @@
 
 from __future__ import annotations
 
+import math
 import time
 from collections import deque
 from dataclasses import dataclass
 
+from app.plugins.monitor.hardware import Hardware
 from app.plugins.monitor.values import Values
-from app.ws.metrics import CpuMetrics, MemoryMetrics, ServerMetrics, ServerStatus, percent_stats
+from app.ws.metrics import (
+    CpuMetrics,
+    DiskMetrics,
+    GpuMetrics,
+    MemoryMetrics,
+    ServerMetrics,
+    ServerStatus,
+    percent_stats,
+)
 
 
 @dataclass(frozen=True)
@@ -38,6 +48,9 @@ class ServerState:
         self.polling = False  # опрос уже идёт: следующий не запускается
         self.preferred_session: str | None = None  # опрашиваем через неё, пока свободна
         self.primed: set[str] = set()  # сессии, где у воркера уже есть прошлый замер CPU
+        self.hardware: Hardware | None = None  # диски и GPU (hardware.py)
+        self.hardware_at = -math.inf  # time.monotonic() последнего замера дисков
+        self.hardware_wall_ms: int | None = None
 
     @property
     def key(self) -> str:
@@ -49,6 +62,14 @@ class ServerState:
         self.error = None
         self.busy = False
         self._trim(sample.at)
+
+    def record_hardware(self, hardware: Hardware, at: float, wall_ms: int) -> None:
+        self.hardware = hardware
+        self.hardware_at = at
+        self.hardware_wall_ms = wall_ms
+
+    def hardware_due(self, now: float, interval: float) -> bool:
+        return now - self.hardware_at >= interval
 
     def record_error(self, message: str) -> None:
         self.error = message
@@ -79,6 +100,7 @@ class ServerState:
             "session_ids": session_ids,
             "busy": self.busy,
             "error": self.error,
+            **self._hardware_fields(),
         }
         if last is None:
             return ServerMetrics(**base, status="error" if self.error else "waiting")
@@ -116,6 +138,15 @@ class ServerState:
                 max=mem_max,
             ),
         )
+
+    def _hardware_fields(self) -> dict[str, object]:
+        if self.hardware is None:
+            return {}
+        return {
+            "disks": [DiskMetrics(**vars(d)) for d in self.hardware.disks],
+            "gpus": [GpuMetrics(**vars(g)) for g in self.hardware.gpus],
+            "hardware_updated_at": self.hardware_wall_ms,
+        }
 
     def _trim(self, now: float) -> None:
         # Последний замер остаётся всегда: по нему видны значения устаревших метрик
