@@ -389,7 +389,9 @@ tests/                 pytest; fake_worker.py имитирует synex_worker
 ```
 
 Новый функционал добавляется плагином: `app/plugins/<name>/plugin.py` с подклассом
-`BasePlugin` и `router`, затем имя добавляется в `PLUGINS_ENABLED`.
+`BasePlugin` и `router`. По умолчанию (`PLUGINS_ENABLED=*`) включены все установленные
+плагины; список через запятую включает только перечисленные, остальные видны в
+`/api/plugins` со статусом `disabled`.
 
 * `requires = ("ssh",)`: плагины, без которых этот не работает. Они включаются сами
   (даже если их нет в `PLUGINS_ENABLED`) и загружаются раньше.
@@ -414,7 +416,8 @@ tests/                 pytest; fake_worker.py имитирует synex_worker
 
 `status`: `loaded` работает; `failed` включён, но `on_load` упал или не загрузилась
 зависимость; `skipped` не установлен, не импортируется или нет зависимости;
-`registered` ещё не загружен (приложение стартует).
+`disabled` установлен, но не включён в `PLUGINS_ENABLED`; `registered` ещё не загружен
+(приложение стартует).
 
 ## Тесты
 

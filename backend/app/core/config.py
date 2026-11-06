@@ -72,8 +72,9 @@ class Settings(BaseSettings):
     # Задавайте явно только там, где системного хранилища нет (CI, headless Linux).
     KEYSTORE_MASTER_KEY: SecretStr | None = None
 
-    # Плагины через запятую.
-    PLUGINS_ENABLED: str = "ssh,keys,monitor"
+    # Плагины через запятую; * значит все установленные (app/plugins/<name>/plugin.py).
+    # Нужные плагинам зависимости включаются сами.
+    PLUGINS_ENABLED: str = "*"
 
     # Мониторинг серверов (плагин monitor). Как часто опрашивать сервер и как часто
     # отправлять метрики в /ws, сек.

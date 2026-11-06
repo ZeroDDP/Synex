@@ -14,6 +14,7 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import InvalidStatus
 
 from app.api.router import build_api_router
+from app.core.config import Settings
 from app.core.errors import register_error_handlers
 from app.plugins.manager import PluginManager, PluginStatus
 from tests.ssh_helpers import recv_json, serve
@@ -280,3 +281,31 @@ async def test_websocket_of_unavailable_plugin_is_rejected(make_plugins):
         # Рукопожатие отклоняется тем же ответом 503, что и обычный запрос
         assert rejected.value.response.status_code == 503
         assert b"plugin_unavailable" in rejected.value.response.body
+
+
+async def test_star_enables_all_installed_plugins(make_plugins, tmp_path):
+    package = make_plugins({"b": (("a",), ""), "a": ((), ""), "c": ((), "")})
+    (tmp_path / package / "not_a_plugin").mkdir()  # папка без plugin.py
+    manager = PluginManager(package)
+    assert manager.installed() == ["a", "b", "c"]
+    manager.discover(APIRouter(), enabled=["*"])
+    assert manager.names == ["a", "b", "c"]
+
+
+async def test_installed_but_not_enabled_plugins_are_listed(make_plugins):
+    package = make_plugins({"on": ((), ""), "off": ((), "")})
+    app = await build_app(package, ["on"])
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as api:
+        plugins = (await api.get("/api/plugins")).json()
+        assert (await api.get("/api/off/ping")).status_code == 404
+    assert [(p["name"], p["status"]) for p in plugins] == [("on", "loaded"), ("off", "disabled")]
+
+
+def test_default_enables_every_builtin_plugin():
+    assert Settings.model_fields["PLUGINS_ENABLED"].default == "*"
+    manager = PluginManager()
+    manager.discover(APIRouter(), enabled=["*"])
+    assert set(manager.names) == set(manager.installed()) >= {"ssh", "keys", "monitor"}
+    assert manager.names.index("ssh") < manager.names.index("monitor")

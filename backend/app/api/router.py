@@ -47,7 +47,8 @@ def build_api_router() -> APIRouter:
         description=(
             "status: `loaded` работает; `failed` включён, но on_load упал или не загрузилась "
             "зависимость (его эндпоинты отвечают 503 `plugin_unavailable`); `skipped` не "
-            "установлен, не импортируется или нет зависимости; `registered` ещё не загружен. "
+            "установлен, не импортируется или нет зависимости; `disabled` установлен, но не "
+            "включён в PLUGINS_ENABLED; `registered` ещё не загружен. "
             "Причина в `error`."
         ),
     )

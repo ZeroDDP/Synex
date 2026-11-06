@@ -1,6 +1,9 @@
 """Менеджер плагинов: находит включённые плагины, упорядочивает их по зависимостям,
 подключает роутеры и вызывает хуки.
 
+* PLUGINS_ENABLED=* (по умолчанию) включает все установленные плагины: пакеты
+  app/plugins/<name>/ с plugin.py. Установленные, но не включённые, видны в
+  /api/plugins со статусом disabled.
 * Плагин из PLUGINS_ENABLED, который не установлен или не импортируется, пропускается
   (skipped) с понятной причиной; остальные работают.
 * Зависимости (BasePlugin.requires) включаются сами и загружаются раньше. Плагин, у
@@ -12,6 +15,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import pkgutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -27,6 +31,7 @@ from app.plugins.base import BasePlugin
 logger = structlog.get_logger()
 
 PLUGINS_PACKAGE = "app.plugins"
+ALL_PLUGINS = "*"
 NOT_INSTALLED = "not installed"
 
 
@@ -35,6 +40,7 @@ class PluginStatus(StrEnum):
     LOADED = "loaded"
     FAILED = "failed"  # on_load упал или не загрузилась зависимость
     SKIPPED = "skipped"  # не установлен, не импортируется или нет зависимости
+    DISABLED = "disabled"  # установлен, но не включён в PLUGINS_ENABLED
 
 
 @dataclass
@@ -77,15 +83,36 @@ class PluginManager:
         return self._states.get(name)
 
     def states(self) -> list[PluginState]:
-        """Подключённые плагины в порядке загрузки, затем пропущенные."""
+        """Подключённые плагины в порядке загрузки, затем пропущенные и выключенные."""
         registered = [self._states[name] for name in self.plugins]
         skipped = [s for s in self._states.values() if s.status == PluginStatus.SKIPPED]
-        return registered + skipped
+        disabled = [
+            PluginState(name, PluginStatus.DISABLED)
+            for name in self.installed()
+            if name not in self._states
+        ]
+        return registered + skipped + disabled
+
+    def installed(self) -> list[str]:
+        """Пакеты плагинов: подпапки с plugin.py, по алфавиту."""
+        try:
+            package = importlib.import_module(self.package)
+        except ImportError:
+            return []
+        return sorted(
+            info.name
+            for info in pkgutil.iter_modules(getattr(package, "__path__", []))
+            if info.ispkg and importlib.util.find_spec(f"{self.package}.{info.name}.plugin")
+        )
 
     # ------------------------------------------------------------ discover
 
     def discover(self, api_router: APIRouter, enabled: list[str] | None = None) -> None:
-        queue = list(dict.fromkeys(enabled if enabled is not None else settings.enabled_plugins))
+        names = enabled if enabled is not None else settings.enabled_plugins
+        if ALL_PLUGINS in names:
+            index = names.index(ALL_PLUGINS)
+            names = [*names[:index], *self.installed(), *names[index + 1 :]]
+        queue = list(dict.fromkeys(names))
         found: dict[str, BasePlugin] = {}
         index = 0
         while index < len(queue):
