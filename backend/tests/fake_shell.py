@@ -66,6 +66,8 @@ def parse_wrapped(script: str) -> _Wrapped | None:
         cwd = shlex.split(lines[0])[2]
         lines = lines[1:]
     rc_line = max(i for i, line in enumerate(lines) if line.startswith(f"{RC_VAR}=$?"))
+    if rc_line > 0 and lines[rc_line - 1] == "":
+        rc_line -= 1  # пустая строка-разделитель после команды
     timeout = _TIMEOUT_RE.search(script)
     return _Wrapped(
         marker=marker.group(0),
@@ -136,6 +138,8 @@ class FakeShell:
     @staticmethod
     def _parse(command: str) -> list[tuple[str, list[str]]]:
         """[(связка с предыдущей командой, слова)]."""
+        # `\` + перевод строки: продолжение строки; `\` в самом конце ничего не значит
+        command = command.replace("\\\n", "").removesuffix("\\")
         lexer = shlex.shlex(command.replace("\n", ";"), posix=True, punctuation_chars=";&|>")
         lexer.whitespace_split = True
         items: list[tuple[str, list[str]]] = []

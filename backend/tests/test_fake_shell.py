@@ -56,6 +56,7 @@ CASES = [
     ("pwd", "/definitely/missing"),
     ("cd ..", "/tmp"),
     ("echo started; sleep 3; echo never", "timeout"),
+    ("cd /tmp && echo a \\", None),
 ]
 # Коды ошибок, которые у разных sh разные (ls и cd: 2 в dash/GNU, 1 в bash и на macOS).
 # FakeShell отвечает как dash; для них сравнивается только «успех или ошибка».

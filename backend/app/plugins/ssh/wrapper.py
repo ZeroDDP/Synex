@@ -22,6 +22,7 @@
     exec </dev/null                                        # команда не ждёт ввода
     cd -- <cwd> || { <ошибка>; cd; printf '\\n<M>C1|%s' "$PWD"; exit 1; }
     <команда пользователя>
+    <пустая строка>                                        # если команда кончается на \\
     __synex_rc=$?; printf '\\n<M>C%s|%s' "$__synex_rc" "$PWD"; exit $__synex_rc
 
 * `timeout` (coreutils) по истечении N секунд шлёт TERM всей группе процессов
@@ -84,6 +85,8 @@ def build_command(
             f"cd; printf '\\n{marker}C1|%s' \"$PWD\"; exit 1; }}"
         )
     inner.append(command)
+    # Пустая строка: команда с `\` в конце иначе склеилась бы со служебной строкой ниже
+    inner.append("")
     inner.append(f'{RC_VAR}=$?; printf \'\\n{marker}C%s|%s\' "${RC_VAR}" "$PWD"; exit ${RC_VAR}')
     body = "\n".join(inner)
 

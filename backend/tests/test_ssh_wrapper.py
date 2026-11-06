@@ -142,6 +142,16 @@ def test_cwd_and_exit_codes(shell: str, tmp_path: Path):
 
 @posix_only
 @pytest.mark.parametrize("shell", SHELLS)
+def test_trailing_backslash_does_not_eat_the_wrapper(shell: str, tmp_path: Path):
+    """`\\` в конце команды продолжает строку: без пустой строки-разделителя служебная
+    строка с маркером стала бы аргументом команды (было: stdout "a __synex_rc=0")."""
+    s = Session(shell, tmp_path)
+    result, stderr, _ = s.run("cd / && echo a \\")
+    assert (result.stdout, result.exit_code, result.cwd, stderr) == ("a", 0, "/", "")
+
+
+@posix_only
+@pytest.mark.parametrize("shell", SHELLS)
 @pytest.mark.parametrize("timeout", [5, None])
 def test_command_does_not_wait_for_input(shell: str, timeout: int | None, tmp_path: Path):
     """Воркер не закрывает stdin канала SSH. Без </dev/null `cat` или `read` (а с ними
