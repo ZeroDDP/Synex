@@ -31,6 +31,7 @@ async def test_only_ssh_api_is_exposed():
     paths = set(create_app().openapi()["paths"])
     assert paths == {
         "/api/health",
+        "/api/plugins",
         "/api/ssh/connect",
         "/api/ssh/exec",
         "/api/ssh/disconnect",

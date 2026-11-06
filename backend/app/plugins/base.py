@@ -8,10 +8,17 @@ class BasePlugin:
 
     Пакет плагина: app/plugins/<name>/plugin.py с подклассом BasePlugin.
     Включается через PLUGINS_ENABLED.
+
+    requires: плагины, без которых этот не работает (например, docker выполняет
+    команды через сессии плагина ssh). Они загружаются раньше и включаются сами, даже
+    если их нет в PLUGINS_ENABLED. Если зависимость не загрузилась, этот плагин тоже
+    не загружается.
     """
 
     name: str = "unnamed"
     version: str = "0.0.0"
+    description: str = ""
+    requires: tuple[str, ...] = ()
     router: APIRouter | None = None
 
     async def on_load(self) -> None:

@@ -10,6 +10,7 @@ class KeysPlugin(BasePlugin):
 
     name = "keys"
     version = "0.1.0"
+    description = "Зашифрованное хранилище SSH-ключей"
     router = router
 
     async def on_load(self) -> None:

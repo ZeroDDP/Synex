@@ -14,6 +14,7 @@ class SSHPlugin(BasePlugin):
 
     name = "ssh"
     version = "0.5.0"
+    description = "SSH-сессии и терминал через Rust-воркер"
     router = router
 
     async def on_load(self) -> None:
