@@ -212,6 +212,9 @@ ws.onopen = () => ws.send(JSON.stringify({type: "exec", data: {command: "uptime"
   не-POSIX оболочек вроде fish.
 - Переводы строк приводятся к `\n`: `\r\n` из Windows-текста и одиночный `\r` (Enter в
   терминале) на сервере стали бы частью команды (`cd /tmp\r` → "can't cd to /tmp").
+- Ввод команды (stdin) — `/dev/null`: передать его через API нельзя, поэтому `cat`,
+  `read`, `sudo` с паролем или вопрос `apt install` [Y/n] сразу получают конец ввода и
+  завершаются, а не ждут до таймаута. Для `sudo` нужен NOPASSWD, для apt — `-y`.
 - 504 `ssh_exec_timeout` означает, что воркер не вернул результат даже через
   `timeout + 3 + SSH_EXEC_TIMEOUT_GRACE` секунд. Например, на сервере нет coreutils
   `timeout` (macOS, старый busybox): тогда команда могла продолжить работать.

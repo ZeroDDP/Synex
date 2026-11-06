@@ -179,6 +179,16 @@ async def test_removed_cwd_does_not_run_command_in_home(ui: UI, ssh_target: SSHT
     assert (await ui.exec(second, "ls must-not-exist"))["exit_code"] != 0
 
 
+async def test_command_does_not_wait_for_input(ui: UI, ssh_target: SSHTarget):
+    """Команда, которая читает ввод (cat, read, sudo с паролем), сразу получает конец
+    ввода и не держит сессию до таймаута."""
+    session_id = await ui.open_session(ssh_target.connection())
+    started = time.monotonic()
+    result = await ui.exec(session_id, "cat; read x || echo no-input", timeout=30)
+    assert (result["stdout"], result["exit_code"], result["timed_out"]) == ("no-input", 0, False)
+    assert time.monotonic() - started < 10
+
+
 async def test_terminal_reconnect_replays_missed_output(ui: UI, ssh_target: SSHTarget):
     """UI отключился (сеть, перезагрузка вкладки): команды выполняются дальше, после
     переподключения с since UI получает всё пропущенное по порядку."""

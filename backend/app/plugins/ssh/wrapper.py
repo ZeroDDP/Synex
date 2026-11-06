@@ -19,6 +19,7 @@
     __synex_rc=$?; printf '\\n<M>E%s' "$__synex_rc"; exit $__synex_rc
 
 <inner>:
+    exec </dev/null                                        # команда не ждёт ввода
     cd -- <cwd> || { <ошибка>; cd; printf '\\n<M>C1|%s' "$PWD"; exit 1; }
     <команда пользователя>
     __synex_rc=$?; printf '\\n<M>C%s|%s' "$__synex_rc" "$PWD"; exit $__synex_rc
@@ -33,6 +34,9 @@
   Маркер E печатает внешняя оболочка всегда: он даёт код даже после `exit 3`.
 * `3>&2 2>/dev/null` и `exec 2>&3` в начале <inner>: stderr команды идёт как обычно,
   а сообщения оболочки вида "Killed ..." (bash печатает в них весь скрипт) глушатся.
+* stdin команды это /dev/null. Ввести что-то в команду через API нельзя, а без этого
+  `cat`, `read`, `sudo` с паролем или вопрос `apt install` [Y/n] ждали бы ввода до
+  таймаута. Теперь они сразу получают конец ввода и завершаются.
 * Если директории из cwd больше нет, команда НЕ выполняется (иначе `rm -rf *`
   сработал бы в домашней папке): exit_code=1, cwd=$HOME.
 * Переводы строк в команде приводятся к LF (normalize_newlines): CR из Windows-текста
@@ -71,7 +75,7 @@ def build_command(
     timeout: int | None,
     kill_after: int = KILL_AFTER,
 ) -> str:
-    inner: list[str] = []
+    inner: list[str] = ["exec </dev/null"]
     if cwd:
         quoted = shlex.quote(cwd)
         inner.append(
@@ -86,12 +90,10 @@ def build_command(
     shell = '"${SHELL:-/bin/sh}"'
     if timeout:
         body_with_stderr = shlex.quote("exec 2>&3 3>&-\n" + body)
-        # timeout в фоне, чтобы знать его PID: это и номер его группы процессов. stdin
-        # сохраняется через fd 4 (фоновой команде sh иначе подставит /dev/null).
+        # timeout в фоне, чтобы знать его PID: это и номер его группы процессов
         run = (
             f"if timeout -k {kill_after} 1 true >/dev/null 2>&1; then "
-            f"( exec 4<&0; "
-            f"timeout -k {kill_after} {timeout} {shell} -c {body_with_stderr} 0<&4 4<&- & "
+            f"( timeout -k {kill_after} {timeout} {shell} -c {body_with_stderr} </dev/null & "
             f"{PID_VAR}=$!; wait ${PID_VAR}; {RC_VAR}=$?; "
             f"case ${RC_VAR} in 124|137) kill -KILL -${PID_VAR} 2>/dev/null;; esac; "
             f"exit ${RC_VAR} ) "

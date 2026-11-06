@@ -59,6 +59,8 @@ def parse_wrapped(script: str) -> _Wrapped | None:
     # Тело для "$SHELL -c" без таймаута: последний -c (ветка else или единственный)
     index = max(i for i, token in enumerate(tokens) if token == "-c")
     lines = tokens[index + 1].split("\n")
+    if lines and lines[0] == "exec </dev/null":
+        lines = lines[1:]  # stdin команды: в эмуляторе ввода и так нет
     cwd = None
     if lines and lines[0].startswith("cd -- "):
         cwd = shlex.split(lines[0])[2]
