@@ -177,3 +177,43 @@ def test_hint_for_too_old_glibc():
     hint = startup_failure_hint(1, output)
     assert hint is not None and "glibc 2.38" in hint and "musl" in hint
     assert startup_failure_hint(1, ["[stdout] something else"]) is None
+
+
+def test_fresh_build_from_core_is_preferred(monkeypatch, tmp_path: Path):
+    """Из всех подходящих воркеров берётся самый свежий: собранный в core/ после
+    `cargo build --release` новее бинарника из репозитория, и наоборот после git pull."""
+    host(monkeypatch, "linux", "x86_64")
+    monkeypatch.chdir(tmp_path)  # иначе найдётся и воркер из настоящего backend/ (cwd)
+    backend = tmp_path / "backend"
+    bundled = backend / "app" / "core" / "target" / "release" / "synex_worker"
+    built = tmp_path / "core" / "target" / "release" / "synex_worker"
+    for path, mtime in ((bundled, 1_000_000), (built, 2_000_000)):
+        path.parent.mkdir(parents=True)
+        path.write_bytes(ELF_X86_64)
+        os.utime(path, (mtime, mtime))
+
+    configured = "./app/core/target/release/synex_worker"
+    assert find_executable(configured, backend).path == built.resolve()
+    os.utime(bundled, (3_000_000, 3_000_000))  # git pull обновил бинарник из репозитория
+    assert find_executable(configured, backend).path == bundled.resolve()
+
+    # Путь задан явно (не по умолчанию): сборка в core/ не рассматривается
+    os.utime(built, (4_000_000, 4_000_000))
+    found = find_executable(configured, backend, include_core=False)
+    assert found.path == bundled.resolve()
+    assert not any(p.startswith(str(tmp_path / "core")) for p in found.tried)
+
+
+def test_core_build_is_searched_only_for_default_path(monkeypatch):
+    for name in ("RUST_EXECUTABLE_PATH_UNIX", "RUST_EXECUTABLE_PATH_WIN32"):
+        monkeypatch.setattr(settings, name, type(settings).model_fields[name].default)
+    assert settings.rust_executable_path_is_default
+    tried = [str(p).replace("\\", "/") for p in WorkerManager.executable_candidates()]
+    core = str(settings.BASE_DIR.parent / "core" / "target" / "release").replace("\\", "/")
+    assert any(p.startswith(core + "/") for p in tried)
+
+    monkeypatch.setattr(settings, "RUST_EXECUTABLE_PATH_UNIX", "/opt/synex/synex_worker")
+    monkeypatch.setattr(settings, "RUST_EXECUTABLE_PATH_WIN32", r"C:\synex\synex_worker.exe")
+    assert not settings.rust_executable_path_is_default
+    tried = [str(p).replace("\\", "/") for p in WorkerManager.executable_candidates()]
+    assert not any(p.startswith(core) for p in tried)

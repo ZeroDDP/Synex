@@ -223,12 +223,20 @@ class WorkerManager:
     @staticmethod
     def executable_candidates() -> list[Path]:
         """Где ищется бинарник (см. executable.py): сначала относительно backend/."""
-        return candidates(settings.rust_executable_path, settings.BASE_DIR)
+        return candidates(
+            settings.rust_executable_path,
+            settings.BASE_DIR,
+            include_core=settings.rust_executable_path_is_default,
+        )
 
     # ----------------------------------------------------------- spawn / stop
 
     def _worker_command(self) -> list[str] | None:
-        found = find_executable(settings.rust_executable_path, settings.BASE_DIR)
+        found = find_executable(
+            settings.rust_executable_path,
+            settings.BASE_DIR,
+            include_core=settings.rust_executable_path_is_default,
+        )
         if found.path is not None:
             return [str(found.path)] if ensure_executable(found.path) else None
         if found.skipped:

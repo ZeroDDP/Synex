@@ -1,11 +1,17 @@
 """Поиск бинарника synex_worker для текущей ОС и процессора.
 
-Где ищем (первый подходящий файл):
+Где ищем:
 1. RUST_EXECUTABLE_PATH_WIN32 / RUST_EXECUTABLE_PATH_UNIX: относительно backend/, затем
    относительно текущей папки.
 2. Сборка cargo с --target: если путь заканчивается на .../release/<имя> (или debug),
    то .../<target triple>/release/<имя>. Например, на Mac с Apple Silicon
    app/core/target/aarch64-apple-darwin/release/synex_worker.
+3. Сборка из исходников воркера в этом же репозитории: core/target/release/<имя> и
+   core/target/<target triple>/release/<имя> (после `cargo build --release` в core/).
+
+Из всех подходящих файлов берётся самый свежий (по времени изменения): только что
+собранный в core/ воркер новее бинарника из репозитория, а после git pull новее
+становится уже он. Если путь в настройках задан не по умолчанию, используется только он.
 
 Файл проверяется по первым байтам. В репозитории лежит synex_worker.exe для Windows:
 на Linux и macOS его запуск закончился бы непонятным "Exec format error", поэтому
@@ -124,7 +130,8 @@ class Discovery:
     skipped: dict[str, str] = field(default_factory=dict)  # путь → причина
 
 
-def candidates(configured: str, base_dir: Path) -> list[Path]:
+def candidates(configured: str, base_dir: Path, *, include_core: bool = True) -> list[Path]:
+    """Где искать воркер. base_dir это папка backend/; core/ лежит рядом с ней."""
     raw = Path(configured)
     paths: list[Path] = []
     for base in [None] if raw.is_absolute() else [base_dir, Path.cwd()]:
@@ -134,12 +141,18 @@ def candidates(configured: str, base_dir: Path) -> list[Path]:
             target_dir = path.parent.parent
             for triple in target_triples():
                 paths.append(target_dir / triple / path.parent.name / path.name)
+    if include_core:
+        core_target = base_dir.parent / "core" / "target"
+        paths.append(core_target / "release" / raw.name)
+        paths.extend(core_target / triple / "release" / raw.name for triple in target_triples())
     return list(dict.fromkeys(paths))
 
 
-def find_executable(configured: str, base_dir: Path) -> Discovery:
+def find_executable(configured: str, base_dir: Path, *, include_core: bool = True) -> Discovery:
+    """Самый свежий подходящий воркер (см. docstring модуля)."""
     result = Discovery()
-    for path in candidates(configured, base_dir):
+    found: list[tuple[float, Path]] = []
+    for path in candidates(configured, base_dir, include_core=include_core):
         result.tried.append(str(path))
         if not path.is_file():
             continue
@@ -147,8 +160,9 @@ def find_executable(configured: str, base_dir: Path) -> Discovery:
         if problem is not None:
             result.skipped[str(path)] = problem
             continue
-        result.path = path.resolve()
-        break
+        found.append((path.stat().st_mtime, path.resolve()))
+    if found:
+        result.path = max(found, key=lambda item: item[0])[1]
     return result
 
 

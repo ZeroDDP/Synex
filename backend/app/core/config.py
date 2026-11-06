@@ -121,6 +121,14 @@ class Settings(BaseSettings):
             return self.RUST_EXECUTABLE_PATH_WIN32
         return self.RUST_EXECUTABLE_PATH_UNIX
 
+    @property
+    def rust_executable_path_is_default(self) -> bool:
+        """Путь к воркеру не меняли: тогда ищется и сборка в core/ (executable.py)."""
+        name = (
+            "RUST_EXECUTABLE_PATH_WIN32" if sys.platform == "win32" else "RUST_EXECUTABLE_PATH_UNIX"
+        )
+        return self.rust_executable_path == type(self).model_fields[name].default
+
 
 def user_data_dir() -> Path:
     """Папка данных приложения в профиле пользователя."""

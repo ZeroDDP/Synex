@@ -43,7 +43,15 @@ glibc 2.38 или новее (Ubuntu 24.04, Debian 13, Fedora 39 и новее).
 2. сборку под конкретную платформу (`cargo build --release --target <triple>`):
    `app/core/target/<triple>/release/synex_worker`, где `<triple>` —
    `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`
-   (Apple Silicon) или `x86_64-apple-darwin`.
+   (Apple Silicon) или `x86_64-apple-darwin`;
+3. сборку из исходников воркера в этом репозитории: `core/target/release/synex_worker`
+   (и `core/target/<triple>/release/`) после `cargo build --release` в папке `core/`.
+   На Windows так же ищется `core\target\release\synex_worker.exe`.
+
+Из всех подходящих файлов берётся самый свежий: только что собранный в `core/` воркер
+новее бинарника из репозитория, а после `git pull` с новым бинарником — наоборот. Какой
+файл запущен, видно в логе (`Rust worker started`, `path`). Если путь в
+`RUST_EXECUTABLE_PATH_*` изменён (не значение по умолчанию), используется только он.
 
 Файл проверяется по заголовку: `synex_worker.exe` или сборка под другой процессор
 пропускается, а в логе написано, для чего она собрана (вместо «Exec format error»).
