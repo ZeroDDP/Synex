@@ -78,6 +78,8 @@ CASES = [
     ("sh -c 'echo err >&2; echo out' 2>/dev/null", None),
     ("echo hidden >/dev/null; echo shown", None),
     ("LC_ALL=C echo hi && X=1 true && echo ok", None),
+    ("cd -- /tmp && pwd", None),
+    ('cd -- "$HOME" && pwd', "/tmp"),
 ]
 # Коды ошибок, которые у разных sh разные (ls и cd: 2 в dash/GNU, 1 в bash и на macOS).
 # FakeShell отвечает как dash; для них сравнивается только «успех или ошибка».
