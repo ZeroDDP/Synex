@@ -89,9 +89,12 @@ glibc 2.38 или новее (Ubuntu 24.04, Debian 13, Fedora 39 и новее).
 читать сессии и выполнять команды на серверах.
 
 - Запрос с заголовком `Origin` (его шлёт браузер) проходит, только если origin — сам
-  backend (`http://127.0.0.1:8000`, `http://localhost:8000`) или указан в
-  `ALLOWED_ORIGINS`. Иначе 403 `forbidden_origin`, WebSocket получает отказ при
-  подключении. Dev-сервер UI добавляется так: `ALLOWED_ORIGINS=http://localhost:5173`.
+  backend (`http://127.0.0.1:8000`, `http://localhost:8000`), dev-сервер UI
+  (`http://localhost:5173` и `http://127.0.0.1:5173`, `npm run dev` в `frontend/`) или
+  указан в `ALLOWED_ORIGINS`. Иначе 403 `forbidden_origin`, WebSocket получает отказ при
+  подключении. Dev-сервер UI разрешён без настройки: открыть порт 5173 на этой машине
+  может только программа на ней же, а ей API доступен и без браузера.
+  `UI_DEV_SERVER=false` это выключает (например, в собранном приложении).
 - Запросы без `Origin` (curl, PowerShell, настольное приложение, тесты) проходят.
 - Заголовок `Host` должен быть `127.0.0.1`, `localhost`, `[::1]` или из `ALLOWED_HOSTS`.
   Иначе 403 `forbidden_host`: это защита от DNS rebinding.

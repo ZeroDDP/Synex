@@ -6,9 +6,13 @@
 WebSocket не подчиняется CORS. Поэтому:
 
 * Origin. Браузер всегда передаёт его в кросс-доменных запросах и в рукопожатии
-  WebSocket. Разрешены сам backend (http://127.0.0.1:PORT, http://localhost:PORT) и
-  ALLOWED_ORIGINS. Запросы без Origin (curl, PowerShell, настольное приложение)
-  проходят. Иначе 403, WebSocket закрывается до accept (клиент получит 403).
+  WebSocket. Разрешены сам backend (http://127.0.0.1:PORT, http://localhost:PORT),
+  dev-сервер UI (http://localhost:5173, если UI_DEV_SERVER) и ALLOWED_ORIGINS. Запросы
+  без Origin (curl, PowerShell, настольное приложение) проходят. Иначе 403, WebSocket
+  закрывается до accept (клиент получит 403).
+
+  Dev-сервер UI разрешён по умолчанию: открыть порт 5173 на loopback может только
+  программа на этой же машине, а ей API и так доступен без браузера.
 * Host. Защита от DNS rebinding: чужой домен, который резолвится в 127.0.0.1, не
   пройдёт, потому что в Host будет его имя. Разрешены 127.0.0.1, localhost, [::1],
   HOST из настроек и ALLOWED_HOSTS.
@@ -30,11 +34,15 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 WS_POLICY_VIOLATION = 1008
 
 
+UI_DEV_ORIGINS = ("http://localhost:5173", "http://127.0.0.1:5173")  # Vite, frontend/
+
+
 def allowed_origins(settings: Settings) -> list[str]:
-    """Сам backend плюс ALLOWED_ORIGINS. Порядок сохраняется (для CORS)."""
+    """Сам backend, dev-сервер UI и ALLOWED_ORIGINS. Порядок сохраняется (для CORS)."""
     own = [f"http://{host}:{settings.PORT}" for host in ("127.0.0.1", "localhost", "[::1]")]
+    dev = list(UI_DEV_ORIGINS) if settings.UI_DEV_SERVER else []
     extra = [o.strip().rstrip("/") for o in settings.ALLOWED_ORIGINS.split(",") if o.strip()]
-    return list(dict.fromkeys([*own, *extra]))
+    return list(dict.fromkeys([*own, *dev, *extra]))
 
 
 def allowed_hosts(settings: Settings) -> set[str] | None:
@@ -78,7 +86,7 @@ class LocalAccessMiddleware:
             problem = (
                 "forbidden_origin",
                 f"Origin '{origin}' is not allowed. Add it to ALLOWED_ORIGINS to let this "
-                "web page use the API",
+                "web page use the API (the UI dev server must run on port 5173)",
             )
 
         if problem is None:
