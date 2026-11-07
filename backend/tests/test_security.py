@@ -24,7 +24,8 @@ def app_settings(monkeypatch, worker_settings):
     monkeypatch.setattr(
         worker_manager, "_worker_command", lambda: [sys.executable, str(FAKE_WORKER_SCRIPT)]
     )
-    monkeypatch.setattr(settings, "ALLOWED_ORIGINS", "http://localhost:5173")
+    monkeypatch.setattr(settings, "ALLOWED_ORIGINS", "")
+    monkeypatch.setattr(settings, "UI_DEV_SERVER", True)
     return settings
 
 
@@ -44,8 +45,16 @@ def test_allowed_lists(monkeypatch):
         "http://127.0.0.1:8000",
         "http://localhost:8000",
         "http://[::1]:8000",
-        "http://localhost:5173",
+        "http://localhost:5173",  # dev-сервер UI разрешён по умолчанию
+        "http://127.0.0.1:5173",
         "tauri://localhost",
+    ]
+    monkeypatch.setattr(settings, "UI_DEV_SERVER", False)
+    monkeypatch.setattr(settings, "ALLOWED_ORIGINS", "")
+    assert allowed_origins(settings) == [
+        "http://127.0.0.1:8000",
+        "http://localhost:8000",
+        "http://[::1]:8000",
     ]
     monkeypatch.setattr(settings, "HOST", "127.0.0.1")
     monkeypatch.setattr(settings, "ALLOWED_HOSTS", "synex.local")
@@ -125,3 +134,21 @@ async def test_websockets_check_origin(app_settings):
             assert (await recv_json(ws))["type"] == "hello"
         async with connect(base + "/ws") as ws:  # без Origin
             assert (await recv_json(ws))["type"] == "hello"
+
+
+async def test_ui_dev_server_works_without_settings(app_settings, monkeypatch):
+    """`npm run dev` в frontend/: http://localhost:5173 и http://127.0.0.1:5173 пускаются
+    без ALLOWED_ORIGINS, а с UI_DEV_SERVER=false уже нет."""
+    async with serve(create_app()) as base:
+        for origin in ("http://localhost:5173", "http://127.0.0.1:5173"):
+            async with connect(base + "/ws", origin=origin) as ws:
+                assert (await recv_json(ws))["type"] == "hello"
+
+    monkeypatch.setattr(settings, "UI_DEV_SERVER", False)
+    app = create_app()
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as api:
+            response = await api.get("/api/health", headers={"Origin": "http://localhost:5173"})
+    assert response.status_code == 403
+    assert "port 5173" in response.json()["detail"]

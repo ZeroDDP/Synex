@@ -29,10 +29,13 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     HOST: str = "127.0.0.1"
     PORT: int = 8000
-    # Веб-страницы (Origin), которым можно обращаться к API и WebSocket, через запятую,
-    # например http://localhost:5173 для dev-сервера UI. Сам backend разрешён всегда,
-    # запросы без Origin (curl, PowerShell, приложение) тоже. См. app/core/security.py.
+    # Веб-страницы (Origin), которым можно обращаться к API и WebSocket, через запятую.
+    # Сам backend разрешён всегда, запросы без Origin (curl, PowerShell, приложение) тоже.
+    # См. app/core/security.py.
     ALLOWED_ORIGINS: str = ""
+    # Dev-сервер UI (frontend/, `npm run dev`): http://localhost:5173 и
+    # http://127.0.0.1:5173 разрешены без настройки. false: только ALLOWED_ORIGINS.
+    UI_DEV_SERVER: bool = True
     # Дополнительные имена в заголовке Host (127.0.0.1, localhost и HOST разрешены).
     ALLOWED_HOSTS: str = ""
 
