@@ -39,6 +39,23 @@ def test_raw_command_runs_in_home(tmp_path: Path):
     assert shell.run("nosuch")[2] == 127
 
 
+def test_programs_get_arguments_cwd_and_variables(tmp_path: Path):
+    shell = FakeShell(tmp_path)
+    calls = []
+
+    def docker(args: list[str], cwd: str, env: dict[str, str]) -> tuple[str, str, int]:
+        calls.append((args, cwd, env))
+        return "out\n", "warning\n", 3
+
+    shell.programs["docker"] = docker
+    marker = new_marker()
+    script = build_command("LC_ALL=C docker ps --format '{{json .}}' 2>&1", "/tmp", marker, 5)
+    stdout, _, code = shell.run(script)
+    assert calls == [(["ps", "--format", "{{json .}}"], "/tmp", {"LC_ALL": "C"})]
+    assert parse_output(stdout, marker, timeout_applied=True).stdout == "out\nwarning"
+    assert code == 3
+
+
 CASES = [
     ("pwd", None),
     ("cd /tmp && pwd", None),
@@ -57,6 +74,10 @@ CASES = [
     ("cd ..", "/tmp"),
     ("echo started; sleep 3; echo never", "timeout"),
     ("cd /tmp && echo a \\", None),
+    ("sh -c 'echo err >&2' 2>&1", None),
+    ("sh -c 'echo err >&2; echo out' 2>/dev/null", None),
+    ("echo hidden >/dev/null; echo shown", None),
+    ("LC_ALL=C echo hi && X=1 true && echo ok", None),
 ]
 # Коды ошибок, которые у разных sh разные (ls и cd: 2 в dash/GNU, 1 в bash и на macOS).
 # FakeShell отвечает как dash; для них сравнивается только «успех или ошибка».

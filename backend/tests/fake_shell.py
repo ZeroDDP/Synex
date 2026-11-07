@@ -6,7 +6,10 @@
 * понимает обёртку из app/plugins/ssh/wrapper.py (cwd, маркеры C и E, timeout) и
   отвечает так же, как настоящий shell на сервере;
 * сам набор команд маленький, ровно для тестов: cd, pwd, echo, ls, mkdir, cat, sleep,
-  true, false, exit, hostname, sh -c; связки `;`, `&&`, `||`, перенаправление `>&2`;
+  true, false, exit, hostname, sh -c; связки `;`, `&&`, `||`; перенаправления `>&2`,
+  `2>&1`, `2>/dev/null`, `>/dev/null`; переменные перед командой (`LC_ALL=C git ...`);
+* внешние программы сервера (docker, git) тест подставляет сам: FakeShell.programs,
+  имя -> функция (аргументы, cwd, переменные) -> (stdout, stderr, код);
 * файловая система виртуальная: "/" это папка root, в ней есть /tmp и домашняя
   /home/synex. Пути всегда в стиле POSIX, на любой ОС.
 
@@ -19,6 +22,7 @@ import posixpath
 import re
 import shlex
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,6 +32,19 @@ HOME = "/home/synex"
 _MARKER_RE = re.compile(r"__SYNEX_[0-9a-f]+__:")
 _TIMEOUT_RE = re.compile(r'timeout -k \d+ (\d+) "\$\{SHELL')
 _SEPARATORS = (";", "&&", "||")
+_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+# Перенаправления в конце команды (shlex разбивает "2>&1" на "2", ">&", "1")
+_REDIRECTS = {
+    (">&", "2"): "stdout>stderr",
+    ("1", ">&", "2"): "stdout>stderr",
+    ("2", ">&", "1"): "stderr>stdout",
+    ("2", ">", "/dev/null"): "stderr>null",
+    (">", "/dev/null"): "stdout>null",
+    ("1", ">", "/dev/null"): "stdout>null",
+}
+
+# Внешняя программа: (аргументы, cwd, переменные окружения) -> (stdout, stderr, код)
+Program = Callable[[list[str], str, dict[str, str]], tuple[str, str, int]]
 
 
 class _TimedOutError(Exception):
@@ -81,6 +98,7 @@ class FakeShell:
     def __init__(self, root: Path) -> None:
         self.root = root
         self.home = HOME
+        self.programs: dict[str, Program] = {}
         for directory in ("tmp", HOME.lstrip("/")):
             (root / directory).mkdir(parents=True, exist_ok=True)
 
@@ -118,15 +136,26 @@ class FakeShell:
         for op, words in self._parse(command):
             if (op == "&&" and run.code != 0) or (op == "||" and run.code == 0):
                 continue
-            to_stderr = words[-2:] == [">&", "2"]  # echo text >&2
-            if to_stderr:
-                words = words[:-2]
+            words, redirects = _split_redirects(words)
+            env: dict[str, str] = {}
+            while words and _ASSIGNMENT_RE.match(words[0]):
+                name, _, value = words.pop(0).partition("=")
+                env[name] = value
+            if not words:
+                continue  # только присваивание переменных
             try:
-                out, err, code, cwd, exited = self._command(words, cwd, deadline)
+                out, err, code, cwd, exited = self._command(words, cwd, deadline, env)
             except _TimedOutError:
                 raise _TimedOutError(run) from None
-            if to_stderr:
-                out, err = "", err + out
+            for redirect in redirects:
+                if redirect == "stdout>stderr":
+                    out, err = "", err + out
+                elif redirect == "stderr>stdout":
+                    out, err = out + err, ""
+                elif redirect == "stderr>null":
+                    err = ""
+                else:
+                    out = ""
             run.stdout += out
             run.stderr += err
             run.code = code
@@ -154,10 +183,12 @@ class FakeShell:
         return [(op, words) for op, words in items if words]
 
     def _command(
-        self, words: list[str], cwd: str, deadline: float | None
+        self, words: list[str], cwd: str, deadline: float | None, env: dict[str, str]
     ) -> tuple[str, str, int, str, bool]:
         """stdout, stderr, код, новая cwd, был ли exit."""
         name, args = words[0], words[1:]
+        if name in self.programs:
+            return (*self.programs[name](args, cwd, env), cwd, False)
         if name == "cd":
             target = self._abs(cwd, args[0]) if args else self.home
             if not self._is_dir(target):
@@ -242,3 +273,19 @@ class FakeShell:
 
     def _is_dir(self, path: str) -> bool:
         return self._real(path).is_dir()
+
+
+def _split_redirects(words: list[str]) -> tuple[list[str], list[str]]:
+    """Отделяет перенаправления в конце команды: (слова, [что куда] по порядку)."""
+    redirects: list[str] = []
+    matched = True
+    while matched:
+        matched = False
+        for pattern, redirect in _REDIRECTS.items():
+            size = len(pattern)
+            if len(words) > size and tuple(words[-size:]) == pattern:
+                words = words[:-size]
+                redirects.insert(0, redirect)
+                matched = True
+                break
+    return words, redirects

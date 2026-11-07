@@ -41,6 +41,27 @@ class Stream:
                 if message["type"] == message_type and predicate(message["data"]):
                     return message
 
+    async def wait_for_all(
+        self,
+        expected: list[tuple[str, Callable[[Any], bool]]],
+        timeout: float = 30.0,
+    ) -> list[dict]:
+        """Сообщения на каждое ожидание из expected в любом порядке прихода (например,
+        потеря сессии и статусы воркера после его падения). Ответ в порядке expected."""
+        found: list[dict | None] = [None] * len(expected)
+        async with asyncio.timeout(timeout):
+            while None in found:
+                message = json.loads(await self.ws.recv())
+                for index, (message_type, predicate) in enumerate(expected):
+                    if (
+                        found[index] is None
+                        and message["type"] == message_type
+                        and predicate(message["data"])
+                    ):
+                        found[index] = message
+                        break
+        return [message for message in found if message is not None]
+
 
 class UI:
     def __init__(self, ws_base: str) -> None:

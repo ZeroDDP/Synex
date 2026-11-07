@@ -167,6 +167,12 @@ Invoke-RestMethod -Method Delete "$api/ssh/sessions/$($s.session_id)"
   вытесняется, у слишком большого вывода остаётся конец и `truncated: true`.
 - О каждом открытии и закрытии в шину событий уходит `ssh.session`
   (`{action: opened | closed, session_id, host, port, username, reason?}`).
+- Плагины (docker, git) выполняют в сессии свои служебные команды
+  (`ssh_manager.run_service`). Они не попадают в буфер вывода и терминал, не меняют
+  `cwd` сессии и выполняются из домашней папки, с лимитом на сервере и точным кодом
+  возврата. Если в сессии идёт команда пользователя, служебная ждёт её до
+  `SSH_SERVICE_WAIT` (10 с), потом 409 `ssh_session_busy`. Для долгих команд плагина
+  (деплой, логи) UI лучше открыть отдельную сессию к тому же серверу.
 
 ### WebSocket терминала
 
@@ -350,6 +356,7 @@ ws.onmessage = (e) => console.log(JSON.parse(e.data));
 | 409 | `ssh_not_connected` | Нет открытой сессии, или воркер её уже не знает |
 | 403 | `forbidden_origin` / `forbidden_host` | Запрос со страницы не из `ALLOWED_ORIGINS` или с чужим `Host` |
 | 409 | `key_exists` | Имя занято или этот ключ уже сохранён |
+| 409 | `ssh_session_busy` | Команда плагина не дождалась, пока сессия освободится (`SSH_SERVICE_WAIT`) |
 | 429 | `ssh_too_many_sessions` | Открыто `SSH_MAX_SESSIONS` сессий |
 | 422 | `invalid_key` / — | Ключ не читается, нужна парольная фраза, неверные поля |
 | 500 | `keystore_corrupted` | `keys.json` повреждён или зашифрован другим мастер-ключом |
@@ -432,7 +439,8 @@ Credential Manager они не трогают. От `backend/.env` они тож
 Тесты идут на Windows, Linux и macOS. Команды SSH фейковый воркер на Linux и macOS
 выполняет настоящим `sh -c`, а на Windows — эмулятором shell (`tests/fake_shell.py`):
 виртуальная файловая система с `/tmp` и `/home/synex` и ровно те команды, что нужны
-тестам. Что эмулятор отвечает так же, как настоящий sh, проверяет
+тестам. Программы сервера вроде `docker` и `git` тесты подставляют в эмулятор сами
+(`FakeShell.programs`). Что эмулятор отвечает так же, как настоящий sh, проверяет
 `tests/test_fake_shell.py`. Эмулятор можно включить и на Linux/macOS:
 
 ```bash

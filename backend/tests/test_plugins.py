@@ -63,18 +63,20 @@ def make_plugins(tmp_path: Path, monkeypatch):
     package = f"synex_test_plugins_{uuid.uuid4().hex[:8]}"
     root = tmp_path / package
     root.mkdir()
-    (root / "__init__.py").write_text("events = []  # on_load/on_unload всех плагинов\n")
+    # Кодировка явно: на Windows по умолчанию cp1252, и кириллица в файле не записалась бы
+    journal = "events = []  # on_load/on_unload всех плагинов\n"
+    (root / "__init__.py").write_text(journal, encoding="utf-8")
     monkeypatch.syspath_prepend(str(tmp_path))
 
     def make(plugins: dict[str, tuple[tuple[str, ...], str]]) -> str:
         for name, (requires, on_load) in plugins.items():
             directory = root / name
             directory.mkdir()
-            (directory / "__init__.py").write_text("")
+            (directory / "__init__.py").write_text("", encoding="utf-8")
             code = PLUGIN_TEMPLATE.format(
                 package=package, name=name, requires=requires, on_load=on_load or "pass"
             )
-            (directory / "plugin.py").write_text(textwrap.dedent(code))
+            (directory / "plugin.py").write_text(textwrap.dedent(code), encoding="utf-8")
         return package
 
     yield make
@@ -177,12 +179,12 @@ async def test_import_error_is_reported(make_plugins, tmp_path):
     package = make_plugins({"fine": ((), "")})
     bad = tmp_path / package / "bad"
     bad.mkdir()
-    (bad / "__init__.py").write_text("")
-    (bad / "plugin.py").write_text("import module_that_does_not_exist\n")
+    (bad / "__init__.py").write_text("", encoding="utf-8")
+    (bad / "plugin.py").write_text("import module_that_does_not_exist\n", encoding="utf-8")
     empty = tmp_path / package / "empty"
     empty.mkdir()
-    (empty / "__init__.py").write_text("")
-    (empty / "plugin.py").write_text("X = 1\n")
+    (empty / "__init__.py").write_text("", encoding="utf-8")
+    (empty / "plugin.py").write_text("X = 1\n", encoding="utf-8")
 
     manager = PluginManager(package)
     manager.discover(APIRouter(), enabled=["bad", "empty", "fine"])

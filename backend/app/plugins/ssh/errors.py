@@ -39,3 +39,10 @@ class SSHExecTimeoutError(AppError):
 class SSHTooManySessionsError(AppError):
     code = "ssh_too_many_sessions"
     status_code = 429
+
+
+class SSHSessionBusyError(AppError):
+    """Служебная команда плагина не дождалась, пока сессия освободится."""
+
+    code = "ssh_session_busy"
+    status_code = 409

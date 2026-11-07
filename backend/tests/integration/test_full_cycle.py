@@ -241,9 +241,16 @@ async def test_worker_crash_is_reported_and_recovered(ui: UI, ssh_target: SSHTar
             closed = await term.wait_for("closed", timeout=30)
             assert closed["data"]["reason"] == "worker_connection_lost"
 
-        await events.wait_for("ssh.session", session_event("closed", session_id))
-        await events.wait_for("worker.status", lambda d: d["status"] == "worker_exited")
-        await events.wait_for("worker.status", lambda d: d["status"] == "connected", timeout=60)
+        # Порядок этих событий не задан: воркер мог перезапуститься раньше, чем
+        # закрылась сессия
+        await events.wait_for_all(
+            [
+                ("ssh.session", session_event("closed", session_id)),
+                ("worker.status", lambda d: d["status"] == "worker_exited"),
+                ("worker.status", lambda d: d["status"] == "connected"),
+            ],
+            timeout=60,
+        )
 
     health = (await ui.api.get("/api/health")).json()
     assert health["worker"]["worker_restarts"] == 1
