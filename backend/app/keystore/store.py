@@ -12,9 +12,8 @@
       ]
     }
 
-В открытом виде в файле только метаданные и публичные ключи. Запись атомарная
-(временный файл + os.replace), на Linux/macOS права 0600 и папка 0700. На Windows
-файл лежит в %LOCALAPPDATA% и наследует права профиля пользователя.
+В открытом виде в файле только метаданные и публичные ключи. Запись атомарная, права
+только для пользователя (app/core/files.py).
 """
 
 from __future__ import annotations
@@ -23,7 +22,6 @@ import asyncio
 import contextlib
 import json
 import os
-import sys
 import tempfile
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -34,6 +32,7 @@ import structlog
 from cryptography.fernet import Fernet, InvalidToken
 from pydantic import BaseModel, Field, ValidationError
 
+from app.core.files import restrict_dir, write_private_file
 from app.core.locks import LoopLock
 from app.keystore.errors import (
     KeyExistsError,
@@ -112,6 +111,32 @@ class KeyStore:
             return fernet.decrypt(record.private_key.encode())
         except InvalidToken as e:
             raise KeystoreCorruptedError(f"Key '{record.name}' cannot be decrypted") from e
+
+    # --------------------------------------------------------------- secrets
+
+    async def encrypt_secret(self, secret: str) -> str:
+        """Шифрует строку (например, пароль сохранённого подключения) мастер-ключом
+        хранилища. Возвращает Fernet-токен для хранения в другом файле.
+
+        Если keys.json ещё нет, он создаётся без ключей: по его key_check потом видно,
+        что мастер-ключ сменился и сохранённые секреты не расшифровать.
+        """
+        async with self._lock:
+            content = self._read()
+            fernet = await self._fernet_for(content)
+            if content is None:
+                self._write(KeystoreFile(key_check=fernet.encrypt(KEY_CHECK_PLAINTEXT).decode()))
+        return fernet.encrypt(secret.encode()).decode()
+
+    async def decrypt_secret(self, token: str) -> str:
+        async with self._lock:
+            fernet = await self._fernet_for(self._read())
+        try:
+            return fernet.decrypt(token.encode()).decode()
+        except InvalidToken as e:
+            raise KeystoreCorruptedError(
+                "A saved secret cannot be decrypted: it was encrypted with another master key"
+            ) from e
 
     # ----------------------------------------------------------------- write
 
@@ -200,7 +225,7 @@ class KeyStore:
         """
         secret = await self.decrypt_private_key(key_id)
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
-        _restrict_dir(self.runtime_dir)
+        restrict_dir(self.runtime_dir)
         fd, name = tempfile.mkstemp(prefix="key_", dir=self.runtime_dir)
         path = Path(name)
         try:
@@ -255,16 +280,7 @@ class KeyStore:
         return content
 
     def _write(self, content: KeystoreFile) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        _restrict_dir(self.path.parent)
-        tmp = self.path.with_name(f"{self.path.name}.tmp")
-        data = content.model_dump_json(indent=2)
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as file:
-            file.write(data)
-            file.flush()
-            os.fsync(file.fileno())
-        os.replace(tmp, self.path)
+        write_private_file(self.path, content.model_dump_json(indent=2))
 
     @staticmethod
     def _find(content: KeystoreFile | None, key_id: str) -> KeyRecord:
@@ -284,12 +300,6 @@ class KeyStore:
 
 def _now() -> datetime:
     return datetime.now(UTC)
-
-
-def _restrict_dir(path: Path) -> None:
-    if sys.platform != "win32":
-        with contextlib.suppress(OSError):
-            path.chmod(0o700)
 
 
 async def _remove(path: Path) -> None:

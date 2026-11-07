@@ -119,6 +119,12 @@ glibc 2.38 или новее (Ubuntu 24.04, Debian 13, Fedora 39 и новее).
 | GET | `/api/keys/{id}` | Один ключ |
 | PATCH | `/api/keys/{id}` | Переименовать или сменить комментарий: `{name?, comment?}` |
 | DELETE | `/api/keys/{id}` | Удалить → 204 |
+| GET | `/api/connections` | Сохранённые подключения (без паролей) |
+| POST | `/api/connections` | Сохранить: `{name, host, port?, username, group?, auth, key_id \| key_path [+ passphrase] \| password?}` → 201 |
+| GET | `/api/connections/{id}` | Одно подключение |
+| PATCH | `/api/connections/{id}` | Изменить переданные поля (см. ниже) |
+| DELETE | `/api/connections/{id}` | Удалить → 204 |
+| POST | `/api/connections/{id}/connect` | Открыть SSH-сессию по подключению: `{password?, passphrase?}` → 201, описание сессии |
 | GET | `/api/monitor/metrics` | Метрики серверов сейчас (то же, что `metrics` в `/ws`) |
 | GET | `/api/health` | Состояние бэкенда и воркера, загруженные плагины |
 | GET | `/api/plugins` | Плагины: версия, описание, зависимости, `status` и причина сбоя (см. ниже) |
@@ -166,7 +172,7 @@ Invoke-RestMethod -Method Delete "$api/ssh/sessions/$($s.session_id)"
   растёт на 1. Буфер ограничен `SSH_OUTPUT_BUFFER_BYTES` (1 МиБ на сессию): старое
   вытесняется, у слишком большого вывода остаётся конец и `truncated: true`.
 - О каждом открытии и закрытии в шину событий уходит `ssh.session`
-  (`{action: opened | closed, session_id, host, port, username, reason?}`).
+  (`{action: opened | closed, session_id, host, port, username, connection_id, reason?}`).
 - Плагины (docker, git) выполняют в сессии свои служебные команды
   (`ssh_manager.run_service`). Они не попадают в буфер вывода и терминал, не меняют
   `cwd` сессии и выполняются из домашней папки, с лимитом на сервере и точным кодом
@@ -257,6 +263,34 @@ ws.onopen = () => ws.send(JSON.stringify({type: "exec", data: {command: "uptime"
   поэтому при `key_id` ключ на время подключения расшифровывается во временный файл
   (`runtime/` рядом с `keys.json`, права 0600) и сразу удаляется.
 
+### Сохранённые подключения (плагин `connections`)
+
+Список серверов для UI: имя, адрес, пользователь, папка (`group`) и способ входа.
+
+```json
+POST /api/connections
+{"name": "prod", "host": "10.0.0.1", "port": 22, "username": "deploy", "group": "Work",
+ "auth": "key_id", "key_id": "3f2a..."}
+```
+
+- `auth`: `key_id` (ключ из хранилища), `key_path` (файл ключа на этой машине,
+  + `passphrase`, если он зашифрован) или `password`. Пароль можно не передавать:
+  тогда его спрашивают при каждом подключении.
+- Файл: `connections.json` рядом с `keys.json` (`CONNECTIONS_PATH`). Пароли и фразы в
+  нём зашифрованы тем же мастер-ключом, что и ключи; API их никогда не отдаёт, только
+  `has_password` и `has_passphrase`.
+- `PATCH` меняет только переданные поля. Новый способ входа передаётся целиком (`auth`
+  и его поля); без `auth` можно сменить ключ, пароль или фразу текущего способа, а
+  `"password": null` забывает сохранённый пароль.
+- Имена уникальны без учёта регистра (409 `connection_exists`). Несогласованный способ
+  входа (например, `auth: key_id` без `key_id` или с паролем) это 422
+  `invalid_connection`.
+- `POST /api/connections/{id}/connect` открывает новую SSH-сессию, как
+  `POST /api/ssh/sessions`, и отвечает её описанием. Несохранённый пароль или фразу
+  передайте в теле (`{"password": "..."}`), иначе 422 `connection_secret_required`.
+  У сессии (и в событии `ssh.session`) есть `connection_id`: UI видит, какие сессии
+  открыты из какого подключения. Время подключения сохраняется в `last_connected_at`.
+
 ### WebSocket /ws
 
 Поток данных для UI: `ws://127.0.0.1:8000/ws` (без префикса `/api`). В обе стороны
@@ -267,7 +301,7 @@ ws.onopen = () => ws.send(JSON.stringify({type: "exec", data: {command: "uptime"
 |---|---|---|
 | `hello` | сервер, сразу после подключения | `{app, version, protocol, streams}` |
 | `metrics` | сервер, каждые 500 мс | метрики серверов, пример ниже |
-| `ssh.session` | сервер, при открытии и закрытии SSH-сессии | `{action: opened\|closed, session_id, host, port, username, reason?}` |
+| `ssh.session` | сервер, при открытии и закрытии SSH-сессии | `{action: opened\|closed, session_id, host, port, username, connection_id, reason?}` |
 | `worker.status` | сервер, когда меняется состояние воркера | `{status, ...}`: `connected`, `connection_lost`, `worker_exited`, `worker_started` |
 | `ping` | UI | что угодно, вернётся в `pong` |
 | `pong` | сервер, в ответ на `ping` | `data` из `ping` |
@@ -352,6 +386,11 @@ ws.onmessage = (e) => console.log(JSON.parse(e.data));
 | HTTP | error | Когда |
 |---|---|---|
 | 404 | `key_not_found` | Нет ключа с таким id |
+| 404 | `connection_not_found` | Нет сохранённого подключения с таким id |
+| 409 | `connection_exists` | Подключение с таким именем уже есть |
+| 422 | `invalid_connection` | Способ входа подключения не согласован |
+| 422 | `connection_secret_required` | Пароль подключения не сохранён: передайте его в `/connect` |
+| 500 | `connections_corrupted` | `connections.json` повреждён |
 | 404 | `ssh_session_not_found` | Нет сессии с таким `session_id` |
 | 409 | `ssh_not_connected` | Нет открытой сессии, или воркер её уже не знает |
 | 403 | `forbidden_origin` / `forbidden_host` | Запрос со страницы не из `ALLOWED_ORIGINS` или с чужим `Host` |
@@ -374,7 +413,8 @@ ws.onmessage = (e) => console.log(JSON.parse(e.data));
 ```
 app/
   main.py              точка входа (uvicorn)
-  core/                платформа: config, app factory, ошибки, шина событий, логи
+  core/                платформа: config, app factory, ошибки, шина событий, логи,
+                       files (атомарная запись файлов с секретами)
     target/release/    synex_worker.exe (Windows), synex_worker (Linux x86_64)
   worker/              Rust-ядро: client.py (IPC-протокол), manager.py (процесс),
                        executable.py (поиск бинарника для ОС и процессора),
@@ -391,6 +431,7 @@ app/
     monitor/           /api/monitor/*: service (опрос и публикация), aggregator
                        (окно, статусы), values (ответ воркера), hardware (диски, GPU)
     keys/              /api/keys/*
+    connections/       /api/connections/*: store (connections.json), routes, schemas
 tests/                 pytest; fake_worker.py имитирует synex_worker
   integration/         полный цикл UI → FastAPI → воркер → SSH-сервер
 ```

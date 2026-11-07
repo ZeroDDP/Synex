@@ -65,6 +65,7 @@ class SSHSession:
     channel: WorkerChannel
     buffer: OutputBuffer
     key_id: str | None = None
+    connection_id: str | None = None  # сохранённое подключение, из которого открыта
     cwd: str | None = None  # None = домашняя папка, путь ещё не известен
     marker: str = field(default_factory=new_marker)
     created_at: datetime = field(default_factory=_now)
@@ -83,6 +84,7 @@ class SSHSession:
             "username": self.username,
             "auth": self.auth,
             "key_id": self.key_id,
+            "connection_id": self.connection_id,
             "cwd": self.cwd,
             "created_at": self.created_at,
             "last_activity_at": self.last_activity_at,

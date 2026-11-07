@@ -184,7 +184,9 @@ class SSHSessionManager:
 
     # ---------------------------------------------------------------- open
 
-    async def open(self, params: ConnectParams, keys: KeyStore) -> SSHSession:
+    async def open(
+        self, params: ConnectParams, keys: KeyStore, *, connection_id: str | None = None
+    ) -> SSHSession:
         # Считаются и подключения, которые ещё идут: иначе одновременные запросы прошли
         # бы проверку все разом и открыли больше SSH_MAX_SESSIONS сессий
         if len(self._sessions) + self._opening >= settings.SSH_MAX_SESSIONS:
@@ -213,6 +215,7 @@ class SSHSessionManager:
             username=params.username,
             auth=params.auth,
             key_id=params.key_id,
+            connection_id=connection_id,
             channel=channel,
             buffer=OutputBuffer(settings.SSH_OUTPUT_BUFFER_BYTES),
         )
@@ -680,6 +683,7 @@ class SSHSessionManager:
             "host": session.host,
             "port": session.port,
             "username": session.username,
+            "connection_id": session.connection_id,
         }
         if reason is not None:
             event["reason"] = reason

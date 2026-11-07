@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     # Задавайте явно только там, где системного хранилища нет (CI, headless Linux).
     KEYSTORE_MASTER_KEY: SecretStr | None = None
 
+    # Сохранённые подключения к серверам (плагин connections). По умолчанию
+    # connections.json рядом с keys.json; пароли в нём зашифрованы тем же мастер-ключом.
+    CONNECTIONS_PATH: Path | None = None
+
     # Плагины через запятую; * значит все установленные (app/plugins/<name>/plugin.py).
     # Нужные плагинам зависимости включаются сами.
     PLUGINS_ENABLED: str = "*"
@@ -115,6 +119,14 @@ class Settings(BaseSettings):
         if self.KEYSTORE_PATH.is_absolute():
             return self.KEYSTORE_PATH
         return BASE_DIR / self.KEYSTORE_PATH
+
+    @property
+    def connections_path(self) -> Path:
+        if self.CONNECTIONS_PATH is None:
+            return user_data_dir() / "connections.json"
+        if self.CONNECTIONS_PATH.is_absolute():
+            return self.CONNECTIONS_PATH
+        return BASE_DIR / self.CONNECTIONS_PATH
 
     @property
     def ipc_socket_path(self) -> str:
