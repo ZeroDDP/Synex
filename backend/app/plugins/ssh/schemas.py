@@ -104,6 +104,9 @@ class SSHSessionInfo(BaseModel):
     username: str
     auth: AuthMethodName
     key_id: str | None = None
+    connection_id: str | None = Field(
+        default=None, description="Сохранённое подключение (/api/connections), если из него"
+    )
     cwd: str | None = Field(default=None, description="Текущая директория (None = домашняя)")
     created_at: datetime
     last_activity_at: datetime

@@ -305,6 +305,7 @@ async def test_ws_reports_sessions_and_worker_status(app_settings, tmp_path: Pat
                 "host": "10.0.0.1",
                 "port": 22,
                 "username": "root",
+                "connection_id": None,
             }
 
             os.kill(worker_manager.status()["worker_pid"], signal.SIGTERM)

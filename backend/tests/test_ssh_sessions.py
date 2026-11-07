@@ -363,6 +363,7 @@ async def test_lost_worker_connection_closes_session(ssh, fake_worker, connect_b
         "host": "10.0.0.1",
         "port": 22,
         "username": "root",
+        "connection_id": None,
         "reason": CLOSED_WORKER_LOST,
     }
 

@@ -237,6 +237,23 @@ async def test_reopen_with_same_and_other_master_key(
         await stranger.generate_key("other")
 
 
+async def test_secrets_are_encrypted_with_master_key(
+    store: KeyStore, isolated_keystore, monkeypatch
+):
+    token = await store.encrypt_secret("p@ssw0rd")
+    assert "p@ssw0rd" not in token
+    # keys.json появился (без ключей): по нему видно, если мастер-ключ сменится
+    assert json.loads(isolated_keystore.read_text())["keys"] == []
+    assert await KeyStore(isolated_keystore).decrypt_secret(token) == "p@ssw0rd"
+
+    monkeypatch.setattr(settings, "KEYSTORE_MASTER_KEY", SecretStr(Fernet.generate_key().decode()))
+    with pytest.raises(KeystoreCorruptedError, match="does not match"):
+        await KeyStore(isolated_keystore).decrypt_secret(token)
+    isolated_keystore.unlink()  # без keys.json: новый мастер-ключ токен не расшифрует
+    with pytest.raises(KeystoreCorruptedError, match="another master key"):
+        await KeyStore(isolated_keystore).decrypt_secret(token)
+
+
 async def test_invalid_master_key(store: KeyStore, monkeypatch):
     monkeypatch.setattr(settings, "KEYSTORE_MASTER_KEY", SecretStr("not-a-fernet-key"))
     with pytest.raises(KeystoreUnavailableError, match="not a valid Fernet key"):
