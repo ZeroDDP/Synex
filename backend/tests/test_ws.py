@@ -308,12 +308,18 @@ async def test_ws_reports_sessions_and_worker_status(app_settings, tmp_path: Pat
             }
 
             os.kill(worker_manager.status()["worker_pid"], signal.SIGTERM)
-            closed = await recv_type(ws, SSH_SESSION_EVENT, timeout=15)
+            # Потеря сессии и статусы воркера приходят в любом порядке (на Windows
+            # worker_exited бывает раньше закрытия сессии): собираем всё подряд
+            closed: dict | None = None
+            statuses: list[str] = []
+            async with asyncio.timeout(15):
+                while closed is None or "connected" not in statuses:
+                    message = await recv_json(ws, timeout=15)
+                    if message["type"] == SSH_SESSION_EVENT:
+                        closed = message
+                    elif message["type"] == WORKER_STATUS_EVENT:
+                        statuses.append(message["data"]["status"])
             assert closed["data"]["action"] == "closed"
             assert closed["data"]["reason"] == "worker_connection_lost"
-
-            statuses = []
-            async with asyncio.timeout(15):
-                while "connected" not in statuses:
-                    statuses.append((await recv_type(ws, WORKER_STATUS_EVENT))["data"]["status"])
             assert "worker_exited" in statuses and "worker_started" in statuses
+            assert statuses[-1] == "connected"

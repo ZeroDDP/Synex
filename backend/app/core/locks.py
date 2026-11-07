@@ -28,6 +28,18 @@ class LoopLock:
     def locked(self) -> bool:
         return self._current().locked()
 
+    async def acquire(self, timeout: float | None = None) -> bool:
+        """Захватить; False, если не удалось за timeout секунд."""
+        try:
+            async with asyncio.timeout(timeout):
+                await self._current().acquire()
+        except TimeoutError:
+            return False
+        return True
+
+    def release(self) -> None:
+        self._current().release()
+
     async def __aenter__(self) -> None:
         await self._current().acquire()
 

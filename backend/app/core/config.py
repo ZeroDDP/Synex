@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     SSH_MAX_SESSIONS: int = Field(default=20, ge=1)
     # Буфер вывода одной сессии (команды и их результаты), байт. Старое вытесняется.
     SSH_OUTPUT_BUFFER_BYTES: int = Field(default=1024 * 1024, ge=1024)
+    # Сколько служебная команда плагина (docker, git) ждёт, пока сессия освободится от
+    # команды пользователя, сек. Дольше: 409 ssh_session_busy.
+    SSH_SERVICE_WAIT: float = Field(default=10.0, ge=0)
 
     # Хранилище SSH-ключей. По умолчанию keys.json в папке данных пользователя:
     # Windows %LOCALAPPDATA%\Synex, macOS ~/Library/Application Support/Synex,

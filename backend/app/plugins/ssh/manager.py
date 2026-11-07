@@ -9,6 +9,8 @@
 * Всё, что происходит в сессии (команда, результат, ошибка), пишется в её буфер вывода
   (buffer.py) и сразу рассылается подписчикам (WebSocket-подключениям UI).
 * События ssh.session (opened / closed) публикуются в шину: их будет слушать мониторинг.
+* Плагины (docker, git) выполняют в сессии свои служебные команды через run_service:
+  они не попадают в буфер вывода и не меняют cwd сессии.
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import asyncio
 import contextlib
 import math
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -37,6 +40,7 @@ from app.plugins.ssh.errors import (
     SSHConnectTimeoutError,
     SSHExecTimeoutError,
     SSHNotConnectedError,
+    SSHSessionBusyError,
     SSHSessionNotFoundError,
     SSHTooManySessionsError,
 )
@@ -122,6 +126,17 @@ class ExecResult:
     stderr: str
     exit_code: int
     cwd: str | None
+    timed_out: bool
+    duration_ms: int
+
+
+@dataclass(frozen=True)
+class ServiceResult:
+    """Результат служебной команды плагина (run_service)."""
+
+    stdout: str
+    stderr: str
+    exit_code: int
     timed_out: bool
     duration_ms: int
 
@@ -352,46 +367,13 @@ class SSHSessionManager:
         logger.debug("SSH exec", session_id=session.id, command=command, timeout=limit)
         started = time.monotonic()
         try:
-            response = await session.channel.client.request(
-                "ssh_exec", _session_payload(session, command=wrapped), timeout=wait,
-                request_id=session.id,
-            )  # fmt: skip
-        except WorkerCommandError as e:
-            if is_session_missing(e.stderr):
-                # Сессии в воркере нет (например, его перезапустили): синхронизируемся.
-                self._forget(session, CLOSED_LOST_IN_WORKER)
-                raise SSHNotConnectedError(
-                    f"SSH session '{session.id}' is no longer open: {e.stderr}"
-                ) from e
-            self._record_error(session, e, tag)
-            raise
-        except WorkerTimeoutError as e:
-            hint = (
-                "The server-side limit did not stop it: the server may lack coreutils `timeout`"
-                if track_cwd
-                else "Without track_cwd the command is not limited on the server"
+            response = await self._exec_in_worker(
+                session,
+                wrapped,
+                wait,
+                limited=track_cwd,
+                on_error=lambda error: self._record_error(session, error, tag),
             )
-            logger.warning("SSH exec timed out without a reply", session_id=session.id, waited=wait)
-            if session.channel.dedicated:
-                # Воркер выполняет запросы подключения по очереди и отменять команду не
-                # умеет: все следующие команды сессии встали бы за зависшей. Сессия
-                # закрывается вместе со своим подключением, UI откроет новую.
-                outcome = "The session was closed so that it does not stay blocked; open a new one."
-            else:
-                outcome = "The command may still be running and keep the session busy."
-            error = SSHExecTimeoutError(
-                f"No result from the worker within {wait:g}s. {hint}. {outcome}"
-            )
-            self._record_error(session, error, tag)
-            if session.channel.dedicated:
-                self._forget(session, CLOSED_EXEC_TIMEOUT)
-            raise error from e
-        except WorkerConnectionError as e:
-            if session.closed:
-                raise SSHNotConnectedError(
-                    f"SSH session '{session.id}' was closed ({session.close_reason})"
-                ) from e
-            raise
         finally:
             session.running = None
         duration_ms = round((time.monotonic() - started) * 1000)
@@ -436,9 +418,123 @@ class SSHSessionManager:
             duration_ms=duration_ms,
         )
 
+    async def _exec_in_worker(
+        self,
+        session: SSHSession,
+        command: str,
+        wait: float,
+        *,
+        limited: bool,
+        on_error: Callable[[AppError], None] | None = None,
+    ) -> dict[str, Any]:
+        """ssh_exec в воркере (lock канала уже взят) и перевод его ошибок в ошибки сессии.
+
+        limited: команда обёрнута с лимитом на сервере (wrapper.py). on_error получает
+        ошибку команды до того, как она будет выброшена (запись в буфер вывода).
+        """
+        try:
+            return await session.channel.client.request(
+                "ssh_exec", _session_payload(session, command=command), timeout=wait,
+                request_id=session.id,
+            )  # fmt: skip
+        except WorkerCommandError as e:
+            if is_session_missing(e.stderr):
+                # Сессии в воркере нет (например, его перезапустили): синхронизируемся.
+                self._forget(session, CLOSED_LOST_IN_WORKER)
+                raise SSHNotConnectedError(
+                    f"SSH session '{session.id}' is no longer open: {e.stderr}"
+                ) from e
+            if on_error is not None:
+                on_error(e)
+            raise
+        except WorkerTimeoutError as e:
+            hint = (
+                "The server-side limit did not stop it: the server may lack coreutils `timeout`"
+                if limited
+                else "Without track_cwd the command is not limited on the server"
+            )
+            logger.warning("SSH exec timed out without a reply", session_id=session.id, waited=wait)
+            if session.channel.dedicated:
+                # Воркер выполняет запросы подключения по очереди и отменять команду не
+                # умеет: все следующие команды сессии встали бы за зависшей. Сессия
+                # закрывается вместе со своим подключением, UI откроет новую.
+                outcome = "The session was closed so that it does not stay blocked; open a new one."
+            else:
+                outcome = "The command may still be running and keep the session busy."
+            error = SSHExecTimeoutError(
+                f"No result from the worker within {wait:g}s. {hint}. {outcome}"
+            )
+            if on_error is not None:
+                on_error(error)
+            if session.channel.dedicated:
+                self._forget(session, CLOSED_EXEC_TIMEOUT)
+            raise error from e
+        except WorkerConnectionError as e:
+            if session.closed:
+                raise SSHNotConnectedError(
+                    f"SSH session '{session.id}' was closed ({session.close_reason})"
+                ) from e
+            raise
+
     @staticmethod
     def _record_error(session: SSHSession, error: AppError, tag: dict[str, Any]) -> None:
         session.record("error", {"error": error.code, "detail": error.detail, **tag})
+
+    # ------------------------------------------------------ plugin commands
+
+    async def run_service(
+        self,
+        session_id: str,
+        command: str,
+        *,
+        timeout: float | None = None,
+        wait: float | None = None,
+        name: str = "service",
+    ) -> ServiceResult:
+        """Служебная команда плагина (docker, git) в сессии.
+
+        В отличие от execute: не пишется в буфер вывода (терминал её не видит), не
+        меняет cwd сессии и выполняется из домашней папки. Как и execute: точный код
+        возврата, stdin из /dev/null и лимит timeout на сервере (wrapper.py).
+
+        Если в сессии выполняется команда пользователя, ждёт не дольше wait
+        (SSH_SERVICE_WAIT), потом SSHSessionBusyError (409): воркер выполняет команды
+        сессии по очереди. Плагину с долгими командами лучше открыть свою сессию.
+        """
+        session = self.get(session_id)
+        command = normalize_newlines(command)
+        wait_for_lock = settings.SSH_SERVICE_WAIT if wait is None else wait
+        if not await session.channel.lock.acquire(timeout=wait_for_lock):
+            raise SSHSessionBusyError(
+                f"SSH session '{session.id}' is busy with another command for more than "
+                f"{wait_for_lock:g}s. Try again later or open a separate session for {name}."
+            )
+        try:
+            if session.closed:
+                raise SSHNotConnectedError(f"SSH session '{session.id}' is closed")
+            remote_limit = max(1, math.ceil(timeout or settings.SSH_EXEC_TIMEOUT))
+            wrapped = build_command(command, None, session.marker, remote_limit)
+            reply_wait = remote_limit + KILL_AFTER + settings.SSH_EXEC_TIMEOUT_GRACE
+            logger.debug("SSH service command", session_id=session.id, plugin=name, command=command)
+            started = time.monotonic()
+            response = await self._exec_in_worker(session, wrapped, reply_wait, limited=True)
+        finally:
+            session.channel.lock.release()
+
+        duration_ms = round((time.monotonic() - started) * 1000)
+        result = parse_output(
+            str(response.get("stdout") or ""), session.marker, timeout_applied=True
+        )
+        exit_code = result.exit_code
+        if exit_code is None:
+            exit_code = _as_int(response.get("exit_code"), default=-1)
+        return ServiceResult(
+            stdout=result.stdout,
+            stderr=str(response.get("stderr") or "").rstrip("\r\n"),
+            exit_code=exit_code,
+            timed_out=result.timed_out,
+            duration_ms=duration_ms,
+        )
 
     # ------------------------------------------------------ service requests
 
