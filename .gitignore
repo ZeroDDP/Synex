@@ -1,6 +1,5 @@
 __pycache__/
 *.py[cod]
-*.vscode
 *.egg-info/
 dist/
 build/
@@ -12,6 +11,8 @@ venv/
 env/
 
 .env
+.env.*
+!.env.example
 data/*.db
 data/*.db-journal
 
@@ -25,11 +26,34 @@ data/*.db-journal
 
 .idea/
 
+# Редакторы и ОС
+.vscode/
+.DS_Store
+Thumbs.db
+*.sw?
+
+# Frontend (frontend/: Svelte + Vite). В репозиторий идут исходники, package.json и
+# package-lock.json; зависимости, сборка, кэш и локальные настройки остаются у себя
+node_modules/
+dist-ssr/
+.vite/
+*.local
+*.timestamp-*.mjs
+coverage/
+*.tsbuildinfo
+.eslintcache
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
 #Rust
 
 target/
 synex_worker
 synex_worker.exe
+# ...но папка крейта с тем же именем не игнорируется: иначе git не видит новые файлы в ней
+!core/crates/synex_worker/
 *.pdb
 *.tmp
 *.log
