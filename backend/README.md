@@ -125,6 +125,13 @@ glibc 2.38 или новее (Ubuntu 24.04, Debian 13, Fedora 39 и новее).
 | PATCH | `/api/connections/{id}` | Изменить переданные поля (см. ниже) |
 | DELETE | `/api/connections/{id}` | Удалить → 204 |
 | POST | `/api/connections/{id}/connect` | Открыть SSH-сессию по подключению: `{password?, passphrase?}` → 201, описание сессии |
+| GET | `/api/docker/sessions/{id}/info` | Есть ли Docker на сервере сессии, версии |
+| GET | `/api/docker/sessions/{id}/containers` | Контейнеры: `?all=false` только запущенные |
+| POST | `/api/docker/sessions/{id}/containers/{c}/{action}` | `start`, `stop`, `restart`, `pause`, `unpause`, `kill` (`?timeout=N` для stop/restart) |
+| DELETE | `/api/docker/sessions/{id}/containers/{c}` | Удалить контейнер: `?force=true&volumes=true` |
+| GET | `/api/docker/sessions/{id}/containers/{c}/logs` | Логи: `?tail=200&since=<next_since>` |
+| GET | `/api/docker/sessions/{id}/stats` | CPU, память, сеть и диск запущенных контейнеров |
+| GET | `/api/docker/sessions/{id}/images` | Образы на сервере |
 | GET | `/api/monitor/metrics` | Метрики серверов сейчас (то же, что `metrics` в `/ws`) |
 | GET | `/api/health` | Состояние бэкенда и воркера, загруженные плагины |
 | GET | `/api/plugins` | Плагины: версия, описание, зависимости, `status` и причина сбоя (см. ниже) |
@@ -291,6 +298,52 @@ POST /api/connections
   У сессии (и в событии `ssh.session`) есть `connection_id`: UI видит, какие сессии
   открыты из какого подключения. Время подключения сохраняется в `last_connected_at`.
 
+### Docker на серверах (плагин `docker`)
+
+Плагин выполняет на сервере обычный `docker` через открытую SSH-сессию: это служебные
+команды сессии, в её терминал они не попадают. Все пути начинаются с
+`/api/docker/sessions/{session_id}/`. Нужен Docker 20.10 или новее.
+
+- `GET .../info` отвечает всегда 200: `status` `ok`, `not_installed` (нет docker),
+  `permission_denied` (пользователь SSH не в группе docker) или `daemon_unavailable`
+  (демон не запущен), текст ошибки в `detail`, версии клиента и сервера.
+- `GET .../containers` (`?all=false`: только запущенные) отдаёт контейнеры:
+
+```json
+{"id": "6de6...", "name": "web", "names": ["web"], "image": "nginx:1.27",
+ "command": "nginx -g 'daemon off;'", "created_at": "2026-11-06T22:42:33+07:00",
+ "state": "running", "status": "Up 17 minutes (healthy)", "health": "healthy",
+ "exit_code": null, "networks": ["bridge"],
+ "ports": [{"container_port": "80", "protocol": "tcp", "host_ip": "0.0.0.0", "host_port": "8080"}],
+ "labels": {"com.docker.compose.project": "shop"}, "compose_project": "shop",
+ "compose_service": "web"}
+```
+
+- `POST .../containers/{имя или ID}/{action}`: `start`, `stop`, `restart`, `pause`,
+  `unpause`, `kill`; для `stop` и `restart` можно `?timeout=N` (секунд до KILL).
+  `DELETE .../containers/{имя или ID}` удаляет (`?force=true` и запущенный,
+  `?volumes=true` вместе с анонимными томами). Ответ `{container, action, output}`.
+  Действие, которое не подходит к состоянию (пауза остановленного, удаление
+  запущенного без `force`), это 409 `docker_container_conflict`.
+- `GET .../containers/{имя или ID}/logs?tail=200` отдаёт последние строки stdout и
+  stderr контейнера по времени: `{container, lines: [{time, stream, text}],
+  next_since}`. Чтобы дочитывать новые строки (живой лог), UI раз в пару секунд
+  передаёт `since` = `next_since` прошлого ответа: уже показанные строки не повторяются.
+  `since` принимает и RFC3339, Unix-время или длительность (`10m`, `1h`).
+- `GET .../stats`: один замер `docker stats` запущенных контейнеров (пара секунд):
+  `cpu_percent` (100 = одно ядро), `memory_used`, `memory_limit`, `memory_percent`,
+  `net_rx`, `net_tx`, `block_read`, `block_write` (байты), `pids`.
+- `GET .../images`: образы (`repository` и `tag` = `null` у образов без имени,
+  `size` в байтах).
+- Если пользователь SSH не в группе docker, можно задать `DOCKER_COMMAND=sudo -n docker`
+  (нужен sudo без пароля). Лимит одной команды `DOCKER_TIMEOUT` (60 с).
+- Ошибки: 404 `docker_not_installed`, 403 `docker_permission_denied`, 503
+  `docker_daemon_unavailable`, 404 `docker_container_not_found`, 409
+  `docker_container_conflict`, 504 `docker_timeout`,
+  502 `docker_command_failed` (текст docker в `detail`). Сессия, занятая командой
+  пользователя, даёт 409 `ssh_session_busy`: для панели Docker UI лучше открыть
+  отдельную сессию.
+
 ### WebSocket /ws
 
 Поток данных для UI: `ws://127.0.0.1:8000/ws` (без префикса `/api`). В обе стороны
@@ -407,6 +460,7 @@ ws.onmessage = (e) => console.log(JSON.parse(e.data));
 | 503 | `keystore_unavailable` | Нет доступа к Credential Manager / неверный `KEYSTORE_MASTER_KEY` |
 | 504 | `ssh_exec_timeout` | Воркер не вернул результат команды |
 | 504 | `worker_timeout` | Воркер не ответил на другой запрос |
+| 403/404/502/503/504 | `docker_*` | Ошибки Docker на сервере (см. «Docker на серверах») |
 
 ## Структура
 
@@ -432,6 +486,8 @@ app/
                        (окно, статусы), values (ответ воркера), hardware (диски, GPU)
     keys/              /api/keys/*
     connections/       /api/connections/*: store (connections.json), routes, schemas
+    docker/            /api/docker/*: commands (команды docker и разбор вывода),
+                       service (выполнение в сессии, ошибки), routes, schemas
 tests/                 pytest; fake_worker.py имитирует synex_worker
   integration/         полный цикл UI → FastAPI → воркер → SSH-сервер
 ```
