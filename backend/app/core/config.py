@@ -99,6 +99,12 @@ class Settings(BaseSettings):
     # Как часто обновлять диски и видеокарты сервера (df, nvidia-smi), сек.
     MONITOR_HARDWARE_INTERVAL: float = Field(default=10.0, gt=0)
 
+    # Docker на серверах (плагин docker). Команда docker на сервере: например
+    # "sudo -n docker", если пользователь SSH не в группе docker (нужен sudo без пароля).
+    DOCKER_COMMAND: str = Field(default="docker", min_length=1)
+    # Сколько ждать команду docker на сервере, сек (stop и restart ждут контейнер).
+    DOCKER_TIMEOUT: float = Field(default=60.0, gt=0)
+
     # WebSocket /ws (поток данных для UI). Тестовые метрики вместо настоящих: для
     # разработки UI без SSH-сервера; период публикации, сек.
     WS_FAKE_METRICS: bool = False
