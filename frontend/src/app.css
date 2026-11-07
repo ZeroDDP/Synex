@@ -1,0 +1,124 @@
+@import url('https://fonts.googleapis.com/css2?family=Host+Grotesk:wght@300;400;500;600;700;800&family=Inter:wght@300;400;500;700&family=JetBrains+Mono:wght@500&display=swap');
+:root {
+  /* Backgrounds */
+  --synex-bg-app: #0e1117;
+  --synex-bg-surface: #13171c;
+  --synex-bg-hover: #1a2029;
+  --synex-bg-active: rgba(156, 92, 32, 0.5);
+
+  /* Borders */
+  --synex-border-subtle: #1e2530;
+  --synex-border-default: #2e3b4f;
+  --synex-border-strong: #516078;
+
+
+  /* Text */
+  --synex-text-primary: #ffffff;
+  --synex-text-secondary: #adb4bf;
+  --synex-text-muted: #516078;
+  --synex-text-disabled: #4d5c73;
+
+  /* Accent */
+  --synex-accent: #ff7b00;
+  --synex-accent-hover: rgba(255, 148, 51, 0.88);
+  --synex-accent-pressed: #d96800;
+  --synex-accent-on: #0e1117;
+  --synex-ring-off: rgba(241.50, 116.72, 0, 0.20);
+
+  /* Status */
+  --synex-ok: #12a93f;
+  --synex-ok-bg: rgba(18, 169, 63, 0.12);
+  --synex-warning: #ffcc00;
+  --synex-warning-bg: rgba(255, 204, 0, 0.12);
+  --synex-danger: #aa2e2e;
+  --synex-danger-fg: #e5534b;
+  --synex-danger-bg: rgba(170, 46, 46, 0.12);
+  --synex-offline: #9a9188;
+  --synex-RAM-graph: #005EFF;
+
+
+  /* Spaces (Gap / Padding / Margin) */
+  --synex-space-1: 4px;
+  --synex-space-2: 8px;
+  --synex-space-3: 12px;
+  --synex-space-4: 16px;
+  --synex-space-4-5: 18px;
+  --synex-space-5: 20px;
+  --synex-space-6: 24px;
+  --synex-space-7: 28px;
+  --synex-space-8: 32px;
+  --synex-space-9: 36px;
+  --synex-space-10: 40px;
+  --synex-space-11: 44px;
+  --synex-space-12: 48px;
+  --synex-space-13: 52px;
+  --synex-space-14: 56px;
+  --synex-space-15: 60px;
+  --synex-space-16: 64px;
+  --synex-space-17: 68px;
+  --synex-space-18: 72px;
+  --synex-space-19: 76px;
+  --synex-space-20: 80px;
+
+
+  /* Radius (Border Radius) */
+  --synex-radius-sm: 5px;
+  --synex-radius-md: 10px;
+  --synex-radius-lg: 20px;
+  --synex-radius-full: 104px;
+
+  /* font families from google fonts */
+  --font-host: 'Host Grotesk', sans-serif;
+  --font-inter: 'Inter', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+  
+  /* SF Pro */
+  --font-sf: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+
+  /* Layout elements */
+  --synex-sidebar-width: 280px;
+
+  --font-size-8: 8px;
+  --font-size-9: 9px;
+  --font-size-10: 10px;
+  --font-size-11: 11px;
+  --font-size-12: 12px;
+  --font-size-13: 13px;
+  --font-size-14: 14px;
+  --font-size-15: 15px;
+  --font-size-16: 16px;
+  --font-size-17: 17px;
+  --font-size-18: 18px;
+  --font-size-19: 19px;
+  --font-size-20: 20px;
+
+}
+
+/* Base */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body, #app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--synex-bg-app);
+  color: var(--synex-text-primary);
+  font-family: var(--font-inter);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+button {
+  font: inherit;  /* Наследование шрифта сайта */
+  background: none;    
+  border: none;        
+  padding: 0;          
+  cursor: pointer;     
+}
+/* end Base */
+
+
