@@ -36,14 +36,19 @@ class PluginRig:
 
 @asynccontextmanager
 async def plugin_rig(
-    tmp_path: Path, socket_path: str, plugins: list[str], programs: dict[str, Program]
+    tmp_path: Path,
+    socket_path: str,
+    plugins: list[str],
+    programs: dict[str, Program] | None = None,
 ) -> AsyncIterator[PluginRig]:
+    """programs: программы сервера для эмулятора shell (docker, git). None: команды
+    выполняет настоящий `sh -c` с настоящими программами (только Linux/macOS)."""
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
-    # Всегда эмулятор shell: программы сервера (docker, git) подставляет тест
-    state = FakeWorkerState(run_shell=True, home=str(home), emulate_shell=True)
-    assert state.shell is not None
-    state.shell.programs.update(programs)
+    emulate = programs is not None
+    state = FakeWorkerState(run_shell=True, home=str(home), emulate_shell=emulate)
+    if state.shell is not None:
+        state.shell.programs.update(programs or {})
     server = await start_fake_worker(state)
     assert state.port is not None
     provider = FakeWorkerProvider(state.port, socket_path)

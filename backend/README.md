@@ -132,6 +132,11 @@ glibc 2.38 или новее (Ubuntu 24.04, Debian 13, Fedora 39 и новее).
 | GET | `/api/docker/sessions/{id}/containers/{c}/logs` | Логи: `?tail=200&since=<next_since>` |
 | GET | `/api/docker/sessions/{id}/stats` | CPU, память, сеть и диск запущенных контейнеров |
 | GET | `/api/docker/sessions/{id}/images` | Образы на сервере |
+| GET | `/api/git/sessions/{id}/status` | Репозиторий на сервере: `?path=~/app`, ветка, отставание, изменения |
+| GET | `/api/git/sessions/{id}/log` | Коммиты: `?path=~/app&limit=20` |
+| POST | `/api/git/sessions/{id}/fetch` | `git fetch`: `{path}` → состояние со свежим `behind` |
+| POST | `/api/git/sessions/{id}/pull` | `git pull --ff-only`: `{path}` → пришедшие коммиты |
+| POST | `/api/git/sessions/{id}/deploy` | pull и команда в папке репозитория: `{path, command?, only_if_updated?, timeout?}` |
 | GET | `/api/monitor/metrics` | Метрики серверов сейчас (то же, что `metrics` в `/ws`) |
 | GET | `/api/health` | Состояние бэкенда и воркера, загруженные плагины |
 | GET | `/api/plugins` | Плагины: версия, описание, зависимости, `status` и причина сбоя (см. ниже) |
@@ -344,6 +349,40 @@ POST /api/connections
   пользователя, даёт 409 `ssh_session_busy`: для панели Docker UI лучше открыть
   отдельную сессию.
 
+### Git на серверах (плагин `git`)
+
+Репозиторий на сервере (например, папка проекта, который потом деплоится): плагин
+выполняет `git` через SSH-сессию служебными командами. Все пути начинаются с
+`/api/git/sessions/{session_id}/`, папка репозитория передаётся в `path`: абсолютный
+путь, `~/app` или путь от домашней папки.
+
+- `GET .../status?path=~/app`: `head`, `branch` (`null` и `detached: true` при detached
+  HEAD), `upstream`, `ahead` и `behind` (по последнему fetch), `clean`, `changes`
+  (`[{path, kind: changed|renamed|conflict|untracked, index, worktree, orig_path}]`) и
+  `last_commit`.
+- `GET .../log?path=~/app&limit=20`: коммиты текущей ветки, новые первыми
+  (`{hash, short_hash, author_name, author_email, date, subject}`).
+- `POST .../fetch` `{"path": "~/app"}`: `git fetch --prune`, ответ как у `status` со
+  свежими `ahead` и `behind` (сколько коммитов придёт с pull).
+- `POST .../pull` `{"path": "~/app"}`: `git pull --ff-only`, только перемотка вперёд,
+  без merge-коммитов. Ответ `{path, before, after, updated, commits, output}`:
+  `commits` это пришедшие коммиты (новые первыми). Если обновиться нельзя, файлы не
+  меняются, а ответ 409 с причиной: `git_local_changes` (на сервере правки, которые
+  pull перезапишет), `git_not_fast_forward` (на сервере свои коммиты),
+  `git_no_upstream`, `git_detached_head`. Недоступный remote (сеть, ключ, логин):
+  502 `git_remote_unavailable`.
+- `POST .../deploy` `{"path": "~/app", "command": "docker compose up -d --build",
+  "only_if_updated": false, "timeout": 600}`: pull (ошибки как у `/pull`, тогда команда
+  не выполняется), затем `command` в папке репозитория с лимитом `timeout` секунд.
+  Ответ 200 `{path, ok, pull, command: {command, exit_code, stdout, stderr, timed_out,
+  duration_ms}}`, `ok: false`, если команда упала или не уложилась в лимит. С
+  `only_if_updated: true` команда выполняется, только если pull принёс коммиты. Деплой
+  занимает сессию до конца команды: для него UI лучше открыть отдельную сессию.
+- Сообщения git на английском (`LC_ALL=C`), вопросы логина и пароля отключены
+  (`GIT_TERMINAL_PROMPT=0`): приватный remote должен открываться ключом сервера.
+- Ошибки: 404 `git_not_installed`, `git_path_not_found`, `git_not_a_repository`, 504
+  `git_timeout` (`GIT_TIMEOUT`, 120 с), 502 `git_command_failed` (текст git в `detail`).
+
 ### WebSocket /ws
 
 Поток данных для UI: `ws://127.0.0.1:8000/ws` (без префикса `/api`). В обе стороны
@@ -461,6 +500,7 @@ ws.onmessage = (e) => console.log(JSON.parse(e.data));
 | 504 | `ssh_exec_timeout` | Воркер не вернул результат команды |
 | 504 | `worker_timeout` | Воркер не ответил на другой запрос |
 | 403/404/502/503/504 | `docker_*` | Ошибки Docker на сервере (см. «Docker на серверах») |
+| 404/409/502/504 | `git_*` | Ошибки git на сервере (см. «Git на серверах») |
 
 ## Структура
 
@@ -488,6 +528,8 @@ app/
     connections/       /api/connections/*: store (connections.json), routes, schemas
     docker/            /api/docker/*: commands (команды docker и разбор вывода),
                        service (выполнение в сессии, ошибки), routes, schemas
+    git/               /api/git/*: commands (команды git и разбор вывода), service,
+                       routes, schemas
 tests/                 pytest; fake_worker.py имитирует synex_worker
   integration/         полный цикл UI → FastAPI → воркер → SSH-сервер
 ```
@@ -586,7 +628,14 @@ uv run pytest tests/test_real_worker.py -v
 - удалённая папка сессии: команда не выполняется в домашней папке;
 - переподключение терминала с `since`: UI получает пропущенный вывод по порядку;
 - падение воркера: терминал и `/ws` узнают о потере сессии, бэкенд перезапускает
-  воркер, новая сессия работает.
+  воркер, новая сессия работает;
+- все плагины загружаются (`PLUGINS_ENABLED=*`); сохранённое подключение открывает
+  сессию, а `connection_id` доходит до `/ws`;
+- git на сервере: репозиторий отстаёт от origin, `status`, `fetch` и деплой (`pull` и
+  команда в папке репозитория), терминал сессии служебных команд не видит;
+- docker на сервере: контейнер из образа, собранного из пустого архива (без скачивания),
+  список, логи, ошибка запуска и удаление. Нужен работающий Docker, иначе тест
+  пропускается.
 
 Нужны воркер (как для `test_real_worker.py`) и SSH-сервер. Если `SYNEX_TEST_SSH_*`
 не заданы, на Linux и macOS тесты сами поднимают `sshd` на `127.0.0.1` со случайным

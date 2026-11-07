@@ -105,6 +105,10 @@ class Settings(BaseSettings):
     # Сколько ждать команду docker на сервере, сек (stop и restart ждут контейнер).
     DOCKER_TIMEOUT: float = Field(default=60.0, gt=0)
 
+    # Git на серверах (плагин git): сколько ждать команду git, сек (fetch и pull ходят
+    # на remote).
+    GIT_TIMEOUT: float = Field(default=120.0, gt=0)
+
     # WebSocket /ws (поток данных для UI). Тестовые метрики вместо настоящих: для
     # разработки UI без SSH-сервера; период публикации, сек.
     WS_FAKE_METRICS: bool = False

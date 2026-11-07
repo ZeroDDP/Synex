@@ -79,7 +79,8 @@ def parse_wrapped(script: str) -> _Wrapped | None:
     if lines and lines[0] == "exec </dev/null":
         lines = lines[1:]  # stdin команды: в эмуляторе ввода и так нет
     cwd = None
-    if lines and lines[0].startswith("cd -- "):
+    # Строка cd обёртки (cwd сессии), а не `cd -- ...` в начале команды пользователя
+    if lines and lines[0].startswith("cd -- ") and "synex: directory" in lines[0]:
         cwd = shlex.split(lines[0])[2]
         lines = lines[1:]
     rc_line = max(i for i, line in enumerate(lines) if line.startswith(f"{RC_VAR}=$?"))
@@ -190,6 +191,7 @@ class FakeShell:
         if name in self.programs:
             return (*self.programs[name](args, cwd, env), cwd, False)
         if name == "cd":
+            args = [a.replace("$HOME", self.home, 1) for a in args if a != "--"]
             target = self._abs(cwd, args[0]) if args else self.home
             if not self._is_dir(target):
                 return "", f"sh: 1: cd: can't cd to {args[0]}\n", 2, cwd, False
