@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::{env, result};
 use synex_core::mon::SshMonitoring;
+use synex_core::sftp::Sftp;
 use synex_core::ssh::SshSession;
 // use tokio::fs::OpenOptions;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -126,220 +127,217 @@ where
         };
 
         // Обрабатываем действия
-        if req.action == "ssh_exec" {
-            info!("Обработка ssh_exec");
+        match req.action.as_str() {
+            "ssh_exec" => {
+                info!("Обработка ssh_exec");
 
-            // Распаковка ArcMutex списка
-            let session_arc = {
-                let store = sessions.lock().await;
-                match store.get(&req.id) {
-                    Some(arc) => arc.clone(),
+                // Распаковка ArcMutex списка
+                let session_arc = {
+                    let store = sessions.lock().await;
+                    match store.get(&req.id) {
+                        Some(arc) => arc.clone(),
+                        None => {
+                            // Отправляем ошибку "сессия не найдена" и выходим
+                            error!("Session dont founded by key: {}", &req.id);
+                            send_error(
+                                &mut stream,
+                                &req.id,
+                                "Session dont founded by key. Create session first!",
+                            )
+                            .await;
+                            continue;
+                        }
+                    }
+                };
+
+                // 2. Теперь лочим саму сессию
+                let mut sess = session_arc.lock().await;
+                let command: String = match req.payload.command {
+                    Some(cmd) => cmd,
                     None => {
-                        // Отправляем ошибку "сессия не найдена" и выходим
-                        error!("Session dont founded by key: {}", &req.id);
-                        send_error(
-                            &mut stream,
-                            &req.id,
-                            "Session dont founded by key. Create session first!",
-                        )
-                        .await;
+                        eprintln!("❌ Отсутствует command в payload");
+                        send_error(&mut stream, &req.id, "Missing 'command' in payload").await;
                         continue;
                     }
-                }
-            };
-            // let session_arc = {
-            //     let store = sessions.lock().await;
-            //     match store.get(&req.id) {
-            //         Some(arc) => arc.clone(),
-            //         None => {
-            //             // Отправляем ошибку "сессия не найдена" и выходим
-            //             error!("Session dont founded by key: {}", req.id);
-            //             send_error(
-            //                 &mut stream,
-            //                 &req.id,
-            //                 "Session dont founded by key. Create session first!",
-            //             )
-            //             .await;
-            //             return;
-            //         }
-            //     }
-            // }; // Карта разлочилась здесь!
+                };
 
-            // 2. Теперь лочим саму сессию
-            let mut sess = session_arc.lock().await;
-            let command: String = match req.payload.command {
-                Some(cmd) => cmd,
-                None => {
-                    eprintln!("❌ Отсутствует command в payload");
-                    send_error(&mut stream, &req.id, "Missing 'command' in payload").await;
-                    continue;
-                }
-            };
-
-            info!("Выполняется команда: {}", command);
-            match sess.execute_command(&command).await {
-                Ok(output) => {
-                    info!("Команда выполнена. Exit code: {}", output.exit_code);
-                    let resp = Response {
-                        id: req.id.clone(),
-                        status: "ok".to_string(),
-                        payload: ResponsePayload {
-                            stdout: output.stdout,
-                            stderr: output.stderr,
-                            exit_code: output.exit_code,
-                        },
-                    };
-                    send_response(&mut stream, resp).await;
-                }
-                Err(e) => {
-                    error!("❌ Ошибка выполнения команды: {}", e);
-                    send_error(&mut stream, &req.id, &e.to_string()).await;
-                }
-            }
-        } else if req.action == "ssh_connect" {
-            info!("Обработка ssh_connect");
-            let p: ConnectPayload = match req.payload.connection {
-                Some(conn) => conn,
-                None => {
-                    eprintln!("Missing 'connection' in payload");
-                    send_error(&mut stream, &req.id, "Missing 'connection' in payload").await;
-                    continue;
-                }
-            };
-
-            info!(
-                "Попытка подключения к {}@{}:{} (key: {}, passphrase: {}, password: {})...",
-                p.username,
-                p.host,
-                p.port,
-                p.key_path.as_deref().unwrap_or("None"),
-                p.passphrase.as_deref().unwrap_or("None"),
-                p.password.as_deref().unwrap_or("None")
-            );
-
-            // let session_id = Uuid::new_v4().to_string();
-
-            match SshSession::connect(
-                &p.host,
-                p.port,
-                &p.username,
-                &p.key_path,
-                &p.passphrase,
-                &p.password,
-            )
-            .await
-            {
-                Ok(sess) => {
-                    info!("SSH-подключение успешно!");
-                    let session_arc = Arc::new(Mutex::new(sess));
-                    sessions.lock().await.insert(req.id.clone(), session_arc);
-                    let resp = Response {
-                        id: req.id.clone(),
-                        status: "ok".to_string(),
-                        payload: ResponsePayload {
-                            stdout: format!("Connected successfully, id: {}", req.id),
-                            stderr: String::new(),
-                            exit_code: 0,
-                        },
-                    };
-                    info!("Отправляю ответ об успешном подключении...");
-                    send_response(&mut stream, resp).await;
-                    info!("Ответ отправлен");
-                }
-                Err(e) => {
-                    eprintln!("❌ Ошибка SSH-подключения: {}", e);
-                    send_error(&mut stream, &req.id, &format!("Connection failed: {}", e)).await;
-                }
-            }
-        } else if req.action == "monitor_get_values" {
-            info!("Обработка monitor");
-
-            // Распаковка ArcMutex списка
-            let session_arc = {
-                let store = sessions.lock().await;
-                match store.get(&req.id) {
-                    Some(arc) => arc.clone(),
-                    None => {
-                        // Отправляем ошибку "сессия не найдена" и выходим
-                        error!("Session dont founded by key: {}", &req.id);
-                        send_error(
-                            &mut stream,
-                            &req.id,
-                            "Session dont founded by key. Create session first!",
-                        )
-                        .await;
-                        continue;
+                info!("Выполняется команда: {}", command);
+                match sess.execute_command(&command).await {
+                    Ok(output) => {
+                        info!("Команда выполнена. Exit code: {}", output.exit_code);
+                        let resp = Response {
+                            id: req.id.clone(),
+                            status: "ok".to_string(),
+                            payload: ResponsePayload {
+                                stdout: output.stdout,
+                                stderr: output.stderr,
+                                exit_code: output.exit_code,
+                            },
+                        };
+                        send_response(&mut stream, resp).await;
+                    }
+                    Err(e) => {
+                        error!("❌ Ошибка выполнения команды: {}", e);
+                        send_error(&mut stream, &req.id, &e.to_string()).await;
                     }
                 }
-            };
+            }
+            "ssh_connect" => {
+                info!("Обработка ssh_connect");
+                let p: ConnectPayload = match req.payload.connection {
+                    Some(conn) => conn,
+                    None => {
+                        eprintln!("Missing 'connection' in payload");
+                        send_error(&mut stream, &req.id, "Missing 'connection' in payload").await;
+                        continue;
+                    }
+                };
 
-            // 2. Теперь лочим саму сессию
-            let mut sess = session_arc.lock().await;
-            let command = "head -n 1 /proc/stat; grep -E 'MemTotal|MemAvailable' /proc/meminfo";
-            info!("Выполняется команда мониторинга");
-            match sess.execute_command(command).await {
-                Ok(output) => {
-                    let stdout_json = parse_metrics_to_json(&output.stdout, &mut sess.prev_cpu);
-                    let resp = Response {
-                        id: req.id,
-                        status: "ok".to_string(),
-                        payload: ResponsePayload {
-                            stdout: stdout_json,
-                            stderr: output.stderr,
-                            exit_code: output.exit_code,
-                        },
-                    };
-                    send_response(&mut stream, resp).await;
-                }
-                Err(e) => {
-                    error!("❌ Ошибка выполнения команды: {}", e);
-                    send_error(&mut stream, &req.id, &e.to_string()).await;
+                info!(
+                    "Попытка подключения к {}@{}:{} (key: {}, passphrase: {}, password: {})...",
+                    p.username,
+                    p.host,
+                    p.port,
+                    p.key_path.as_deref().unwrap_or("None"),
+                    p.passphrase.as_deref().unwrap_or("None"),
+                    p.password.as_deref().unwrap_or("None")
+                );
+
+                // let session_id = Uuid::new_v4().to_string();
+
+                match SshSession::connect(
+                    &p.host,
+                    p.port,
+                    &p.username,
+                    &p.key_path,
+                    &p.passphrase,
+                    &p.password,
+                )
+                .await
+                {
+                    Ok(sess) => {
+                        info!("SSH-подключение успешно!");
+                        let session_arc = Arc::new(Mutex::new(sess));
+                        sessions.lock().await.insert(req.id.clone(), session_arc);
+                        let resp = Response {
+                            id: req.id.clone(),
+                            status: "ok".to_string(),
+                            payload: ResponsePayload {
+                                stdout: format!("Connected successfully, id: {}", req.id),
+                                stderr: String::new(),
+                                exit_code: 0,
+                            },
+                        };
+                        info!("Отправляю ответ об успешном подключении...");
+                        send_response(&mut stream, resp).await;
+                        info!("Ответ отправлен");
+                    }
+                    Err(e) => {
+                        eprintln!("❌ Ошибка SSH-подключения: {}", e);
+                        send_error(&mut stream, &req.id, &format!("Connection failed: {}", e))
+                            .await;
+                    }
                 }
             }
-        } else if req.action == "ssh_disconnect" {
-            info!("Обработка ssh_disconnect для id: {}", req.id);
-            let removed = sessions.lock().await.remove(&req.id);
+            "monitor_get_values" => {
+                info!("Обработка monitor");
 
-            match removed {
-                Some(sess_arc) => {
-                    let mut sess = sess_arc.lock().await;
-                    let _ = sess.close().await; // вызываем метод из ssh.rs
-                    let resp = Response {
-                        id: req.id.clone(),
-                        status: "ok".to_string(),
-                        payload: ResponsePayload {
-                            stdout: format!("Disconnected id: {}", req.id),
-                            stderr: String::new(),
-                            exit_code: 0,
-                        },
-                    };
-                    send_response(&mut stream, resp).await;
-                }
-                None => {
-                    send_error(&mut stream, &req.id, "Session not found").await;
+                // Распаковка ArcMutex списка
+                let session_arc = {
+                    let store = sessions.lock().await;
+                    match store.get(&req.id) {
+                        Some(arc) => arc.clone(),
+                        None => {
+                            // Отправляем ошибку "сессия не найдена" и выходим
+                            error!("Session dont founded by key: {}", &req.id);
+                            send_error(
+                                &mut stream,
+                                &req.id,
+                                "Session dont founded by key. Create session first!",
+                            )
+                            .await;
+                            continue;
+                        }
+                    }
+                };
+
+                // 2. Теперь лочим саму сессию
+                let mut sess = session_arc.lock().await;
+                let command = "head -n 1 /proc/stat; grep -E 'MemTotal|MemAvailable' /proc/meminfo";
+                info!("Выполняется команда мониторинга");
+                match sess.execute_command(command).await {
+                    Ok(output) => {
+                        let stdout_json = parse_metrics_to_json(&output.stdout, &mut sess.prev_cpu);
+                        let resp = Response {
+                            id: req.id,
+                            status: "ok".to_string(),
+                            payload: ResponsePayload {
+                                stdout: stdout_json,
+                                stderr: output.stderr,
+                                exit_code: output.exit_code,
+                            },
+                        };
+                        send_response(&mut stream, resp).await;
+                    }
+                    Err(e) => {
+                        error!("❌ Ошибка выполнения команды: {}", e);
+                        send_error(&mut stream, &req.id, &e.to_string()).await;
+                    }
                 }
             }
-        } else {
-            eprintln!("❌ Неизвестное действие: {}", &req.action);
-            send_error(
-                &mut stream,
-                &req.id,
-                &format!("Unknown action: {}", &req.action),
-            )
-            .await;
+            "ssh_disconnect" => {
+                info!("Обработка ssh_disconnect для id: {}", req.id);
+                let removed = sessions.lock().await.remove(&req.id);
+
+                match removed {
+                    Some(sess_arc) => {
+                        let mut sess = sess_arc.lock().await;
+                        let _ = sess.close().await; // вызываем метод из ssh.rs
+                        let resp = Response {
+                            id: req.id.clone(),
+                            status: "ok".to_string(),
+                            payload: ResponsePayload {
+                                stdout: format!("Disconnected id: {}", req.id),
+                                stderr: String::new(),
+                                exit_code: 0,
+                            },
+                        };
+                        send_response(&mut stream, resp).await;
+                    }
+                    None => {
+                        send_error(&mut stream, &req.id, "Session not found").await;
+                    }
+                }
+            }
+            "sftp_list_dir" => {}
+            "sftp_remove_file" => {}
+            "sftp_remove_dir" => {}
+            "sftp_create_dir" => {}
+            "sftp_upload_file" => {}
+            "sftp_download_file" => {}
+            "sftp_move_file" => {}
+            "sftp_copy_file" => {}
+            _ => {
+                eprintln!("❌ Неизвестное действие: {}", &req.action);
+                send_error(
+                    &mut stream,
+                    &req.id,
+                    &format!("Unknown action: {}", &req.action),
+                )
+                .await;
+            }
+        }
+        info!("Цикл завершен, жду следующее сообщение...\n");
+
+        let mut store = sessions.lock().await;
+        for (id, sess_arc) in store.drain() {
+            info!("Авто-закрытие сессии {} после отключения Python", id);
+            let mut sess = sess_arc.lock().await;
+            let _ = sess.close().await;
         }
 
-        info!("Цикл завершен, жду следующее сообщение...\n");
+        info!("Обработка клиента завершена");
     }
-
-    let mut store = sessions.lock().await;
-    for (id, sess_arc) in store.drain() {
-        info!("Авто-закрытие сессии {} после отключения Python", id);
-        let mut sess = sess_arc.lock().await;
-        let _ = sess.close().await;
-    }
-
-    info!("Обработка клиента завершена");
 }
 
 async fn send_error<T: AsyncWrite + Unpin>(stream: &mut T, id: &str, msg: &str) {
