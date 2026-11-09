@@ -1,13 +1,14 @@
 use crate::{SshOutput, errors::SynexError, ssh::SshSession};
 use russh_sftp::client::SftpSession;
+use std::sync::MutexGuard;
 use tokio::fs::File;
 
-pub struct Sftp {
-    session: SshSession,
+pub struct Sftp<'a> {
+    session: &'a mut SshSession,
 }
 
-impl Sftp {
-    pub fn new(session: SshSession) -> Self {
+impl<'a> Sftp<'a> {
+    pub fn new(session: &'a mut SshSession) -> Self {
         Self { session }
     }
 
