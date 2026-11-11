@@ -319,29 +319,27 @@ where
                     }
                 };
 
-                // Sftp::new currently requires std::sync::MutexGuard, but this
-                // session is guarded by tokio::sync::Mutex. Change sftp.rs to
-                // accept &mut SshSession instead of a std::sync::MutexGuard.
                 let mut sess = session_arc.lock().await;
                 let mut sftp = Sftp::new(&mut *sess);
-                // Request has no path field; use an existing request payload field
-                // for the directory path until a dedicated path field is added.
-                let path = match req.payload.command.as_deref() {
+
+                let path = match req.payload.target.as_deref() {
                     Some(path) => path,
                     None => {
                         send_error(&mut stream, &req.id, "Missing directory path in payload").await;
                         continue;
                     }
                 };
-                match sftp.list_directory(path).await {
+                match sftp.list_directory_entries(path).await {
                     Ok(entries) => {
+                        let stdout =
+                            serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string());
                         send_response(
                             &mut stream,
                             Response {
                                 id: req.id,
                                 status: "ok".to_string(),
                                 payload: ResponsePayload {
-                                    stdout: entries.join("\n"),
+                                    stdout,
                                     stderr: String::new(),
                                     exit_code: 0,
                                 },
@@ -368,7 +366,7 @@ where
                 };
                 let mut sess = session_arc.lock().await;
                 let mut sftp = Sftp::new(&mut *sess);
-                let path = match req.payload.command.as_deref() {
+                let path = match req.payload.target.as_deref() {
                     Some(path) => path,
                     None => {
                         send_error(&mut stream, &req.id, "Missing directory path in payload").await;
@@ -645,14 +643,13 @@ where
         }
         info!("Цикл завершен, жду следующее сообщение...\n");
 
-        let mut store = sessions.lock().await;
-        for (id, sess_arc) in store.drain() {
-            info!("Авто-закрытие сессии {} после отключения Python", id);
-            let mut sess = sess_arc.lock().await;
-            let _ = sess.close().await;
-        }
-
         info!("Обработка клиента завершена");
+    }
+    let mut store = sessions.lock().await;
+    for (id, sess_arc) in store.drain() {
+        info!("Авто-закрытие сессии {} после отключения Python", id);
+        let mut sess = sess_arc.lock().await;
+        let _ = sess.close().await;
     }
 }
 
