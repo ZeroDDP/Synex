@@ -1,18 +1,10 @@
 <script>
+  import { onMount, onDestroy } from 'svelte';
   import Sidebar from './lib/Sidebar.svelte';
   import PageStub from './lib/PageStub.svelte';
   import DashboardPage from './lib/pages/DashboardPage.svelte';
   import ServersPage from './lib/pages/ServersPage.svelte';
-
-
-  // import dashboardIcon from './lib/icons/dashboard.svg?raw';
-  // import serversIcon from './lib/icons/servers.svg?raw';
-  // import dockerIcon from './lib/icons/docker.svg?raw';
-  // import terminalIcon from './lib/icons/terminal.svg?raw';
-  // import logsIcon from './lib/icons/logs.svg?raw';
-  // import alertsIcon from './lib/icons/alerts.svg?raw';
-  // import filesIcon from './lib/icons/files.svg?raw';
-
+  import { connectWs, disconnectWs } from './lib/ws.js';
 
   const navItems = [
     { id: 'dashboard', label: 'Dashboard' },
@@ -25,6 +17,14 @@
   ];
 
   let activeTab = 'dashboard';
+
+  onMount(() => {
+    connectWs();
+  });
+
+  onDestroy(() => {
+    disconnectWs();
+  });
 
   function labelOf(id) {
     const item = navItems.find((i) => i.id === id);
