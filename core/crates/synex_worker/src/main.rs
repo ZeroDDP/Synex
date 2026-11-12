@@ -26,8 +26,9 @@ struct Request {
 struct RequestPayload {
     command: Option<String>,
     connection: Option<ConnectPayload>,
-    source: Option<String>,
-    target: Option<String>,
+    remote_path: Option<String>,
+    local_path: Option<String>,
+    destination_path: Option<String>,
 }
 
 #[derive(Serialize, Debug)]
@@ -322,7 +323,7 @@ where
                 let mut sess = session_arc.lock().await;
                 let mut sftp = Sftp::new(&mut *sess);
 
-                let path = match req.payload.target.as_deref() {
+                let path = match req.payload.remote_path.as_deref() {
                     Some(path) => path,
                     None => {
                         send_error(&mut stream, &req.id, "Missing directory path in payload").await;
@@ -366,10 +367,10 @@ where
                 };
                 let mut sess = session_arc.lock().await;
                 let mut sftp = Sftp::new(&mut *sess);
-                let path = match req.payload.target.as_deref() {
+                let path = match req.payload.remote_path.as_deref() {
                     Some(path) => path,
                     None => {
-                        send_error(&mut stream, &req.id, "Missing directory path in payload").await;
+                        send_error(&mut stream, &req.id, "Missing file path in payload").await;
                         continue;
                     }
                 };
@@ -408,7 +409,7 @@ where
                 };
                 let mut sess = session_arc.lock().await;
                 let mut sftp = Sftp::new(&mut *sess);
-                let path = match req.payload.target.as_deref() {
+                let path = match req.payload.remote_path.as_deref() {
                     Some(path) => path,
                     None => {
                         send_error(&mut stream, &req.id, "Missing directory path in payload").await;
@@ -450,7 +451,7 @@ where
                 };
                 let mut sess = session_arc.lock().await;
                 let mut sftp = Sftp::new(&mut *sess);
-                let path = match req.payload.command.as_deref() {
+                let path = match req.payload.remote_path.as_deref() {
                     Some(path) => path,
                     None => {
                         send_error(&mut stream, &req.id, "Missing directory path in payload").await;
@@ -492,14 +493,14 @@ where
                 };
                 let mut sess = session_arc.lock().await;
                 let mut sftp = Sftp::new(&mut *sess);
-                let path = match req.payload.target.as_deref() {
+                let path = match req.payload.local_path.as_deref() {
                     Some(path) => path,
                     None => {
                         send_error(&mut stream, &req.id, "Missing file path in payload").await;
                         continue;
                     }
                 };
-                let file = match req.payload.source.as_deref() {
+                let file = match req.payload.remote_path.as_deref() {
                     Some(file) => file,
                     None => {
                         send_error(&mut stream, &req.id, "Missing file content in payload").await;
@@ -541,14 +542,14 @@ where
                 };
                 let mut sess = session_arc.lock().await;
                 let mut sftp = Sftp::new(&mut *sess);
-                let path = match req.payload.source.as_deref() {
+                let path = match req.payload.remote_path.as_deref() {
                     Some(path) => path,
                     None => {
                         send_error(&mut stream, &req.id, "Missing file path in payload").await;
                         continue;
                     }
                 };
-                let file = match req.payload.target.as_deref() {
+                let file = match req.payload.local_path.as_deref() {
                     Some(file) => file,
                     None => {
                         send_error(&mut stream, &req.id, "Missing file content in payload").await;
@@ -575,7 +576,7 @@ where
                 }
             }
             "sftp_move_file" => {
-                if req.payload.source.is_none() || req.payload.target.is_none() {
+                if req.payload.remote_path.is_none() || req.payload.destination_path.is_none() {
                     send_error(&mut stream, &req.id, "Missing source or target in payload").await;
                     continue;
                 }
@@ -596,8 +597,8 @@ where
                 let mut sftp = Sftp::new(&mut *sess);
                 let result = sftp
                     .move_file(
-                        &req.payload.source.unwrap_or_default(),
-                        &req.payload.target.unwrap_or_default(),
+                        &req.payload.remote_path.unwrap_or_default(),
+                        &req.payload.destination_path.unwrap_or_default(),
                     )
                     .await;
                 let status = if result.is_ok() { "ok" } else { "error" };
@@ -617,19 +618,54 @@ where
                 .await;
             }
             "sftp_copy_file" => {
-                send_response(
-                    &mut stream,
-                    Response {
-                        id: req.id,
-                        status: "success".to_string(),
-                        payload: ResponsePayload {
-                            stdout: "".to_string(),
-                            stderr: "".to_string(),
-                            exit_code: 0,
-                        },
-                    },
-                )
-                .await;
+                if req.payload.remote_path.is_none() || req.payload.destination_path.is_none() {
+                    send_error(
+                        &mut stream,
+                        &req.id,
+                        "Missing source or destination in payload",
+                    )
+                    .await;
+                    continue;
+                }
+                let session_arc = match get_session(&sessions, &req.id).await {
+                    Some(session) => session,
+                    None => {
+                        error!("Session dont founded by key: {}", &req.id);
+                        send_error(
+                            &mut stream,
+                            &req.id,
+                            "Session dont founded by key. Create session first!",
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+                let mut sess = session_arc.lock().await;
+                let mut sftp = Sftp::new(&mut *sess);
+                match sftp
+                    .copy_file(
+                        &req.payload.remote_path.unwrap_or_default(),
+                        &req.payload.destination_path.unwrap_or_default(),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        send_response(
+                            &mut stream,
+                            Response {
+                                id: req.id,
+                                status: "ok".to_string(),
+                                payload: ResponsePayload {
+                                    stdout: String::new(),
+                                    stderr: String::new(),
+                                    exit_code: 0,
+                                },
+                            },
+                        )
+                        .await;
+                    }
+                    Err(e) => send_error(&mut stream, &req.id, &e.to_string()).await,
+                }
             }
             _ => {
                 eprintln!("❌ Неизвестное действие: {}", &req.action);
