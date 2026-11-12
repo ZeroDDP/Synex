@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::{env, result};
 use synex_core::mon::SshMonitoring;
+use synex_core::sftp::Sftp;
 use synex_core::ssh::SshSession;
 // use tokio::fs::OpenOptions;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -25,6 +26,9 @@ struct Request {
 struct RequestPayload {
     command: Option<String>,
     connection: Option<ConnectPayload>,
+    remote_path: Option<String>,
+    local_path: Option<String>,
+    destination_path: Option<String>,
 }
 
 #[derive(Serialize, Debug)]
@@ -126,16 +130,14 @@ where
         };
 
         // Обрабатываем действия
-        if req.action == "ssh_exec" {
-            info!("Обработка ssh_exec");
+        match req.action.as_str() {
+            "ssh_exec" => {
+                info!("Обработка ssh_exec");
 
-            // Распаковка ArcMutex списка
-            let session_arc = {
-                let store = sessions.lock().await;
-                match store.get(&req.id) {
-                    Some(arc) => arc.clone(),
+                // Распаковка ArcMutex списка
+                let session_arc = match get_session(&sessions, &req.id).await {
+                    Some(session) => session,
                     None => {
-                        // Отправляем ошибку "сессия не найдена" и выходим
                         error!("Session dont founded by key: {}", &req.id);
                         send_error(
                             &mut stream,
@@ -145,122 +147,105 @@ where
                         .await;
                         continue;
                     }
-                }
-            };
-            // let session_arc = {
-            //     let store = sessions.lock().await;
-            //     match store.get(&req.id) {
-            //         Some(arc) => arc.clone(),
-            //         None => {
-            //             // Отправляем ошибку "сессия не найдена" и выходим
-            //             error!("Session dont founded by key: {}", req.id);
-            //             send_error(
-            //                 &mut stream,
-            //                 &req.id,
-            //                 "Session dont founded by key. Create session first!",
-            //             )
-            //             .await;
-            //             return;
-            //         }
-            //     }
-            // }; // Карта разлочилась здесь!
+                };
 
-            // 2. Теперь лочим саму сессию
-            let mut sess = session_arc.lock().await;
-            let command: String = match req.payload.command {
-                Some(cmd) => cmd,
-                None => {
-                    eprintln!("❌ Отсутствует command в payload");
-                    send_error(&mut stream, &req.id, "Missing 'command' in payload").await;
-                    continue;
-                }
-            };
-
-            info!("Выполняется команда: {}", command);
-            match sess.execute_command(&command).await {
-                Ok(output) => {
-                    info!("Команда выполнена. Exit code: {}", output.exit_code);
-                    let resp = Response {
-                        id: req.id.clone(),
-                        status: "ok".to_string(),
-                        payload: ResponsePayload {
-                            stdout: output.stdout,
-                            stderr: output.stderr,
-                            exit_code: output.exit_code,
-                        },
-                    };
-                    send_response(&mut stream, resp).await;
-                }
-                Err(e) => {
-                    error!("❌ Ошибка выполнения команды: {}", e);
-                    send_error(&mut stream, &req.id, &e.to_string()).await;
-                }
-            }
-        } else if req.action == "ssh_connect" {
-            info!("Обработка ssh_connect");
-            let p: ConnectPayload = match req.payload.connection {
-                Some(conn) => conn,
-                None => {
-                    eprintln!("Missing 'connection' in payload");
-                    send_error(&mut stream, &req.id, "Missing 'connection' in payload").await;
-                    continue;
-                }
-            };
-
-            info!(
-                "Попытка подключения к {}@{}:{} (key: {}, passphrase: {}, password: {})...",
-                p.username,
-                p.host,
-                p.port,
-                p.key_path.as_deref().unwrap_or("None"),
-                p.passphrase.as_deref().unwrap_or("None"),
-                p.password.as_deref().unwrap_or("None")
-            );
-
-            // let session_id = Uuid::new_v4().to_string();
-
-            match SshSession::connect(
-                &p.host,
-                p.port,
-                &p.username,
-                &p.key_path,
-                &p.passphrase,
-                &p.password,
-            )
-            .await
-            {
-                Ok(sess) => {
-                    info!("SSH-подключение успешно!");
-                    let session_arc = Arc::new(Mutex::new(sess));
-                    sessions.lock().await.insert(req.id.clone(), session_arc);
-                    let resp = Response {
-                        id: req.id.clone(),
-                        status: "ok".to_string(),
-                        payload: ResponsePayload {
-                            stdout: format!("Connected successfully, id: {}", req.id),
-                            stderr: String::new(),
-                            exit_code: 0,
-                        },
-                    };
-                    info!("Отправляю ответ об успешном подключении...");
-                    send_response(&mut stream, resp).await;
-                    info!("Ответ отправлен");
-                }
-                Err(e) => {
-                    eprintln!("❌ Ошибка SSH-подключения: {}", e);
-                    send_error(&mut stream, &req.id, &format!("Connection failed: {}", e)).await;
-                }
-            }
-        } else if req.action == "monitor_get_values" {
-            info!("Обработка monitor");
-
-            // Распаковка ArcMutex списка
-            let session_arc = {
-                let store = sessions.lock().await;
-                match store.get(&req.id) {
-                    Some(arc) => arc.clone(),
+                // 2. Теперь лочим саму сессию
+                let mut sess = session_arc.lock().await;
+                let command: String = match req.payload.command {
+                    Some(cmd) => cmd,
                     None => {
-                        // Отправляем ошибку "сессия не найдена" и выходим
+                        eprintln!("❌ Отсутствует command в payload");
+                        send_error(&mut stream, &req.id, "Missing 'command' in payload").await;
+                        continue;
+                    }
+                };
+
+                info!("Выполняется команда: {}", command);
+                match sess.execute_command(&command).await {
+                    Ok(output) => {
+                        info!("Команда выполнена. Exit code: {}", output.exit_code);
+                        let resp = Response {
+                            id: req.id.clone(),
+                            status: "ok".to_string(),
+                            payload: ResponsePayload {
+                                stdout: output.stdout,
+                                stderr: output.stderr,
+                                exit_code: output.exit_code,
+                            },
+                        };
+                        send_response(&mut stream, resp).await;
+                    }
+                    Err(e) => {
+                        error!("❌ Ошибка выполнения команды: {}", e);
+                        send_error(&mut stream, &req.id, &e.to_string()).await;
+                    }
+                }
+            }
+            "ssh_connect" => {
+                info!("Обработка ssh_connect");
+                let p: ConnectPayload = match req.payload.connection {
+                    Some(conn) => conn,
+                    None => {
+                        eprintln!("Missing 'connection' in payload");
+                        send_error(&mut stream, &req.id, "Missing 'connection' in payload").await;
+                        continue;
+                    }
+                };
+
+                info!(
+                    "Попытка подключения к {}@{}:{} (key: {}, passphrase: {}, password: {})...",
+                    p.username,
+                    p.host,
+                    p.port,
+                    p.key_path.as_deref().unwrap_or("None"),
+                    p.passphrase.as_deref().unwrap_or("None"),
+                    p.password.as_deref().unwrap_or("None")
+                );
+
+                // let session_id = Uuid::new_v4().to_string();
+
+                match SshSession::connect(
+                    &p.host,
+                    p.port,
+                    &p.username,
+                    &p.key_path,
+                    &p.passphrase,
+                    &p.password,
+                )
+                .await
+                {
+                    Ok(sess) => {
+                        info!("SSH-подключение успешно!");
+                        let session_arc = Arc::new(Mutex::new(sess));
+                        sessions.lock().await.insert(req.id.clone(), session_arc);
+                        let resp = Response {
+                            id: req.id.clone(),
+                            status: "ok".to_string(),
+                            payload: ResponsePayload {
+                                stdout: format!("Connected successfully, id: {}", req.id),
+                                stderr: String::new(),
+                                exit_code: 0,
+                            },
+                        };
+                        info!("Отправляю ответ об успешном подключении...");
+                        send_response(&mut stream, resp).await;
+                        info!("Ответ отправлен");
+                    }
+                    Err(e) => {
+                        eprintln!("❌ Ошибка SSH-подключения: {}", e);
+                        send_error(&mut stream, &req.id, &format!("Connection failed: {}", e))
+                            .await;
+                    }
+                }
+            }
+            "monitor_get_values" => {
+                info!("Обработка monitor");
+
+                // Распаковка ArcMutex списка
+
+                let session_arc = match get_session(&sessions, &req.id).await {
+                    Some(session) => session,
+                    None => {
                         error!("Session dont founded by key: {}", &req.id);
                         send_error(
                             &mut stream,
@@ -270,76 +255,438 @@ where
                         .await;
                         continue;
                     }
-                }
-            };
+                };
 
-            // 2. Теперь лочим саму сессию
-            let mut sess = session_arc.lock().await;
-            let command = "head -n 1 /proc/stat; grep -E 'MemTotal|MemAvailable' /proc/meminfo";
-            info!("Выполняется команда мониторинга");
-            match sess.execute_command(command).await {
-                Ok(output) => {
-                    let stdout_json = parse_metrics_to_json(&output.stdout, &mut sess.prev_cpu);
-                    let resp = Response {
+                let mut sess = session_arc.lock().await;
+
+                let command = "head -n 1 /proc/stat; grep -E 'MemTotal|MemAvailable' /proc/meminfo";
+                info!("Выполняется команда мониторинга");
+                match sess.execute_command(command).await {
+                    Ok(output) => {
+                        let stdout_json = parse_metrics_to_json(&output.stdout, &mut sess.prev_cpu);
+                        let resp = Response {
+                            id: req.id,
+                            status: "ok".to_string(),
+                            payload: ResponsePayload {
+                                stdout: stdout_json,
+                                stderr: output.stderr,
+                                exit_code: output.exit_code,
+                            },
+                        };
+                        send_response(&mut stream, resp).await;
+                    }
+                    Err(e) => {
+                        error!("❌ Ошибка выполнения команды: {}", e);
+                        send_error(&mut stream, &req.id, &e.to_string()).await;
+                    }
+                }
+            }
+            "ssh_disconnect" => {
+                info!("Обработка ssh_disconnect для id: {}", req.id);
+                let removed = sessions.lock().await.remove(&req.id);
+
+                match removed {
+                    Some(sess_arc) => {
+                        let mut sess = sess_arc.lock().await;
+                        let _ = sess.close().await; // вызываем метод из ssh.rs
+                        let resp = Response {
+                            id: req.id.clone(),
+                            status: "ok".to_string(),
+                            payload: ResponsePayload {
+                                stdout: format!("Disconnected id: {}", req.id),
+                                stderr: String::new(),
+                                exit_code: 0,
+                            },
+                        };
+                        send_response(&mut stream, resp).await;
+                    }
+                    None => {
+                        send_error(&mut stream, &req.id, "Session not found").await;
+                    }
+                }
+            }
+            "sftp_list_dir" => {
+                let session_arc = match get_session(&sessions, &req.id).await {
+                    Some(session) => session,
+                    None => {
+                        error!("Session dont founded by key: {}", &req.id);
+                        send_error(
+                            &mut stream,
+                            &req.id,
+                            "Session dont founded by key. Create session first!",
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+
+                let mut sess = session_arc.lock().await;
+                let mut sftp = Sftp::new(&mut *sess);
+
+                let path = match req.payload.remote_path.as_deref() {
+                    Some(path) => path,
+                    None => {
+                        send_error(&mut stream, &req.id, "Missing directory path in payload").await;
+                        continue;
+                    }
+                };
+                match sftp.list_directory_entries(path).await {
+                    Ok(entries) => {
+                        let stdout =
+                            serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string());
+                        send_response(
+                            &mut stream,
+                            Response {
+                                id: req.id,
+                                status: "ok".to_string(),
+                                payload: ResponsePayload {
+                                    stdout,
+                                    stderr: String::new(),
+                                    exit_code: 0,
+                                },
+                            },
+                        )
+                        .await;
+                    }
+                    Err(e) => send_error(&mut stream, &req.id, &e.to_string()).await,
+                }
+            }
+            "sftp_remove_file" => {
+                let session_arc = match get_session(&sessions, &req.id).await {
+                    Some(session) => session,
+                    None => {
+                        error!("Session dont founded by key: {}", &req.id);
+                        send_error(
+                            &mut stream,
+                            &req.id,
+                            "Session dont founded by key. Create session first!",
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+                let mut sess = session_arc.lock().await;
+                let mut sftp = Sftp::new(&mut *sess);
+                let path = match req.payload.remote_path.as_deref() {
+                    Some(path) => path,
+                    None => {
+                        send_error(&mut stream, &req.id, "Missing file path in payload").await;
+                        continue;
+                    }
+                };
+                match sftp.remove_file(path).await {
+                    Ok(_) => {
+                        send_response(
+                            &mut stream,
+                            Response {
+                                id: req.id,
+                                status: "ok".to_string(),
+                                payload: ResponsePayload {
+                                    stdout: String::new(),
+                                    stderr: String::new(),
+                                    exit_code: 0,
+                                },
+                            },
+                        )
+                        .await;
+                    }
+                    Err(e) => send_error(&mut stream, &req.id, &e.to_string()).await,
+                }
+            }
+            "sftp_remove_dir" => {
+                let session_arc = match get_session(&sessions, &req.id).await {
+                    Some(session) => session,
+                    None => {
+                        error!("Session dont founded by key: {}", &req.id);
+                        send_error(
+                            &mut stream,
+                            &req.id,
+                            "Session dont founded by key. Create session first!",
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+                let mut sess = session_arc.lock().await;
+                let mut sftp = Sftp::new(&mut *sess);
+                let path = match req.payload.remote_path.as_deref() {
+                    Some(path) => path,
+                    None => {
+                        send_error(&mut stream, &req.id, "Missing directory path in payload").await;
+                        continue;
+                    }
+                };
+                match sftp.remove_directory(path).await {
+                    Ok(_) => {
+                        send_response(
+                            &mut stream,
+                            Response {
+                                id: req.id,
+                                status: "ok".to_string(),
+                                payload: ResponsePayload {
+                                    stdout: String::new(),
+                                    stderr: String::new(),
+                                    exit_code: 0,
+                                },
+                            },
+                        )
+                        .await;
+                    }
+                    Err(e) => send_error(&mut stream, &req.id, &e.to_string()).await,
+                }
+            }
+            "sftp_create_dir" => {
+                let session_arc = match get_session(&sessions, &req.id).await {
+                    Some(session) => session,
+                    None => {
+                        error!("Session dont founded by key: {}", &req.id);
+                        send_error(
+                            &mut stream,
+                            &req.id,
+                            "Session dont founded by key. Create session first!",
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+                let mut sess = session_arc.lock().await;
+                let mut sftp = Sftp::new(&mut *sess);
+                let path = match req.payload.remote_path.as_deref() {
+                    Some(path) => path,
+                    None => {
+                        send_error(&mut stream, &req.id, "Missing directory path in payload").await;
+                        continue;
+                    }
+                };
+                match sftp.create_directory(path).await {
+                    Ok(_) => {
+                        send_response(
+                            &mut stream,
+                            Response {
+                                id: req.id,
+                                status: "ok".to_string(),
+                                payload: ResponsePayload {
+                                    stdout: String::new(),
+                                    stderr: String::new(),
+                                    exit_code: 0,
+                                },
+                            },
+                        )
+                        .await;
+                    }
+                    Err(e) => send_error(&mut stream, &req.id, &e.to_string()).await,
+                }
+            }
+            "sftp_upload_file" => {
+                let session_arc = match get_session(&sessions, &req.id).await {
+                    Some(session) => session,
+                    None => {
+                        error!("Session dont founded by key: {}", &req.id);
+                        send_error(
+                            &mut stream,
+                            &req.id,
+                            "Session dont founded by key. Create session first!",
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+                let mut sess = session_arc.lock().await;
+                let mut sftp = Sftp::new(&mut *sess);
+                let path = match req.payload.local_path.as_deref() {
+                    Some(path) => path,
+                    None => {
+                        send_error(&mut stream, &req.id, "Missing file path in payload").await;
+                        continue;
+                    }
+                };
+                let file = match req.payload.remote_path.as_deref() {
+                    Some(file) => file,
+                    None => {
+                        send_error(&mut stream, &req.id, "Missing file content in payload").await;
+                        continue;
+                    }
+                };
+                match sftp.upload_file(path, file).await {
+                    Ok(_) => {
+                        send_response(
+                            &mut stream,
+                            Response {
+                                id: req.id,
+                                status: "ok".to_string(),
+                                payload: ResponsePayload {
+                                    stdout: String::new(),
+                                    stderr: String::new(),
+                                    exit_code: 0,
+                                },
+                            },
+                        )
+                        .await;
+                    }
+                    Err(e) => send_error(&mut stream, &req.id, &e.to_string()).await,
+                }
+            }
+            "sftp_download_file" => {
+                let session_arc = match get_session(&sessions, &req.id).await {
+                    Some(session) => session,
+                    None => {
+                        error!("Session dont founded by key: {}", &req.id);
+                        send_error(
+                            &mut stream,
+                            &req.id,
+                            "Session dont founded by key. Create session first!",
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+                let mut sess = session_arc.lock().await;
+                let mut sftp = Sftp::new(&mut *sess);
+                let path = match req.payload.remote_path.as_deref() {
+                    Some(path) => path,
+                    None => {
+                        send_error(&mut stream, &req.id, "Missing file path in payload").await;
+                        continue;
+                    }
+                };
+                let file = match req.payload.local_path.as_deref() {
+                    Some(file) => file,
+                    None => {
+                        send_error(&mut stream, &req.id, "Missing file content in payload").await;
+                        continue;
+                    }
+                };
+                match sftp.download_file(path, file).await {
+                    Ok(_) => {
+                        send_response(
+                            &mut stream,
+                            Response {
+                                id: req.id,
+                                status: "success".to_string(),
+                                payload: ResponsePayload {
+                                    stdout: "".to_string(),
+                                    stderr: "".to_string(),
+                                    exit_code: 0,
+                                },
+                            },
+                        )
+                        .await;
+                    }
+                    Err(e) => send_error(&mut stream, &req.id, &e.to_string()).await,
+                }
+            }
+            "sftp_move_file" => {
+                if req.payload.remote_path.is_none() || req.payload.destination_path.is_none() {
+                    send_error(&mut stream, &req.id, "Missing source or target in payload").await;
+                    continue;
+                }
+                let session_arc = match get_session(&sessions, &req.id).await {
+                    Some(session) => session,
+                    None => {
+                        error!("Session dont founded by key: {}", &req.id);
+                        send_error(
+                            &mut stream,
+                            &req.id,
+                            "Session dont founded by key. Create session first!",
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+                let mut sess = session_arc.lock().await;
+                let mut sftp = Sftp::new(&mut *sess);
+                let result = sftp
+                    .move_file(
+                        &req.payload.remote_path.unwrap_or_default(),
+                        &req.payload.destination_path.unwrap_or_default(),
+                    )
+                    .await;
+                let status = if result.is_ok() { "ok" } else { "error" };
+
+                send_response(
+                    &mut stream,
+                    Response {
                         id: req.id,
-                        status: "ok".to_string(),
+                        status: status.to_string(),
                         payload: ResponsePayload {
-                            stdout: stdout_json,
-                            stderr: output.stderr,
-                            exit_code: output.exit_code,
-                        },
-                    };
-                    send_response(&mut stream, resp).await;
-                }
-                Err(e) => {
-                    error!("❌ Ошибка выполнения команды: {}", e);
-                    send_error(&mut stream, &req.id, &e.to_string()).await;
-                }
-            }
-        } else if req.action == "ssh_disconnect" {
-            info!("Обработка ssh_disconnect для id: {}", req.id);
-            let removed = sessions.lock().await.remove(&req.id);
-
-            match removed {
-                Some(sess_arc) => {
-                    let mut sess = sess_arc.lock().await;
-                    let _ = sess.close().await; // вызываем метод из ssh.rs
-                    let resp = Response {
-                        id: req.id.clone(),
-                        status: "ok".to_string(),
-                        payload: ResponsePayload {
-                            stdout: format!("Disconnected id: {}", req.id),
-                            stderr: String::new(),
+                            stdout: "".to_string(),
+                            stderr: "".to_string(),
                             exit_code: 0,
                         },
-                    };
-                    send_response(&mut stream, resp).await;
+                    },
+                )
+                .await;
+            }
+            "sftp_copy_file" => {
+                if req.payload.remote_path.is_none() || req.payload.destination_path.is_none() {
+                    send_error(
+                        &mut stream,
+                        &req.id,
+                        "Missing source or destination in payload",
+                    )
+                    .await;
+                    continue;
                 }
-                None => {
-                    send_error(&mut stream, &req.id, "Session not found").await;
+                let session_arc = match get_session(&sessions, &req.id).await {
+                    Some(session) => session,
+                    None => {
+                        error!("Session dont founded by key: {}", &req.id);
+                        send_error(
+                            &mut stream,
+                            &req.id,
+                            "Session dont founded by key. Create session first!",
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+                let mut sess = session_arc.lock().await;
+                let mut sftp = Sftp::new(&mut *sess);
+                match sftp
+                    .copy_file(
+                        &req.payload.remote_path.unwrap_or_default(),
+                        &req.payload.destination_path.unwrap_or_default(),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        send_response(
+                            &mut stream,
+                            Response {
+                                id: req.id,
+                                status: "ok".to_string(),
+                                payload: ResponsePayload {
+                                    stdout: String::new(),
+                                    stderr: String::new(),
+                                    exit_code: 0,
+                                },
+                            },
+                        )
+                        .await;
+                    }
+                    Err(e) => send_error(&mut stream, &req.id, &e.to_string()).await,
                 }
             }
-        } else {
-            eprintln!("❌ Неизвестное действие: {}", &req.action);
-            send_error(
-                &mut stream,
-                &req.id,
-                &format!("Unknown action: {}", &req.action),
-            )
-            .await;
+            _ => {
+                eprintln!("❌ Неизвестное действие: {}", &req.action);
+                send_error(
+                    &mut stream,
+                    &req.id,
+                    &format!("Unknown action: {}", &req.action),
+                )
+                .await;
+            }
         }
-
         info!("Цикл завершен, жду следующее сообщение...\n");
-    }
 
+        info!("Обработка клиента завершена");
+    }
     let mut store = sessions.lock().await;
     for (id, sess_arc) in store.drain() {
         info!("Авто-закрытие сессии {} после отключения Python", id);
         let mut sess = sess_arc.lock().await;
         let _ = sess.close().await;
     }
-
-    info!("Обработка клиента завершена");
 }
 
 async fn send_error<T: AsyncWrite + Unpin>(stream: &mut T, id: &str, msg: &str) {
@@ -527,4 +874,10 @@ fn parse_metrics_to_json(raw: &str, prev_cpu: &mut Option<(u64, u64)>) -> String
     };
 
     serde_json::to_string(&resp).unwrap_or_else(|_| make_err("Ошибка сериализации JSON"))
+}
+async fn get_session(
+    sessions: &Arc<Mutex<HashMap<String, Arc<Mutex<SshSession>>>>>,
+    id: &str,
+) -> Option<Arc<Mutex<SshSession>>> {
+    sessions.lock().await.get(id).cloned()
 }

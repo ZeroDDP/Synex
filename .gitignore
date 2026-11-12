@@ -50,7 +50,6 @@ pnpm-debug.log*
 #Rust
 
 target/
-synex_worker
 synex_worker.exe
 # ...но папка крейта с тем же именем не игнорируется: иначе git не видит новые файлы в ней
 !core/crates/synex_worker/
