@@ -30,7 +30,7 @@ def all_plugins(monkeypatch):
 
 async def test_all_plugins_are_loaded(ui: UI):
     plugins = {p["name"]: p for p in (await ui.api.get("/api/plugins")).json()}
-    for name in ("ssh", "keys", "monitor", "connections", "docker", "git"):
+    for name in ("ssh", "keys", "monitor", "connections", "docker", "git", "sftp"):
         assert plugins[name]["status"] == "loaded", plugins[name]
     assert plugins["docker"]["requires"] == ["ssh"]
 

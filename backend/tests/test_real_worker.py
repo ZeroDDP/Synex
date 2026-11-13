@@ -69,7 +69,10 @@ async def test_real_worker_roundtrip(real_worker):
         await client.request("ssh_exec", {"command": "whoami"}, request_id="no-such-session")
 
     with pytest.raises(WorkerCommandError, match="Unknown action"):
-        await client.request("sftp_list_dir", {"path": "/"}, timeout=5)
+        await client.request("docker_list", {"path": "/"}, timeout=5)
+    # SFTP-действия (сборка 2026-11-12) требуют сессию; в старой сборке их нет вовсе
+    with pytest.raises(WorkerCommandError, match="Session dont founded|Unknown action"):
+        await client.request("sftp_list_dir", {"remote_path": "/"}, request_id="no-session")
 
     with pytest.raises(WorkerCommandError, match="Session not found"):
         await client.request("ssh_disconnect", {}, request_id="no-such-session")

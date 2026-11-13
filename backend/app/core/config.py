@@ -112,6 +112,21 @@ class Settings(BaseSettings):
     # на remote).
     GIT_TIMEOUT: float = Field(default=120.0, gt=0)
 
+    # Файлы на серверах (плагин sftp, SFTP Rust-воркера). Лимит одной операции и долгой
+    # (копирование папки, удаление дерева, контрольная сумма), сек.
+    SFTP_TIMEOUT: float = Field(default=30.0, gt=0)
+    SFTP_LONG_TIMEOUT: float = Field(default=600.0, gt=0)
+    # Лимит передачи одного файла, сек.
+    SFTP_TRANSFER_TIMEOUT: float = Field(default=3600.0, gt=0)
+    # Сколько передача в основной сессии (если служебную открыть нельзя) ждёт, пока
+    # сессию освободит команда пользователя, сек.
+    SFTP_SESSION_WAIT: float = Field(default=60.0, ge=0)
+    # Сверять SHA-256 после передачи (размер сверяется всегда). Как часто слать прогресс
+    # передачи в /ws, сек. Сколько завершённых передач помнить.
+    SFTP_VERIFY: bool = True
+    SFTP_PROGRESS_INTERVAL: float = Field(default=0.25, gt=0)
+    SFTP_TRANSFER_HISTORY: int = Field(default=100, ge=1)
+
     # WebSocket /ws (поток данных для UI). Тестовые метрики вместо настоящих: для
     # разработки UI без SSH-сервера; период публикации, сек.
     WS_FAKE_METRICS: bool = False

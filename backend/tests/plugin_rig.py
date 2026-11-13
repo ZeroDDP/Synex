@@ -18,6 +18,7 @@ from app.plugins.manager import PluginManager
 from app.plugins.ssh.manager import SSHSessionManager
 from app.plugins.ssh.routes import get_ssh_manager
 from tests.conftest import FakeWorkerProvider, start_fake_worker
+from tests.fake_server_tools import sftp_programs
 from tests.fake_shell import Program
 from tests.fake_worker import FakeWorkerState
 
@@ -28,6 +29,8 @@ class PluginRig:
     manager: SSHSessionManager
     worker: FakeWorkerState
     session_id: str
+    app: FastAPI
+    connect_body: dict
 
     @property
     def session_url(self) -> str:
@@ -48,6 +51,7 @@ async def plugin_rig(
     emulate = programs is not None
     state = FakeWorkerState(run_shell=True, home=str(home), emulate_shell=emulate)
     if state.shell is not None:
+        state.shell.programs.update(sftp_programs(state.shell))
         state.shell.programs.update(programs or {})
     server = await start_fake_worker(state)
     assert state.port is not None
@@ -70,7 +74,7 @@ async def plugin_rig(
             body = {"host": "10.0.0.1", "username": "root", "key_path": str(key)}
             opened = await api.post("/api/ssh/sessions", json=body)
             assert opened.status_code == 201, opened.text
-            yield PluginRig(api, manager, state, opened.json()["session_id"])
+            yield PluginRig(api, manager, state, opened.json()["session_id"], app, body)
     finally:
         await manager.close_all(reason="test")
         await provider.close()

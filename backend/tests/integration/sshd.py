@@ -107,6 +107,8 @@ class LocalSSHD:
                     "KbdInteractiveAuthentication no",
                     f"PermitRootLogin {'prohibit-password' if root else 'no'}",
                     "LogLevel VERBOSE",
+                    # SFTP без отдельной программы sftp-server: плагин sftp ходит через неё
+                    "Subsystem sftp internal-sftp",
                     "",
                 ]
             )

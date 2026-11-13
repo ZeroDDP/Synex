@@ -99,6 +99,21 @@ needs_timeout_utility = pytest.mark.skipif(
 )
 
 
+def _unicode_file_names() -> bool:
+    try:
+        os.fsencode("файл")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+# Имена файлов не из ASCII. Windows, macOS и Linux их принимают; не принимает только
+# Linux с локалью C и PYTHONUTF8=0 (так тесты проверяют кодировку файлов как на Windows).
+needs_unicode_file_names = pytest.mark.skipif(
+    not _unicode_file_names(), reason="the file system encoding here is ASCII"
+)
+
+
 def shell_worker_state(tmp_path: Path, **options) -> FakeWorkerState:
     """Состояние фейкового воркера, который выполняет команды (см. SHELL_MODE)."""
     home = tmp_path / "home"

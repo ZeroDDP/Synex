@@ -18,6 +18,7 @@ from app.plugins.git.commands import (
     quote_path,
     unquote,
 )
+from tests.conftest import needs_unicode_file_names
 from tests.fake_git import FakeCommit, FakeGit, FakeRepo
 from tests.fake_shell import HOME
 from tests.plugin_rig import plugin_rig
@@ -354,6 +355,7 @@ def real_repo(tmp_path: Path) -> Path:
 
 
 @needs_real_git
+@needs_unicode_file_names
 async def test_status_and_log_with_real_git(tmp_path: Path, missing_socket_path, real_repo):
     (real_repo / "readme.md").write_text("changed\n")
     (real_repo / "новый файл.txt").write_text("x")
