@@ -726,18 +726,23 @@ async def test_names_this_computer_cannot_use(files: Files, monkeypatch):
     assert (files.local / "log-2026.txt").read_bytes() == b"log"
 
 
-async def test_progress_reaches_the_ws_hub(files: Files, monkeypatch):
-    """В приложении события идут в шину, а плагин просит хаб пересылать их в /ws."""
-    from app.plugins.sftp.plugin import SftpPlugin
-    from app.ws import ws_hub
+async def test_progress_reaches_the_ws_hub(files: Files):
+    """В приложении события передач идут в шину, а хаб пересылает их в /ws, пока плагин
+    включён (BasePlugin.events)."""
+    from fastapi import APIRouter
 
-    plugin = SftpPlugin()
-    await plugin.on_load()
+    from app.plugins.manager import PluginManager
+    from app.ws import WebSocketHub
+
+    hub = WebSocketHub()
+    manager = PluginManager(forwarder=hub)
+    manager.discover(APIRouter(), enabled=["sftp"])
+    await manager.load_all()
     try:
-        assert "sftp.transfer" in ws_hub.streams
+        assert hub.streams == ["ssh.session", "sftp.transfer"]
     finally:
-        await plugin.on_unload()
-    assert "sftp.transfer" not in ws_hub.streams
+        await manager.unload_all()
+    assert hub.streams == []
     assert service._service is None
 
 

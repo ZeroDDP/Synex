@@ -32,6 +32,8 @@ async def test_only_ssh_api_is_exposed():
     assert paths == {
         "/api/health",
         "/api/plugins",
+        "/api/plugins/{name}/enable",
+        "/api/plugins/{name}/disable",
         "/api/ssh/connect",
         "/api/ssh/exec",
         "/api/ssh/disconnect",

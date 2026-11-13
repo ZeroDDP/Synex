@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
-from app.api.router import build_api_router
+from app.api.router import API_PREFIX, build_api_router
 from app.core.config import settings
 from app.core.errors import register_error_handlers
 from app.core.logging import setup_logging
@@ -18,7 +18,7 @@ from app.core.security import (
     allowed_origins,
     warn_if_exposed,
 )
-from app.plugins.manager import PluginManager
+from app.plugins.manager import PLUGIN_STATUS_EVENT, PluginManager
 from app.worker import WORKER_STATUS_EVENT, worker_manager
 from app.ws import METRICS_EVENT, FakeMetricsPublisher, ws_hub
 from app.ws import router as ws_router
@@ -37,6 +37,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await worker_manager.start()
     # До плагинов: событие, опубликованное в on_load, уже дойдёт до UI
     ws_hub.forward(METRICS_EVENT)
+    ws_hub.forward(PLUGIN_STATUS_EVENT)
     await plugins.load_all()
 
     fake_metrics: FakeMetricsPublisher | None = None
@@ -91,5 +92,6 @@ def create_app() -> FastAPI:
     plugins.discover(api_router)
     app.include_router(api_router)
     app.include_router(ws_router)
+    plugins.attach(app, API_PREFIX)  # включение и выключение плагинов на ходу
     app.state.plugins = plugins
     return app

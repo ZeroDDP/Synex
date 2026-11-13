@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Path, Query, Request
 from pydantic import BaseModel
 
-from app.plugins.manager import PluginManager, PluginStatus
+from app.plugins.manager import PluginManager, PluginNotFoundError, PluginStatus
 from app.worker import worker_manager
 
 API_PREFIX = "/api"
@@ -47,25 +47,85 @@ def build_api_router() -> APIRouter:
         description=(
             "status: `loaded` работает; `failed` включён, но on_load упал или не загрузилась "
             "зависимость (его эндпоинты отвечают 503 `plugin_unavailable`); `skipped` не "
-            "установлен, не импортируется или нет зависимости; `disabled` установлен, но не "
-            "включён в PLUGINS_ENABLED; `registered` ещё не загружен. "
-            "Причина в `error`."
+            "установлен, не импортируется или нет зависимости; `disabled` установлен, но "
+            "выключен (не в PLUGINS_ENABLED или через /disable), его эндпоинты отвечают 404 "
+            "`plugin_disabled`; `registered` ещё не загружен. Причина в `error`. Смена "
+            "состояния приходит в /ws событием `plugin.status`."
         ),
     )
     async def plugins(request: Request) -> list[PluginInfo]:
         manager: PluginManager | None = getattr(request.app.state, "plugins", None)
-        if manager is None:
-            return []
-        return [
-            PluginInfo(
-                name=state.name,
-                version=state.plugin.version if state.plugin else None,
-                description=state.plugin.description if state.plugin else "",
-                requires=list(state.plugin.requires) if state.plugin else [],
-                status=state.status,
-                error=state.error,
-            )
-            for state in manager.states()
-        ]
+        return _plugin_list(manager)
+
+    @router.post(
+        "/plugins/{name}/enable",
+        response_model=PluginChange,
+        tags=["system"],
+        summary="Включить плагин без перезапуска (вместе с зависимостями)",
+        description=(
+            "Подгружает и пакет, которого не было при старте. Роуты плагина появляются в "
+            "API, его события начинают приходить в `/ws`. 404 `plugin_not_found`: пакета "
+            "нет или он не импортируется; 503 `plugin_unavailable`: плагин не запустился "
+            "(причина в `detail`)."
+        ),
+    )
+    async def enable_plugin(name: PluginName, request: Request) -> PluginChange:
+        manager = _manager(request)
+        changed = await manager.enable(name)
+        return PluginChange(changed=changed, plugins=_plugin_list(manager))
+
+    @router.post(
+        "/plugins/{name}/disable",
+        response_model=PluginChange,
+        tags=["system"],
+        summary="Выключить плагин без перезапуска",
+        description=(
+            "on_unload плагина; дальше его эндпоинты отвечают 404 `plugin_disabled` и "
+            "пропадают из OpenAPI. Если от плагина зависят включённые, 409 "
+            "`plugin_in_use`; с `cascade=true` они выключаются тоже. Выключение ssh "
+            "закрывает все SSH-сессии."
+        ),
+    )
+    async def disable_plugin(
+        name: PluginName,
+        request: Request,
+        cascade: Annotated[
+            bool, Query(description="Выключить и зависящие от него плагины")
+        ] = False,
+    ) -> PluginChange:
+        manager = _manager(request)
+        changed = await manager.disable(name, cascade=cascade)
+        return PluginChange(changed=changed, plugins=_plugin_list(manager))
 
     return router
+
+
+PluginName = Annotated[str, Path(pattern=r"^[a-z][a-z0-9_]{0,63}$")]
+
+
+class PluginChange(BaseModel):
+    changed: list[str]
+    plugins: list[PluginInfo]
+
+
+def _manager(request: Request) -> PluginManager:
+    manager: PluginManager | None = getattr(request.app.state, "plugins", None)
+    if manager is None:
+        raise PluginNotFoundError("Plugins are not available in this application")
+    return manager
+
+
+def _plugin_list(manager: PluginManager | None) -> list[PluginInfo]:
+    if manager is None:
+        return []
+    return [
+        PluginInfo(
+            name=state.name,
+            version=state.plugin.version if state.plugin else None,
+            description=state.plugin.description if state.plugin else "",
+            requires=list(state.plugin.requires) if state.plugin else [],
+            status=state.status,
+            error=state.error,
+        )
+        for state in manager.states()
+    ]
