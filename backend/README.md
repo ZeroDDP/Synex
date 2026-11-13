@@ -140,6 +140,20 @@ glibc 2.38 или новее (Ubuntu 24.04, Debian 13, Fedora 39 и новее).
 | POST | `/api/git/sessions/{id}/fetch` | `git fetch`: `{path}` → состояние со свежим `behind` |
 | POST | `/api/git/sessions/{id}/pull` | `git pull --ff-only`: `{path}` → пришедшие коммиты |
 | POST | `/api/git/sessions/{id}/deploy` | pull и команда в папке репозитория: `{path, command?, only_if_updated?, timeout?}` |
+| GET | `/api/sftp/sessions/{id}/info` | Файлы на сервере: домашняя папка, пользователь |
+| GET | `/api/sftp/sessions/{id}/list` | Содержимое папки: `?path=/var/log` (без `path` домашняя) |
+| GET | `/api/sftp/sessions/{id}/stat` | Сведения о файле или папке: `?path=` |
+| POST | `/api/sftp/sessions/{id}/mkdir` | Создать папку: `{path, parents?}` → 201 |
+| POST | `/api/sftp/sessions/{id}/move` | Переименовать или переместить: `{source, target, overwrite?}` |
+| POST | `/api/sftp/sessions/{id}/copy` | Скопировать: `{source, target, overwrite?}` → 201 |
+| DELETE | `/api/sftp/sessions/{id}/entry` | Удалить: `?path=&recursive=true` |
+| POST | `/api/sftp/sessions/{id}/upload` | Загрузить файл телом запроса: `?path=&name=&overwrite=false` → 201 |
+| GET | `/api/sftp/sessions/{id}/download` | Скачать файл телом ответа: `?path=` |
+| POST | `/api/sftp/sessions/{id}/transfers` | Передать файл по пути на этом компьютере, в фоне → 202 |
+| GET | `/api/sftp/transfers` | Передачи: `?session_id=&active=true` |
+| GET | `/api/sftp/transfers/{id}` | Состояние передачи |
+| DELETE | `/api/sftp/transfers/{id}` | Отменить передачу или убрать завершённую из списка |
+| GET | `/api/sftp/local/list` | Папка этого компьютера (вторая панель): `?path=` |
 | GET | `/api/monitor/metrics` | Метрики серверов сейчас (то же, что `metrics` в `/ws`) |
 | GET | `/api/health` | Состояние бэкенда и воркера, загруженные плагины |
 | GET | `/api/plugins` | Плагины: версия, описание, зависимости, `status` и причина сбоя (см. ниже) |
@@ -386,6 +400,97 @@ POST /api/connections
 - Ошибки: 404 `git_not_installed`, `git_path_not_found`, `git_not_a_repository`, 504
   `git_timeout` (`GIT_TIMEOUT`, 120 с), 502 `git_command_failed` (текст git в `detail`).
 
+### Файлы на серверах (плагин `sftp`)
+
+Файловый менеджер: файлы и папки сервера, файлы этого компьютера (вторая панель) и
+передача между ними с прогрессом. Работает через SFTP Rust-воркера (действия `sftp_*`
+сборки 2026-11-12). Пути сервера начинаются с `/api/sftp/sessions/{session_id}/`.
+
+- Путь на сервере: абсолютный (`/var/log`), от домашней папки (`docs/a.txt`) или
+  `~/docs`. В ответах пути всегда абсолютные, их и передавайте дальше.
+- `GET .../info`: `{engine: "core", home, user, checksum}`; `checksum`: можно ли сверить
+  SHA-256 на сервере (`null`, пока не проверяли).
+- `GET .../list?path=/var/log` (без `path` домашняя папка):
+
+```json
+{"path": "/var/log", "parent": "/var", "home": "/home/deploy", "entries": [
+  {"name": "nginx", "path": "/var/log/nginx", "type": "dir", "size": 4096,
+   "is_dir": true, "hidden": false, "permissions": "drwxr-xr-x", "mode": 493,
+   "target_type": null, "modified_at": null},
+  {"name": "syslog", "path": "/var/log/syslog", "type": "file", "size": 182734, "...": "..."}
+]}
+```
+
+  Сначала папки, внутри по имени. `type`: `file`, `dir`, `link`, `other`; у ссылки на
+  папку `target_type: "dir"` и `is_dir: true` (открывается по клику). Время изменения,
+  владельца и цель ссылки SFTP воркера пока не отдаёт: `modified_at` у файлов сервера
+  `null`.
+- `GET .../stat?path=`, `POST .../mkdir` `{path, parents?}` → 201, `POST .../move` и
+  `POST .../copy` `{source, target, overwrite?}` (`target` это новый полный путь; папка
+  копируется целиком), `DELETE .../entry?path=&recursive=true`. Ответ: сведения о файле
+  (как элемент `entries`). Корень и домашнюю папку удалить или переместить нельзя (403
+  `sftp_protected_path`); непустая папка удаляется только с `recursive=true`.
+- Передача файла. Два способа, оба видны в `/api/sftp/transfers` и в `/ws`:
+  - по пути на этом компьютере, в фоне: `POST .../transfers` `{direction: upload |
+    download, local_path, remote_path, overwrite?}` → 202 и описание передачи. Папка
+    (или путь с разделителем в конце) в «куда» значит «положить под тем же именем».
+    Передачи одной сессии идут по очереди;
+  - телом запроса: `POST .../upload?path=<куда>&name=<имя, если path это папка>`
+    (тело это содержимое файла, ответ 201 после записи и сверки) и
+    `GET .../download?path=` (тело ответа это файл, id передачи в заголовке
+    `X-Synex-Transfer-Id`).
+- `GET /api/sftp/transfers?session_id=&active=true`, `GET /api/sftp/transfers/{id}`,
+  `DELETE /api/sftp/transfers/{id}`: идущую передачу отменяет (недописанный файл
+  удаляется), завершённую убирает из списка.
+- Состояние передачи (ответы API и событие `sftp.transfer` в `/ws`):
+
+```json
+{"id": "5f0c2a9e41b7", "session_id": "3f9c0a7b12d4e5f6", "direction": "upload",
+ "source": "path", "name": "backup.tar.gz", "remote_path": "/srv/backup.tar.gz",
+ "local_path": "C:\\Users\\me\\backup.tar.gz", "status": "running",
+ "bytes_done": 41943040, "bytes_total": 104857600, "percent": 40.0,
+ "speed": 13981013, "eta_seconds": 4, "error": null, "detail": null,
+ "checksum": null, "verified": null, "created_at": "...", "started_at": "...",
+ "finished_at": null}
+```
+
+  `status`: `queued` → `running` → `verifying` → `completed`, либо `failed` (`error` и
+  `detail`), либо `cancelled`. Событие приходит при каждой смене статуса и не чаще раза
+  в `SFTP_PROGRESS_INTERVAL` (0,25 с), пока идут данные. `speed` в байтах в секунду.
+- Файл передаёт воркер в служебной SSH-сессии к тому же серверу (своё IPC-подключение),
+  поэтому терминал, метрики, docker и git этой сессии во время передачи не ждут.
+  Прогресс: при скачивании backend смотрит, как растёт временный файл на этом
+  компьютере, при загрузке спрашивает размер временного файла на сервере. Если
+  служебную сессию открыть нельзя (воркер не принимает дополнительные подключения),
+  передача идёт в основной сессии, а прогресс загрузки появляется только в конце.
+- Файл не появляется на месте наполовину: данные пишутся во временный файл
+  (`.synex-<id>.part/` рядом с целевым на сервере, `<имя>.synex-part` на компьютере),
+  после передачи сверяются размер и SHA-256 (`checksum`, `verified: true`; если на
+  сервере нет `sha256sum`, `shasum` и `openssl`, сверяется только размер), и только
+  потом временный файл заменяет целевой. При ошибке или отмене он удаляется.
+- Заменить файл (`overwrite: true`): старый сначала уходит во временную папку и
+  удаляется, только когда новый уже на месте. Если поставить новый не вышло, старый
+  возвращается.
+- Отмена идущей передачи сразу отвечает `cancelled`, закрывает её служебную сессию и
+  убирает временные файлы; следующая передача сессии начинается сразу. Прерывать
+  передачу воркер (сборка 2026-11-12) не умеет: он дочитывает файл до конца в фоне,
+  результат никуда не попадает. Передавать папки целиком пока нельзя: только файлы.
+- `GET /api/sftp/local/list?path=C:\Users\me` (без `path` домашняя папка): папка этого
+  компьютера для второй панели: `{path, parent, home, roots, separator, entries}`,
+  `roots` это диски на Windows и `["/"]` на Linux и macOS. UI работает в окне браузера и
+  диск не видит, поэтому папки ему показывает backend.
+- Ошибки: 404 `sftp_not_found`, 403 `sftp_permission_denied`, `sftp_protected_path`, 409
+  `sftp_target_exists`, `sftp_is_a_directory`, `sftp_not_a_directory`, `sftp_not_a_file`,
+  `sftp_directory_not_empty`, 422 `sftp_bad_path` (в том числе имя файла с сервера,
+  которое нельзя дать файлу на этом компьютере, например `a:b.txt` на Windows), 502
+  `sftp_failed` (текст воркера в `detail`), `sftp_unavailable` (на сервере нет SFTP: в
+  его `sshd_config` нужна строка `Subsystem sftp ...`; или сборка воркера старая и не знает
+  действий `sftp_*`, тогда воркер нужно обновить), `sftp_transfer_corrupted`, 504
+  `sftp_timeout`; для этого компьютера `sftp_local_not_found` (404),
+  `sftp_local_permission_denied` (403), `sftp_local_exists` и `sftp_local_not_a_directory`
+  (409), `sftp_local_error` (422). Сессия, занятая командой пользователя дольше
+  `SSH_SERVICE_WAIT`: 409 `ssh_session_busy`. Настройки `SFTP_*` описаны в `.env.example`.
+
 ### WebSocket /ws
 
 Поток данных для UI: `ws://127.0.0.1:8000/ws` (без префикса `/api`). В обе стороны
@@ -398,6 +503,7 @@ POST /api/connections
 | `metrics` | сервер, каждые 500 мс | метрики серверов, пример ниже |
 | `ssh.session` | сервер, при открытии и закрытии SSH-сессии | `{action: opened\|closed, session_id, host, port, username, connection_id, reason?}` |
 | `worker.status` | сервер, когда меняется состояние воркера | `{status, ...}`: `connected`, `connection_lost`, `worker_exited`, `worker_started` |
+| `sftp.transfer` | сервер, пока идёт передача файла | состояние передачи: `{id, status, bytes_done, bytes_total, percent, speed, ...}` (см. «Файлы на серверах») |
 | `ping` | UI | что угодно, вернётся в `pong` |
 | `pong` | сервер, в ответ на `ping` | `data` из `ping` |
 | `error` | сервер, если не разобрал сообщение UI | `{error, detail}`: `bad_message` или `unknown_type` |
@@ -504,6 +610,7 @@ ws.onmessage = (e) => console.log(JSON.parse(e.data));
 | 504 | `worker_timeout` | Воркер не ответил на другой запрос |
 | 403/404/502/503/504 | `docker_*` | Ошибки Docker на сервере (см. «Docker на серверах») |
 | 404/409/502/504 | `git_*` | Ошибки git на сервере (см. «Git на серверах») |
+| 403/404/409/422/5xx | `sftp_*` | Ошибки файлов на сервере и на этом компьютере (см. «Файлы на серверах») |
 
 ## Структура
 
@@ -533,6 +640,9 @@ app/
                        service (выполнение в сессии, ошибки), routes, schemas
     git/               /api/git/*: commands (команды git и разбор вывода), service,
                        routes, schemas
+    sftp/              /api/sftp/*: remote (файлы сервера через SFTP воркера), transfers
+                       (передачи, прогресс, сверка), local (файлы этого компьютера),
+                       paths, routes, schemas
 tests/                 pytest; fake_worker.py имитирует synex_worker
   integration/         полный цикл UI → FastAPI → воркер → SSH-сервер
 ```
@@ -638,7 +748,14 @@ uv run pytest tests/test_real_worker.py -v
   команда в папке репозитория), терминал сессии служебных команд не видит;
 - docker на сервере: контейнер из образа, собранного из пустого архива (без скачивания),
   список, логи, ошибка запуска и удаление. Нужен работающий Docker, иначе тест
-  пропускается.
+  пропускается;
+- файлы на сервере (SFTP воркера): папки, имена с пробелами, кавычками и кириллицей,
+  загрузка и скачивание телом запроса, копирование и удаление папок, список на полторы
+  тысячи файлов с русскими именами;
+- критерий MVP по SFTP: файл 100 МБ уходит на сервер и возвращается, SHA-256 совпадает,
+  прогресс идёт в `/ws`, а команда терминала проходит во время передачи. Размер задаёт
+  `SYNEX_TEST_SFTP_MB`; тест печатает время и скорость (`-s`). На локальном `sshd`:
+  около 1 с в каждую сторону.
 
 Нужны воркер (как для `test_real_worker.py`) и SSH-сервер. Если `SYNEX_TEST_SSH_*`
 не заданы, на Linux и macOS тесты сами поднимают `sshd` на `127.0.0.1` со случайным

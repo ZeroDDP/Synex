@@ -10,7 +10,12 @@
   (buffer.py) и сразу рассылается подписчикам (WebSocket-подключениям UI).
 * События ssh.session (opened / closed) публикуются в шину: их будет слушать мониторинг.
 * Плагины (docker, git) выполняют в сессии свои служебные команды через run_service:
-  они не попадают в буфер вывода и не меняют cwd сессии.
+  они не попадают в буфер вывода и не меняют cwd сессии. Действия воркера кроме команд
+  (например, sftp_*) плагины выполняют через request.
+* Для долгой операции (передача файла) плагин открывает служебную сессию к тому же
+  серверу (open_companion): у неё своё IPC-подключение, поэтому терминал, метрики и
+  другие запросы основной сессии во время передачи не ждут. Служебные сессии не видны
+  в списке, не считаются в SSH_MAX_SESSIONS и закрываются вместе с основной.
 """
 
 from __future__ import annotations
@@ -46,6 +51,7 @@ from app.plugins.ssh.errors import (
 )
 from app.plugins.ssh.session import (
     AuthMethod,
+    CompanionSession,
     SSHSession,
     WorkerChannel,
     new_session_id,
@@ -154,6 +160,7 @@ class SSHSessionManager:
         self._channels_supported: bool | None = None
         self._background: set[asyncio.Task[Any]] = set()
         self._opening = 0  # подключения, которые ещё идут: тоже занимают место в лимите
+        self._companions: dict[str, set[CompanionSession]] = {}  # по id основной сессии
 
     # -------------------------------------------------------------- lookup
 
@@ -218,6 +225,8 @@ class SSHSessionManager:
             connection_id=connection_id,
             channel=channel,
             buffer=OutputBuffer(settings.SSH_OUTPUT_BUFFER_BYTES),
+            connect_params=params,
+            keys=keys,
         )
         self._sessions[session.id] = session
         session.record(
@@ -541,6 +550,165 @@ class SSHSessionManager:
 
     # ------------------------------------------------------ service requests
 
+    async def request(
+        self,
+        session_id: str,
+        action: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        timeout: float,
+        wait: float | None = None,
+        name: str = "service",
+    ) -> dict[str, Any]:
+        """Действие воркера (например, sftp_list_dir) в сессии от имени плагина.
+
+        Как run_service: в буфер вывода не пишется, занятую командой пользователя сессию
+        ждёт не дольше wait (SSH_SERVICE_WAIT), потом SSHSessionBusyError. wait=0: не
+        ждать вовсе. Ошибку действия (status="error") отдаёт как WorkerCommandError.
+        Если воркер не ответил за timeout, отдельное подключение сессии закрывается:
+        отменять действия воркер не умеет, и сессия осталась бы занятой.
+        """
+        session = self.get(session_id)
+        wait_for_lock = settings.SSH_SERVICE_WAIT if wait is None else wait
+        if not await session.channel.lock.acquire(timeout=wait_for_lock):
+            raise SSHSessionBusyError(
+                f"SSH session '{session.id}' is busy with another command for more than "
+                f"{wait_for_lock:g}s. Try again later or open a separate session for {name}."
+            )
+        try:
+            if session.closed:
+                raise SSHNotConnectedError(f"SSH session '{session.id}' is closed")
+            return await self._request_in_worker(session, action, payload or {}, timeout)
+        finally:
+            session.channel.lock.release()
+
+    async def _request_in_worker(
+        self, session: SSHSession, action: str, payload: dict[str, Any], timeout: float
+    ) -> dict[str, Any]:
+        try:
+            return await session.channel.client.request(
+                action, _session_payload(session, **payload), timeout=timeout,
+                request_id=session.id,
+            )  # fmt: skip
+        except WorkerCommandError as e:
+            if is_session_missing(e.stderr):
+                self._forget(session, CLOSED_LOST_IN_WORKER)
+                raise SSHNotConnectedError(
+                    f"SSH session '{session.id}' is no longer open: {e.stderr}"
+                ) from e
+            raise
+        except WorkerTimeoutError:
+            logger.warning("Worker action timed out", session_id=session.id, action=action)
+            if session.channel.dedicated:
+                self._forget(session, CLOSED_EXEC_TIMEOUT)
+            raise
+        except WorkerConnectionError as e:
+            if session.closed:
+                raise SSHNotConnectedError(
+                    f"SSH session '{session.id}' was closed ({session.close_reason})"
+                ) from e
+            raise
+
+    # ------------------------------------------------------ companion sessions
+
+    async def open_companion(self, session_id: str, purpose: str) -> CompanionSession | None:
+        """Служебная сессия к серверу сессии session_id со своим IPC-подключением.
+
+        None, если открыть её нельзя: воркер не принимает дополнительные подключения,
+        или сессию открыли до того, как backend стал запоминать способ входа. Тогда
+        плагин работает в основной сессии. SSHConnectError и другие ошибки подключения
+        выбрасываются (например, пароль сменили на сервере).
+        """
+        parent = self.get(session_id)
+        if parent.connect_params is None or parent.keys is None:
+            return None
+        if self._channels_supported is False:
+            return None
+        try:
+            client = await self.provider.open_channel()
+        except WorkerConnectionError as e:
+            logger.warning("Companion session needs an extra IPC connection", error=e.detail)
+            return None
+        channel = WorkerChannel(client=client, dedicated=True)
+        companion = CompanionSession(
+            id=new_session_id(), parent_id=parent.id, purpose=purpose, channel=channel
+        )
+        try:
+            await self._connect_in_worker(channel, companion.id, parent.connect_params, parent.keys)
+        except BaseException:
+            await client.disconnect()
+            raise
+        if parent.closed:  # основную закрыли, пока подключались
+            await client.disconnect()
+            raise SSHNotConnectedError(f"SSH session '{parent.id}' is closed")
+        self._companions.setdefault(parent.id, set()).add(companion)
+        client.add_disconnect_listener(lambda reason, c=companion: self._companion_lost(c))
+        logger.info(
+            "Companion SSH session opened",
+            session_id=parent.id,
+            companion_id=companion.id,
+            purpose=purpose,
+        )
+        return companion
+
+    async def companion_request(
+        self,
+        companion: CompanionSession,
+        action: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        timeout: float,
+    ) -> dict[str, Any]:
+        """Действие воркера в служебной сессии. Если её закрыли (отмена операции или
+        закрытие основной сессии), SSHNotConnectedError."""
+        if companion.closed:
+            raise SSHNotConnectedError(f"Companion session of '{companion.parent_id}' is closed")
+        async with companion.channel.lock:
+            try:
+                return await companion.channel.client.request(
+                    action, {"session_id": companion.id, **(payload or {})}, timeout=timeout,
+                    request_id=companion.id,
+                )  # fmt: skip
+            except WorkerConnectionError as e:
+                if companion.closed:
+                    raise SSHNotConnectedError(
+                        f"Companion session of '{companion.parent_id}' was closed"
+                    ) from e
+                raise
+            except WorkerTimeoutError:
+                await self.close_companion(companion)
+                raise
+
+    async def close_companion(self, companion: CompanionSession) -> None:
+        """Закрыть служебную сессию. Идущее в ней действие воркера обрывается: воркер
+        закрывает сессию вместе с её подключением."""
+        companion.closed = True
+        companions = self._companions.get(companion.parent_id)
+        if companions is not None:
+            companions.discard(companion)
+            if not companions:
+                del self._companions[companion.parent_id]
+        with contextlib.suppress(Exception):
+            await companion.channel.client.disconnect()
+
+    def companions(self, session_id: str) -> list[CompanionSession]:
+        return list(self._companions.get(session_id, ()))
+
+    def _companion_lost(self, companion: CompanionSession) -> None:
+        if not companion.closed:
+            logger.info("Companion SSH session lost its worker connection", id=companion.id)
+        companion.closed = True
+        companions = self._companions.get(companion.parent_id)
+        if companions is not None:
+            companions.discard(companion)
+            if not companions:
+                del self._companions[companion.parent_id]
+
+    def _drop_companions(self, session: SSHSession) -> None:
+        for companion in self._companions.pop(session.id, set()):
+            companion.closed = True
+            self._spawn(companion.channel.client.disconnect())
+
     async def request_if_idle(
         self,
         session_id: str,
@@ -594,6 +762,7 @@ class SSHSessionManager:
         session = self.resolve(session_id)
         self._sessions.pop(session.id, None)
         session.mark_closed(reason)
+        self._drop_companions(session)
         message = await self._disconnect_in_worker(session)
         logger.info("SSH session closed", session_id=session.id, reason=reason)
         await self._publish("closed", session, reason=reason)
@@ -605,6 +774,7 @@ class SSHSessionManager:
         sessions, self._sessions = list(self._sessions.values()), {}
         for session in sessions:
             session.mark_closed(reason)
+            self._drop_companions(session)
             if session.channel.dedicated:
                 with contextlib.suppress(Exception):
                     await session.channel.client.disconnect()
@@ -663,6 +833,7 @@ class SSHSessionManager:
         if session.closed:
             return
         session.mark_closed(reason)
+        self._drop_companions(session)
         if session.channel.dedicated:
             self._spawn(session.channel.client.disconnect())
         self._spawn(self._publish("closed", session, reason=reason))

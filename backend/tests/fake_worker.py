@@ -26,6 +26,13 @@ monitor_get_values, как сборка с исправленным CPU: пер�
 загрузки сервера» (BOOT_CPU), следующие 10, 11, 12 ... Хост "no-proc" имитирует сервер,
 где команда метрик не выполнилась; FakeWorkerState.monitor_error делает ok=false.
 
+SFTP (sftp_*) как сборка от 2026-11-12: тексты ошибок, "success" у sftp_download_file,
+move без текста ошибки, copy папки без -r «успешно» ничего не копирует. Файловая
+система сервера: с эмулятором shell это его виртуальная ФС (FakeShell.root, домашняя
+папка /home/synex), иначе настоящая ФС этой машины (домашняя папка home). Пути, которые
+не начинаются с "/", считаются от домашней папки, "~" воркер не раскрывает.
+FakeWorkerState.sftp_delay: пауза на каждый мегабайт передачи (проверка прогресса).
+
 Служебные action для тестов клиента:
   test_sleep {seconds, echo}    ответ с задержкой
   test_big {size}               большой stdout
@@ -42,8 +49,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import posixpath
+import shutil
+import stat
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -129,6 +140,22 @@ class FakeWorkerState:
         self.port: int | None = None
         self.server: asyncio.Server | None = None
         self.accept_once = False
+        self.sftp_delay = 0.0  # секунд на каждый мегабайт sftp_upload/download
+        self.sftp_fail: dict[str, str] = {}  # action -> текст ошибки (сбой по заказу)
+        # Сбой по условию: (action, payload) -> текст ошибки или None (без сбоя)
+        self.sftp_fail_if: Callable[[str, dict[str, Any]], str | None] | None = None
+
+    def remote(self, path: str) -> Path:
+        """Файл сервера для пути SFTP."""
+        if self.shell is not None:
+            root, home = self.shell.root, self.shell.home
+        else:
+            root, home = Path(Path.cwd().anchor or "/"), self.shell_home or str(Path.home())
+        absolute = path if path.startswith("/") else posixpath.join(home, path)
+        parts = [p for p in posixpath.normpath(absolute).split("/") if p]
+        if self.shell is None and sys.platform != "win32":
+            return Path("/", *parts)
+        return root.joinpath(*parts)
 
     @property
     def sessions(self) -> set[str]:
@@ -152,6 +179,7 @@ class FakeWorkerProtocol(asyncio.Protocol):
         self.buffer = bytearray()
         self.transport: asyncio.BaseTransport | None = None
         self.tasks: set[asyncio.Task] = set()
+        self.sftp_tasks: set[asyncio.Task] = set()
         self.queue_lock = asyncio.Lock()
         self.sessions: dict[str, dict[str, Any]] = {}
         state.protocols.append(self)
@@ -163,6 +191,11 @@ class FakeWorkerProtocol(asyncio.Protocol):
 
     def connection_lost(self, exc: Exception | None) -> None:
         self.sessions.clear()  # авто-закрытие сессий после отключения Python
+        # Действия SFTP этого подключения прерываются и закрывают файлы. Настоящий
+        # воркер (сборка 2026-11-12) пока докачивает файл в фоне до конца, но для backend
+        # итог тот же: ответа не будет. А открытый файл на Windows не удалить
+        for task in self.sftp_tasks:
+            task.cancel()
 
     def data_received(self, data: bytes) -> None:
         self.buffer += data
@@ -238,6 +271,24 @@ class FakeWorkerProtocol(asyncio.Protocol):
                 self.send(reply(msg_id, "error", stderr="Session not found", exit_code=1))
             else:
                 self.send(reply(msg_id, "ok", stdout=f"Disconnected id: {msg_id}"))
+
+        elif isinstance(action, str) and action.startswith("sftp_"):
+            if msg_id not in self.sessions:
+                self.send(reply(msg_id, "error", stderr=NO_SESSION, exit_code=1))
+                return
+            failure = self.state.sftp_fail.get(action)
+            if failure is None and self.state.sftp_fail_if is not None:
+                failure = self.state.sftp_fail_if(action, payload)
+            if failure is not None:
+                self.send(reply(msg_id, "error", stderr=failure, exit_code=1))
+                return
+            task = asyncio.current_task()
+            if task is not None:
+                self.sftp_tasks.add(task)
+            try:
+                self.send(await FakeSftp(self.state).handle(msg_id, action, payload))
+            finally:
+                self.sftp_tasks.discard(task)  # type: ignore[arg-type]
 
         elif action == "test_sleep":
             await asyncio.sleep(float(payload.get("seconds", 0)))
@@ -348,6 +399,183 @@ class FakeWorkerProtocol(asyncio.Protocol):
             check=False,
         )
         return result.stdout, result.stderr, result.returncode
+
+
+INTERNAL = "SSH internal error: "
+NO_SUCH_FILE = "No such file: No such file"
+FAILURE = "Failure: Failure"
+MB = 1024 * 1024
+
+
+def _rights(mode: int) -> str:
+    bits = "rwxrwxrwx"
+    return "".join(c if mode & (1 << (8 - i)) else "-" for i, c in enumerate(bits))
+
+
+class FakeSftp:
+    """sftp_* настоящего воркера (synex_core/src/sftp.rs) на файлах этой машины."""
+
+    def __init__(self, state: FakeWorkerState) -> None:
+        self.state = state
+
+    async def handle(self, msg_id: str, action: str, payload: dict[str, Any]) -> dict[str, Any]:
+        remote = payload.get("remote_path")
+        local = payload.get("local_path")
+        target = payload.get("destination_path")
+        try:
+            if action == "sftp_list_dir":
+                return reply(msg_id, "ok", stdout=self.list_dir(remote))
+            if action == "sftp_create_dir":
+                self.mkdir(remote)
+            elif action == "sftp_remove_dir":
+                await _when_released(lambda: self.rmdir(remote))
+            elif action == "sftp_remove_file":
+                await _when_released(lambda: self.remove(remote))
+            elif action == "sftp_move_file":
+                if not self.move(remote, target):
+                    return reply(msg_id, "error")  # воркер не передаёт текст ошибки
+            elif action == "sftp_copy_file":
+                self.copy(remote, target)
+            elif action == "sftp_upload_file":
+                await self.upload(local, remote)
+            elif action == "sftp_download_file":
+                await self.download(remote, local)
+                return reply(msg_id, "success")
+            else:
+                return reply(msg_id, "error", stderr=f"Unknown action: {action}", exit_code=1)
+        except _SftpError as e:
+            return reply(msg_id, "error", stderr=INTERNAL + str(e), exit_code=1)
+        except OSError:
+            # Файл занят или имя недопустимо на этой машине (Windows): сервер SFTP
+            # ответил бы статусом Failure, а не молчанием
+            stderr = f"{INTERNAL}{action} failed: {FAILURE}"
+            return reply(msg_id, "error", stderr=stderr, exit_code=1)
+        return reply(msg_id, "ok")
+
+    def list_dir(self, path: str | None) -> str:
+        if path is None:
+            raise _SftpError("Missing directory path in payload")
+        directory = self.state.remote(path)
+        if not directory.is_dir():
+            raise _SftpError(f"Failed to read remote directory: {NO_SUCH_FILE}")
+        entries = []
+        for item in directory.iterdir():
+            info = item.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                kind = "symlink"
+            elif stat.S_ISDIR(info.st_mode):
+                kind = "folder"
+            else:
+                kind = "file"
+            entries.append(
+                {
+                    "Type": kind,
+                    "name": item.name,
+                    "weight": info.st_size,
+                    "rights": _rights(stat.S_IMODE(info.st_mode)),
+                }
+            )
+        return json.dumps(entries, ensure_ascii=False, separators=(",", ":"))
+
+    def mkdir(self, path: str | None) -> None:
+        target = self.state.remote(path or "")
+        if target.exists() or target.is_symlink():
+            raise _SftpError(f"Failed to create remote directory: {FAILURE}")
+        if not target.parent.is_dir():
+            raise _SftpError(f"Failed to create remote directory: {NO_SUCH_FILE}")
+        target.mkdir()
+
+    def rmdir(self, path: str | None) -> None:
+        target = self.state.remote(path or "")
+        if not target.exists():
+            raise _SftpError(f"Failed to remove remote directory: {NO_SUCH_FILE}")
+        if not target.is_dir() or target.is_symlink() or any(target.iterdir()):
+            raise _SftpError(f"Failed to remove remote directory: {FAILURE}")
+        target.rmdir()
+
+    def remove(self, path: str | None) -> None:
+        target = self.state.remote(path or "")
+        if not target.exists() and not target.is_symlink():
+            raise _SftpError(f"Failed to remove remote file: {NO_SUCH_FILE}")
+        if target.is_dir() and not target.is_symlink():
+            raise _SftpError(f"Failed to remove remote file: {FAILURE}")
+        target.unlink()
+
+    def move(self, source: str | None, target: str | None) -> bool:
+        src, dst = self.state.remote(source or ""), self.state.remote(target or "")
+        # SFTP rename сервера OpenSSH не заменяет существующий файл
+        if not (src.exists() or src.is_symlink()) or dst.exists() or not dst.parent.is_dir():
+            return False
+        src.rename(dst)
+        return True
+
+    def copy(self, source: str | None, target: str | None) -> None:
+        src, dst = self.state.remote(source or ""), self.state.remote(target or "")
+        if not src.exists():
+            raise _SftpError(
+                f"Failed to copy remote file: cp: cannot stat '{source}': "
+                "No such file or directory\n"
+            )
+        if src.is_dir():
+            return  # cp без -r папку не копирует, а код возврата воркер теряет
+        if dst.is_dir():
+            dst = dst / src.name
+        shutil.copyfile(src, dst)
+
+    async def upload(self, local: str | None, remote: str | None) -> None:
+        source = Path(local or "")
+        if not source.is_file():
+            raise _SftpError("Failed to open local file: No such file or directory (os error 2)")
+        path = remote or ""
+        target = self.state.remote(path)
+        if path.endswith("/") or target.is_dir():
+            target = target / source.name
+        if not target.parent.is_dir():
+            raise _SftpError(f"Failed to create remote file: {NO_SUCH_FILE}")
+        if target.is_dir():
+            raise _SftpError(f"Failed to create remote file: {FAILURE}")
+        await self._copy_stream(source, target)
+
+    async def download(self, remote: str | None, local: str | None) -> None:
+        source = self.state.remote(remote or "")
+        if not source.exists():
+            raise _SftpError(f"Failed to open remote file '{remote}': {NO_SUCH_FILE}")
+        path = local or ""
+        target = Path(path)
+        if path.endswith(("/", "\\")) or target.is_dir():
+            target = target / source.name
+        if not target.parent.is_dir():
+            raise _SftpError("Failed to create local file: No such file or directory (os error 2)")
+        if source.is_dir():
+            target.write_bytes(b"")  # как воркер: локальный файл уже создан
+            raise _SftpError("Failed to download file: Failure")
+        await self._copy_stream(source, target)
+
+    async def _copy_stream(self, source: Path, target: Path) -> None:
+        with source.open("rb") as reader, target.open("wb") as writer:
+            while chunk := reader.read(MB):
+                writer.write(chunk)
+                writer.flush()
+                if self.state.sftp_delay:
+                    await asyncio.sleep(self.state.sftp_delay)
+
+
+class _SftpError(Exception):
+    pass
+
+
+async def _when_released(operation: Callable[[], None], wait: float = 2.0) -> None:
+    """На Windows файл, который ещё держит прерванная передача, не удалить, пока она
+    его не закроет: подождать немного, как сервер, у которого файл освобождается."""
+    deadline = asyncio.get_running_loop().time() + wait
+    while True:
+        try:
+            operation()
+            return
+        except PermissionError:
+            if asyncio.get_running_loop().time() >= deadline:
+                raise
+            await asyncio.sleep(0.02)
 
 
 async def _serve_forever() -> None:

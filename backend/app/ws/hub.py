@@ -122,6 +122,12 @@ class WebSocketHub:
         self._forwarded[event_type] = handler
         event_bus.subscribe(event_type, handler)
 
+    def stop_forward(self, event_type: str) -> None:
+        """Перестать пересылать события event_type (плагин выгружен)."""
+        handler = self._forwarded.pop(event_type, None)
+        if handler is not None:
+            event_bus.unsubscribe(event_type, handler)
+
     def stop_forwarding(self) -> None:
         for event_type, handler in self._forwarded.items():
             event_bus.unsubscribe(event_type, handler)

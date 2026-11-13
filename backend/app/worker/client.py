@@ -3,6 +3,7 @@
 Фрейм:   [4 байта: длина payload, Big-Endian][N байт: MessagePack map]
 Запрос:  {"id": str, "action": str, "payload": {...}}
 Ответ:   {"id": str, "status": "ok" | "error", "payload": {stdout, stderr, exit_code}}
+         (sftp_download_file сборки 2026-11 отвечает "success" вместо "ok")
 
 Как ведёт себя воркер на самом деле (проверено на сборке от 2026-11-03):
   * `id` запроса одновременно ключ SSH-сессии: ssh_connect с id X создаёт сессию X,
@@ -51,6 +52,9 @@ from app.core.errors import (
     WorkerError,
     WorkerTimeoutError,
 )
+
+# Успешный ответ воркера; "success" отдаёт sftp_download_file (сборка 2026-11)
+OK_STATUSES = frozenset({"ok", "success"})
 
 logger = structlog.get_logger()
 
@@ -269,7 +273,7 @@ class WorkerClient:
         if not isinstance(body, dict):
             body = {}
 
-        if response.get("status") == "ok":
+        if response.get("status") in OK_STATUSES:
             return body
 
         raise WorkerCommandError(

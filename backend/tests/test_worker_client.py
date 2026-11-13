@@ -109,8 +109,8 @@ async def test_cancelled_request_keeps_its_place(fake_worker, missing_socket_pat
 async def test_unknown_action_is_worker_error(fake_worker, missing_socket_path):
     client = await make_client(fake_worker.port, missing_socket_path)
     try:
-        with pytest.raises(WorkerCommandError, match="Unknown action: sftp_list_dir"):
-            await client.request("sftp_list_dir", {"path": "/"})
+        with pytest.raises(WorkerCommandError, match="Unknown action: docker_list"):
+            await client.request("docker_list", {"path": "/"})
         assert client.connected
     finally:
         await client.disconnect()

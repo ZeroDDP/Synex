@@ -56,6 +56,19 @@ class WorkerChannel:
 
 
 @dataclass(eq=False)
+class CompanionSession:
+    """Служебная SSH-сессия к тому же серверу, что и сессия parent_id (например, для
+    передачи файла): своё IPC-подключение, поэтому основная сессия во время долгой
+    операции свободна. Не видна в списке сессий и закрывается вместе с основной."""
+
+    id: str
+    parent_id: str
+    purpose: str
+    channel: WorkerChannel
+    closed: bool = False
+
+
+@dataclass(eq=False)
 class SSHSession:
     id: str
     host: str
@@ -75,6 +88,10 @@ class SSHSession:
     closed: bool = False
     close_reason: str | None = None
     subscribers: set[Subscriber] = field(default_factory=set)
+    # Как подключались (ConnectParams и KeyStore): нужны, чтобы открыть к тому же
+    # серверу служебную сессию (передача файлов). Только в памяти, наружу не отдаются.
+    connect_params: Any = field(default=None, repr=False)
+    keys: Any = field(default=None, repr=False)
 
     def info(self) -> dict[str, Any]:
         return {
