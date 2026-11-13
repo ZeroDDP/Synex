@@ -181,3 +181,77 @@ async def test_docker_full_cycle(ui: UI, ssh_target: SSHTarget, tmp_path: Path):
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
         subprocess.run(["docker", "rmi", image], capture_output=True)
+
+
+# ------------------------------------------------------- plugins on the fly
+
+CORE_MODULES = ("ssh", "sftp", "monitor", "docker")
+
+
+def plugin_status(name: str, status: str):
+    return lambda data: data["name"] == name and data["status"] == status
+
+
+async def test_four_modules_switch_on_a_running_backend(ui: UI, ssh_target: SSHTarget):
+    """Критерий вехи B4 (SYN-70): SSH, SFTP, мониторинг и Docker выключаются и включаются
+    на работающем backend без его перезапуска. UI узнаёт об этом из /ws (plugin.status),
+    API выключенного модуля отвечает 404 plugin_disabled, после включения всё работает."""
+    session_id = await ui.open_session(ssh_target.connection())
+    checks = {
+        "sftp": f"/api/sftp/sessions/{session_id}/info",
+        "docker": f"/api/docker/sessions/{session_id}/info",
+        "monitor": "/api/monitor/metrics",
+    }
+
+    async with ui.events() as events:
+        server_ok = lambda data: any(s["status"] == "ok" for s in data["servers"])  # noqa: E731
+        await events.wait_for("metrics", server_ok)
+
+        # SFTP, Docker и мониторинг по одному: сессия при этом не закрывается
+        for name, path in checks.items():
+            off = await ui.api.post(f"/api/plugins/{name}/disable")
+            assert (off.status_code, off.json()["changed"]) == (200, [name]), off.text
+            await events.wait_for("plugin.status", plugin_status(name, "disabled"))
+            refused = await ui.api.get(path)
+            assert (refused.status_code, refused.json()["error"]) == (404, "plugin_disabled")
+
+            on = await ui.api.post(f"/api/plugins/{name}/enable")
+            assert (on.status_code, on.json()["changed"]) == (200, [name]), on.text
+            await events.wait_for("plugin.status", plugin_status(name, "loaded"))
+            assert (await ui.api.get(path)).status_code == 200, path
+        await events.wait_for("metrics", server_ok)  # мониторинг снова идёт сам
+
+        # SSH: от него зависят остальные, поэтому без cascade отказ
+        refused = await ui.api.post("/api/plugins/ssh/disable")
+        assert (refused.status_code, refused.json()["error"]) == (409, "plugin_in_use")
+        assert (await ui.exec(session_id, "echo still-open"))["stdout"] == "still-open"
+
+        off = await ui.api.post("/api/plugins/ssh/disable", params={"cascade": "true"})
+        assert off.status_code == 200, off.text
+        assert set(CORE_MODULES) <= set(off.json()["changed"])
+        assert off.json()["changed"][-1] == "ssh"
+        await events.wait_for_all(
+            [
+                ("ssh.session", lambda d: d["action"] == "closed"),
+                *[("plugin.status", plugin_status(n, "disabled")) for n in CORE_MODULES],
+            ]
+        )
+        missing = await ui.api.get("/api/ssh/sessions")
+        assert (missing.status_code, missing.json()["error"]) == (404, "plugin_disabled")
+        assert (await ui.api.get("/api/keys")).status_code == 200  # keys от ssh не зависит
+
+        for name in CORE_MODULES:
+            on = await ui.api.post(f"/api/plugins/{name}/enable")
+            assert on.status_code == 200, on.text
+        plugins = {p["name"]: p["status"] for p in (await ui.api.get("/api/plugins")).json()}
+        assert all(plugins[name] == "loaded" for name in CORE_MODULES), plugins
+
+        # Всё работает снова, с новой сессией
+        assert (await ui.api.get("/api/ssh/sessions")).json() == []
+        session_id = await ui.open_session(ssh_target.connection())
+        assert (await ui.exec(session_id, "echo back"))["stdout"] == "back"
+        listing = await ui.api.get(f"/api/sftp/sessions/{session_id}/list")
+        assert listing.status_code == 200, listing.text
+        info = await ui.api.get(f"/api/docker/sessions/{session_id}/info")
+        assert info.status_code == 200, info.text
+        await events.wait_for("metrics", server_ok)

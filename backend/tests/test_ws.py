@@ -22,6 +22,7 @@ from app import __version__
 from app.core.app import create_app
 from app.core.config import Settings, settings
 from app.core.event_bus import event_bus
+from app.plugins.manager import PLUGIN_STATUS_EVENT
 from app.plugins.ssh.manager import SSH_SESSION_EVENT
 from app.worker import WORKER_STATUS_EVENT, worker_manager
 from app.ws import METRICS_EVENT, MetricsSnapshot, ws_hub
@@ -223,7 +224,12 @@ async def test_ws_sends_hello_then_metrics(ws_url):
             "app": settings.APP_NAME,
             "version": __version__,
             "protocol": 1,
-            "streams": [WORKER_STATUS_EVENT, METRICS_EVENT, SSH_SESSION_EVENT],
+            "streams": [
+                WORKER_STATUS_EVENT,
+                METRICS_EVENT,
+                PLUGIN_STATUS_EVENT,
+                SSH_SESSION_EVENT,
+            ],  # fmt: skip
         }
 
         messages = [await recv_json(ws) for _ in range(5)]

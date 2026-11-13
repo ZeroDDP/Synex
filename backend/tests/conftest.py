@@ -17,6 +17,7 @@ from app.core.config import settings
 from app.core.errors import WorkerConnectionError
 from app.worker.client import WorkerClient
 from tests.fake_worker import FakeWorkerProtocol, FakeWorkerState
+from tests.plugin_package import make_plugins  # noqa: F401  (фикстура для всех тестов)
 
 FAKE_WORKER_SCRIPT = Path(__file__).with_name("fake_worker.py")
 

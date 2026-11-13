@@ -158,6 +158,8 @@ glibc 2.38 или новее (Ubuntu 24.04, Debian 13, Fedora 39 и новее).
 | GET | `/api/monitor/metrics` | Метрики серверов сейчас (то же, что `metrics` в `/ws`) |
 | GET | `/api/health` | Состояние бэкенда и воркера, загруженные плагины |
 | GET | `/api/plugins` | Плагины: версия, описание, зависимости, `status` и причина сбоя (см. ниже) |
+| POST | `/api/plugins/{name}/enable` | Включить плагин без перезапуска (вместе с зависимостями) |
+| POST | `/api/plugins/{name}/disable` | Выключить плагин без перезапуска: `?cascade=true` вместе с зависящими |
 | WS | `/ws` | Поток данных для UI: метрики серверов каждые 500 мс (см. ниже) |
 
 С `DEBUG=true` Swagger доступен на `/api/docs`.
@@ -521,6 +523,7 @@ POST /api/connections
 | `ssh.session` | сервер, при открытии и закрытии SSH-сессии | `{action: opened\|closed, session_id, host, port, username, connection_id, reason?}` |
 | `worker.status` | сервер, когда меняется состояние воркера | `{status, ...}`: `connected`, `connection_lost`, `worker_exited`, `worker_started` |
 | `sftp.transfer` | сервер, пока идёт передача файла | состояние передачи: `{id, status, bytes_done, bytes_total, percent, speed, ...}` (см. «Файлы на серверах») |
+| `plugin.status` | сервер, когда плагин включили, выключили или он упал | `{name, status, version, error}` (см. «Плагины на ходу») |
 | `ping` | UI | что угодно, вернётся в `pong` |
 | `pong` | сервер, в ответ на `ping` | `data` из `ping` |
 | `error` | сервер, если не разобрал сообщение UI | `{error, detail}`: `bad_message` или `unknown_type` |
@@ -621,6 +624,9 @@ ws.onmessage = (e) => console.log(JSON.parse(e.data));
 | 504 | `ssh_connect_timeout` | Сервер не ответил за `SSH_CONNECT_TIMEOUT` (20 с): адрес, порт, файрвол |
 | 502 | `worker_command_failed` | Воркер вернул ошибку |
 | 503 | `plugin_unavailable` | Плагин включён, но не загрузился (причина в `/api/plugins`) |
+| 404 | `plugin_disabled` | Плагин выключен: его эндпоинты закрыты до `POST /api/plugins/{name}/enable` |
+| 404 | `plugin_not_found` | Такого плагина нет или он не импортируется |
+| 409 | `plugin_in_use` | Выключить нельзя: от плагина зависят включённые (`?cascade=true` выключит и их) |
 | 503 | `worker_unavailable` | Воркер не запущен или IPC недоступен |
 | 503 | `keystore_unavailable` | Нет доступа к Credential Manager / неверный `KEYSTORE_MASTER_KEY` |
 | 504 | `ssh_exec_timeout` | Воркер не вернул результат команды |
@@ -693,8 +699,41 @@ tests/                 pytest; fake_worker.py имитирует synex_worker
 
 `status`: `loaded` работает; `failed` включён, но `on_load` упал или не загрузилась
 зависимость; `skipped` не установлен, не импортируется или нет зависимости;
-`disabled` установлен, но не включён в `PLUGINS_ENABLED`; `registered` ещё не загружен
-(приложение стартует).
+`disabled` установлен, но выключен (не в `PLUGINS_ENABLED` или через `/disable`);
+`registered` ещё не загружен (приложение стартует).
+
+### Плагины на ходу (шина данных)
+
+Модули включаются и выключаются на работающем backend, без перезапуска:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/plugins/docker/disable
+curl -X POST http://127.0.0.1:8000/api/plugins/docker/enable
+curl -X POST "http://127.0.0.1:8000/api/plugins/ssh/disable?cascade=true"
+```
+
+Ответ: `{"changed": ["docker"], "plugins": [...]}` (`changed`: что включилось или
+выключилось сейчас, `plugins`: как в `GET /api/plugins`).
+
+- Включение вызывает `on_load` плагина и его зависимостей и открывает его эндпоинты.
+  Подхватывается и пакет, который появился в `app/plugins/` после старта backend.
+  Если `on_load` упал, ответ 503 `plugin_unavailable` с причиной, остальные работают.
+- Выключение вызывает `on_unload`: плагин останавливает свою работу (`ssh` закрывает
+  все сессии, `sftp` отменяет передачи, `docker` закрывает живые логи, `monitor`
+  перестаёт опрашивать серверы). Его эндпоинты (HTTP и WebSocket) после этого отвечают
+  404 `plugin_disabled` и пропадают из `/api/docs`.
+- Если от плагина зависят включённые (от `ssh` зависят все модули серверов), ответ 409
+  `plugin_in_use`; `?cascade=true` выключает сначала их, потом его. Включение плагина
+  включает и то, от чего он зависит.
+- Каждая смена состояния уходит в шину событием `plugin.status`, хаб пересылает его в
+  `/ws`: `{"name": "docker", "status": "disabled", "version": "0.2.0", "error": null}`.
+  События, которые плагин объявил в `BasePlugin.events` (`ssh.session`,
+  `sftp.transfer`), идут в `/ws`, пока плагин включён.
+- `on_load` и `on_unload` плагина должны выдерживать повторный вызов: плагин можно
+  выключать и включать сколько угодно раз.
+
+Включение и выключение не меняют `PLUGINS_ENABLED`: после перезапуска backend
+включены плагины из настроек.
 
 ## Тесты
 
@@ -762,6 +801,9 @@ uv run pytest tests/test_real_worker.py -v
   воркер, новая сессия работает;
 - все плагины загружаются (`PLUGINS_ENABLED=*`); сохранённое подключение открывает
   сессию, а `connection_id` доходит до `/ws`;
+- критерий вехи B4: SSH, SFTP, мониторинг и Docker выключаются и включаются на
+  работающем backend, UI видит это в `/ws`, API выключенного модуля отвечает 404, после
+  включения всё снова работает (выключение `ssh` закрывает сессии, новая открывается);
 - git на сервере: репозиторий отстаёт от origin, `status`, `fetch` и деплой (`pull` и
   команда в папке репозитория), терминал сессии служебных команд не видит;
 - docker на сервере: контейнер из образа, собранного из пустого архива (без скачивания),

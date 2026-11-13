@@ -6,7 +6,6 @@ from app.plugins.sftp import service
 from app.plugins.sftp.routes import router
 from app.plugins.sftp.transfers import TRANSFER_EVENT
 from app.plugins.ssh.manager import SSH_SESSION_EVENT
-from app.ws import ws_hub
 
 
 class SftpPlugin(BasePlugin):
@@ -18,15 +17,14 @@ class SftpPlugin(BasePlugin):
     version = "0.1.0"
     description = "Файловый менеджер: файлы на серверах и передача с прогрессом"
     requires = ("ssh",)
+    events = (TRANSFER_EVENT,)  # прогресс передач в /ws
     router = router
 
     async def on_load(self) -> None:
         event_bus.subscribe(SSH_SESSION_EVENT, self._on_session)
-        ws_hub.forward(TRANSFER_EVENT)
 
     async def on_unload(self) -> None:
         event_bus.unsubscribe(SSH_SESSION_EVENT, self._on_session)
-        ws_hub.stop_forward(TRANSFER_EVENT)
         await service.shutdown()
 
     @staticmethod
