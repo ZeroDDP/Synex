@@ -133,6 +133,7 @@ glibc 2.38 или новее (Ubuntu 24.04, Debian 13, Fedora 39 и новее).
 | POST | `/api/docker/sessions/{id}/containers/{c}/{action}` | `start`, `stop`, `restart`, `pause`, `unpause`, `kill` (`?timeout=N` для stop/restart) |
 | DELETE | `/api/docker/sessions/{id}/containers/{c}` | Удалить контейнер: `?force=true&volumes=true` |
 | GET | `/api/docker/sessions/{id}/containers/{c}/logs` | Логи: `?tail=200&since=<next_since>` |
+| WS | `/api/docker/sessions/{id}/containers/{c}/logs/ws` | Живой лог контейнера: `?tail=200&since=` (см. ниже) |
 | GET | `/api/docker/sessions/{id}/stats` | CPU, память, сеть и диск запущенных контейнеров |
 | GET | `/api/docker/sessions/{id}/images` | Образы на сервере |
 | GET | `/api/git/sessions/{id}/status` | Репозиторий на сервере: `?path=~/app`, ветка, отставание, изменения |
@@ -349,9 +350,25 @@ POST /api/connections
   запущенного без `force`), это 409 `docker_container_conflict`.
 - `GET .../containers/{имя или ID}/logs?tail=200` отдаёт последние строки stdout и
   stderr контейнера по времени: `{container, lines: [{time, stream, text}],
-  next_since}`. Чтобы дочитывать новые строки (живой лог), UI раз в пару секунд
-  передаёт `since` = `next_since` прошлого ответа: уже показанные строки не повторяются.
-  `since` принимает и RFC3339, Unix-время или длительность (`10m`, `1h`).
+  next_since}`. `since` принимает `next_since` прошлого ответа (уже показанные строки
+  не повторяются), RFC3339, Unix-время или длительность (`10m`, `1h`).
+- Живой лог: WebSocket `.../containers/{имя или ID}/logs/ws?tail=200`. Сервер шлёт
+  `hello`, затем `logs` `{lines: [{time, stream, text}], next_since, truncated}`: сразу
+  последние `tail` строк, потом новые по мере появления. После переподключения UI
+  передаёт `?since=<последний next_since>` и не получает строки повторно. Сообщения в
+  том же конверте `{type, ts, data}`, что у `/ws`:
+
+  | type | data |
+  |---|---|
+  | `hello` | `{protocol, session_id, container, tail, interval_ms}` |
+  | `logs` | `{lines, next_since, truncated}`; `truncated: true`, если строк между опросами было больше 10 000 и старые пропущены |
+  | `error` | `{error, detail, fatal}`. `fatal: false`: временная помеха (сессия занята командой пользователя, демон не отвечает), поток продолжится сам. `fatal: true`: контейнера или Docker нет, подключение закрывается (код 4404 или 4403) |
+  | `closed` | `{reason}`: `session_closed` (SSH-сессию закрыли, код 1000) или `shutdown` (плагин или backend останавливается, код 1001) |
+  | `pong` | `data` из `ping` UI |
+
+  Docker в Rust-ядре ещё нет, а воркер отдаёт вывод команды только целиком, поэтому
+  поток собирается опросом `docker logs --since` раз в `DOCKER_LOGS_INTERVAL` (1 с).
+  Когда логи будет отдавать ядро, протокол для UI не изменится.
 - `GET .../stats`: один замер `docker stats` запущенных контейнеров (пара секунд):
   `cpu_percent` (100 = одно ядро), `memory_used`, `memory_limit`, `memory_percent`,
   `net_rx`, `net_tx`, `block_read`, `block_write` (байты), `pids`.
@@ -637,7 +654,8 @@ app/
     keys/              /api/keys/*
     connections/       /api/connections/*: store (connections.json), routes, schemas
     docker/            /api/docker/*: commands (команды docker и разбор вывода),
-                       service (выполнение в сессии, ошибки), routes, schemas
+                       service (выполнение в сессии, ошибки), logs (живой лог по
+                       WebSocket), routes, schemas
     git/               /api/git/*: commands (команды git и разбор вывода), service,
                        routes, schemas
     sftp/              /api/sftp/*: remote (файлы сервера через SFTP воркера), transfers
@@ -749,6 +767,9 @@ uv run pytest tests/test_real_worker.py -v
 - docker на сервере: контейнер из образа, собранного из пустого архива (без скачивания),
   список, логи, ошибка запуска и удаление. Нужен работающий Docker, иначе тест
   пропускается;
+- критерий MVP по Docker: три запущенных контейнера (образ собирается из `sh` и `sleep`
+  этой машины, без сети): логи каждого, живой лог по WebSocket без повторов и с
+  переподключением, `restart`, `stop`, `start`, `stats`;
 - файлы на сервере (SFTP воркера): папки, имена с пробелами, кавычками и кириллицей,
   загрузка и скачивание телом запроса, копирование и удаление папок, список на полторы
   тысячи файлов с русскими именами;
