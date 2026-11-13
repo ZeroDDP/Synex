@@ -45,9 +45,13 @@ async def run_docker(
     *,
     timeout: float | None = None,
     merge_stderr: bool = False,
+    wait: float | None = None,
 ) -> ServiceResult:
-    """`docker <args>` в сессии. Ошибку docker превращает в ошибку API (classify)."""
-    result = await _run(manager, session_id, args, timeout=timeout, merge_stderr=merge_stderr)
+    """`docker <args>` в сессии. Ошибку docker превращает в ошибку API (classify).
+    wait: сколько ждать занятую сессию (по умолчанию SSH_SERVICE_WAIT)."""
+    result = await _run(
+        manager, session_id, args, timeout=timeout, merge_stderr=merge_stderr, wait=wait
+    )
     error = classify(result)
     if error is not None:
         raise error
@@ -118,11 +122,12 @@ async def _run(
     *,
     timeout: float | None = None,
     merge_stderr: bool = False,
+    wait: float | None = None,
 ) -> ServiceResult:
     # DOCKER_COMMAND из настроек ("docker", "sudo -n docker") подставляется как есть
     command = " ".join([settings.DOCKER_COMMAND, *(shlex.quote(arg) for arg in args)])
     if merge_stderr:
         command += " 2>&1"
     return await manager.run_service(
-        session_id, command, timeout=timeout or settings.DOCKER_TIMEOUT, name="docker"
+        session_id, command, timeout=timeout or settings.DOCKER_TIMEOUT, wait=wait, name="docker"
     )

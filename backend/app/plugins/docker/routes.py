@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Path, Query
+from fastapi import APIRouter, Depends, Path, Query, WebSocket
 
 from app.core.config import settings
 from app.plugins.docker.commands import (
@@ -11,9 +11,9 @@ from app.plugins.docker.commands import (
     STATS_FORMAT,
     parse_containers,
     parse_images,
-    parse_logs,
     parse_stats,
 )
+from app.plugins.docker.logs import fetch_logs, serve_log_socket
 from app.plugins.docker.schemas import (
     CONTAINER_PATTERN,
     SINCE_PATTERN,
@@ -112,16 +112,26 @@ async def container_logs(
         ),
     ] = None,
 ) -> ContainerLogs:
-    args = ["logs", "--timestamps", "--tail", str(tail)]
-    if since is not None:
-        args += ["--since", since]
-    result = await run_docker(manager, session_id, [*args, container])
-    lines = parse_logs(result.stdout, result.stderr, since)
+    lines, next_since = await fetch_logs(manager, session_id, container, tail=tail, since=since)
     return ContainerLogs(
         container=container,
         lines=[LogLineInfo.from_line(line) for line in lines],
-        next_since=lines[-1].time if lines else since,
+        next_since=next_since,
     )
+
+
+@router.websocket("/sessions/{session_id}/containers/{container}/logs/ws")
+async def container_logs_stream(
+    websocket: WebSocket,
+    session_id: SessionId,
+    container: ContainerName,
+    manager: Manager,
+    tail: Annotated[int, Query(ge=0, le=10000)] = 200,
+    since: Annotated[str | None, Query(pattern=SINCE_PATTERN)] = None,
+) -> None:
+    """Живой лог контейнера: последние `tail` строк и новые по мере появления.
+    Протокол в app/plugins/docker/logs.py."""
+    await serve_log_socket(websocket, manager, session_id, container, tail, since)
 
 
 @router.post(
