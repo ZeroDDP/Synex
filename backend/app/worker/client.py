@@ -281,6 +281,7 @@ class WorkerClient:
             stderr=str(body.get("stderr") or "Unknown worker error"),
             stdout=str(body.get("stdout") or ""),
             exit_code=_as_int(body.get("exit_code"), default=1),
+            payload=body,
         )
 
     async def request_raw(

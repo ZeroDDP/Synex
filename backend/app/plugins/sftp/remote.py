@@ -1,18 +1,23 @@
-"""Файлы на сервере через SFTP Rust-воркера (действия sftp_* сборки 2026-11).
+"""Файлы на сервере через SFTP Rust-воркера (действия sftp_*).
 
-Воркер умеет немного: список папки, создать и удалить папку, удалить, переместить и
-скопировать файл, загрузить и скачать файл целиком. Остальное собирается здесь:
+Воркер умеет: список папки, сведения об одном пути (sftp_stat, с 2026-11-14), создать и
+удалить папку, удалить, переместить и скопировать файл, загрузить и скачать файл
+целиком. Остальное собирается здесь:
 
 * домашняя папка: `pwd` служебной командой (служебные команды идут из неё), пути в
   ответах всегда абсолютные;
-* сведения о файле: строка из списка его папки;
-* куда ведёт ссылка: только «на папку или нет» (пробный список), не больше
-  LINK_PROBES ссылок на папку списка;
-* тексты ошибок воркера ("No such file", "Permission denied", "Failure") становятся
-  ошибками API, а то, что воркер не различает (папка не пуста, файл уже есть), backend
-  проверяет до операции;
-* перемещение: воркер не сообщает причину отказа, поэтому место назначения проверяется
-  заранее, а занятое при overwrite освобождается;
+* сведения о файле: sftp_stat; у сборок до 2026-11-14 его нет, тогда строка из списка
+  папки файла (что умеет сборка, запоминается на сессию);
+* записи списка: размер, права, время изменения, владелец (uid/gid) и куда ведёт
+  ссылка (у старых сборок только размер и права);
+* ссылка на папку или нет: пробный список, не больше LINK_PROBES ссылок на папку списка;
+* ошибки воркера: код в начале текста (sftp_not_found, sftp_permission_denied,
+  sftp_exists, sftp_not_a_directory, sftp_unavailable, sftp_failed; с 2026-11-14) или,
+  у старых сборок, тексты статусов SFTP ("No such file", "Permission denied",
+  "Failure"). То, что воркер не различает (папка не пуста), backend проверяет до
+  операции;
+* перемещение: место назначения проверяется заранее, а занятое при overwrite
+  освобождается (SFTP-переименование не заменяет файл);
 * копирование папки: `cp -R` служебной командой (воркер копирует только файлы), и после
   копирования результат проверяется: воркер теряет код возврата `cp`;
 * контрольная сумма файла: `sha256sum`, `shasum -a 256` или `openssl` на сервере, если
@@ -26,8 +31,8 @@ import json
 import re
 import shlex
 import stat
-from dataclasses import dataclass, field
-from datetime import datetime
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 import structlog
@@ -71,7 +76,11 @@ class Entry:
     size: int | None = None
     mode: int | None = None  # биты прав (0o644), без типа файла
     target_type: TargetType | None = None  # куда ведёт ссылка: на папку или нет
-    modified_at: datetime | None = None  # SFTP воркера время изменения не отдаёт
+    # Время изменения, владелец и цель ссылки: с воркера 2026-11-14, у старых сборок None
+    modified_at: datetime | None = None
+    uid: int | None = None
+    gid: int | None = None
+    link_target: str | None = None
 
     @property
     def is_dir(self) -> bool:
@@ -161,6 +170,8 @@ class RemoteFS:
         target = paths.normalize(path, home)
         try:
             entries = await self._list(session_id, target)
+        except SftpNotADirectoryError:
+            raise SftpNotADirectoryError(f"{target} is not a directory") from None
         except SftpNotFoundError:
             entry = await self._find(session_id, target)
             if entry is not None and not entry.is_dir:
@@ -367,6 +378,9 @@ class RemoteFS:
     async def temp_size(self, plan: UploadPlan) -> int | None:
         """Сколько уже записано на сервер. None, если сессия занята (не ждём)."""
         try:
+            if self._stat_supported(plan.session_id) is not False:
+                entry = await self._stat(plan.session_id, plan.temp_file, wait=0)
+                return entry.size if entry is not None else None
             entries = await self._list(plan.session_id, plan.temp_dir, wait=0)
         except AppError:
             return None
@@ -428,30 +442,55 @@ class RemoteFS:
             raise SftpCommandError(f"The worker returned an unreadable listing of {path}") from None
         entries = []
         for item in raw if isinstance(raw, list) else []:
+            if not isinstance(item, dict):
+                continue
             name = str(item.get("name") or "")
             if not name or name in (".", ".."):
                 continue
-            entries.append(
-                Entry(
-                    name=name,
-                    path=paths.join(path, name),
-                    type=_TYPES.get(str(item.get("Type")), "other"),
-                    size=_as_int(item.get("weight")),
-                    mode=_mode(str(item.get("rights") or "")),
-                )
-            )
+            entries.append(_entry(item, name, paths.join(path, name)))
         return entries
 
     async def _find(self, session_id: str, path: str) -> Entry | None:
-        """Строка о path из списка его папки; None, если такого нет."""
+        """Сведения о path (sftp_stat или строка из списка его папки); None, если его нет."""
         directory = paths.parent(path)
         if directory is None:
             return Entry(name="/", path="/", type="dir")
+        if self._stat_supported(session_id) is not False:
+            try:
+                return await self._stat(session_id, path)
+            except _NoStatError:
+                pass  # сборка воркера до 2026-11-14: дальше через список папки
         try:
             entries = await self._list(session_id, directory)
-        except SftpNotFoundError:
+        except (SftpNotFoundError, SftpNotADirectoryError):
             return None
         return next((e for e in entries if e.name == paths.name(path)), None)
+
+    async def _stat(self, session_id: str, path: str, *, wait: float | None = None) -> Entry | None:
+        """sftp_stat (без перехода по ссылке). None, если пути нет; _NoStatError, если сборка
+        воркера sftp_stat не знает."""
+        try:
+            payload = await self._call(session_id, "sftp_stat", {"remote_path": path}, wait=wait)
+        except SftpUnavailableError as e:
+            if "Unknown action" not in e.detail:
+                raise
+            self._cache.setdefault(session_id, _SessionCache()).unavailable = None
+            self._cache[session_id].extra["stat"] = False
+            raise _NoStatError from None
+        except (SftpNotFoundError, SftpNotADirectoryError):
+            return None
+        self._cache.setdefault(session_id, _SessionCache()).extra["stat"] = True
+        try:
+            item = json.loads(str(payload.get("stdout") or "{}"))
+        except ValueError:
+            raise SftpCommandError(f"The worker returned unreadable details of {path}") from None
+        if not isinstance(item, dict):
+            raise SftpCommandError(f"The worker returned unreadable details of {path}")
+        return _entry(item, paths.name(path) or "/", path)
+
+    def _stat_supported(self, session_id: str) -> bool | None:
+        cached = self._cache.get(session_id)
+        return None if cached is None else cached.extra.get("stat")
 
     async def _require_dir(self, session_id: str, path: str) -> None:
         entry = await self._find(session_id, path)
@@ -503,7 +542,7 @@ class RemoteFS:
                 except AppError:
                     pass
                 else:
-                    entry = Entry(**{**entry.__dict__, "target_type": "dir"})
+                    entry = replace(entry, target_type="dir")
             result.append(entry)
         return result
 
@@ -568,15 +607,43 @@ class RemoteFS:
                 del self._cache[session_id]
 
 
+class _NoStatError(Exception):
+    """Сборка воркера не знает sftp_stat."""
+
+
+# Коды ошибок воркера (с 2026-11-14) в начале stderr: "sftp_not_found: ..."
+_CODE_RE = re.compile(r"^(sftp_[a-z_]+):\s*")
+
+
 def _translate(stderr: str, payload: dict[str, Any]) -> AppError:
-    """Ошибка воркера → ошибка API. Воркер пишет "SSH internal error: Failed to ...:
-    <статус SFTP>: <статус SFTP>"; статусы сервера: No such file, Permission denied,
-    Failure (всё остальное)."""
+    """Ошибка воркера → ошибка API. С 2026-11-14 воркер ставит код в начало:
+    "sftp_not_found: Failed to ...: No such file"; старые сборки писали только текст:
+    "SSH internal error: Failed to ...: <статус SFTP>" (No such file, Permission denied,
+    Failure)."""
     message = stderr.removeprefix("SSH internal error: ").strip()
+    code = ""
+    found = _CODE_RE.match(message)
+    if found is not None:
+        code, message = found.group(1), message[found.end() :]
     lower = message.lower()
     where = payload.get("remote_path") or payload.get("local_path") or ""
     if "failed to open local file" in lower or "failed to create local file" in lower:
         return SftpLocalError(f"This computer: {message}")
+    if code == "sftp_not_found":
+        return SftpNotFoundError(f"{where} not found on the server ({message})")
+    if code == "sftp_permission_denied":
+        return SftpPermissionError(f"No permission on the server for {where} ({message})")
+    if code == "sftp_exists":
+        target = payload.get("destination_path") or where
+        return SftpTargetExistsError(f"{target} already exists on the server ({message})")
+    if code == "sftp_not_a_directory":
+        return SftpNotADirectoryError(f"{where} is not a directory ({message})")
+    if code == "sftp_unavailable":
+        return SftpUnavailableError(
+            f"The SSH server does not offer SFTP ({message}). On the server, "
+            "/etc/ssh/sshd_config needs a line like 'Subsystem sftp internal-sftp' (then "
+            "reload sshd and open a new session)"
+        )
     if lower.startswith("unknown action"):
         # Старая сборка synex_worker (например, .exe до SFTP) не знает действий sftp_*
         return SftpUnavailableError(
@@ -598,6 +665,25 @@ def _translate(stderr: str, payload: dict[str, Any]) -> AppError:
     error = SftpCommandError(f"The server refused the operation: {message or 'no reason given'}")
     error.reason = f": {message}" if message else ""
     return error
+
+
+def _entry(item: dict[str, Any], name: str, path: str) -> Entry:
+    """Запись из ответа воркера: size (до 2026-11-14 weight), rights, mtime, uid, gid,
+    link_target."""
+    size = item.get("size", item.get("weight"))
+    mtime = _as_int(item.get("mtime"))
+    link = item.get("link_target")
+    return Entry(
+        name=name,
+        path=path,
+        type=_TYPES.get(str(item.get("Type")), "other"),
+        size=_as_int(size),
+        mode=_mode(str(item.get("rights") or "")),
+        modified_at=datetime.fromtimestamp(mtime, UTC) if mtime is not None else None,
+        uid=_as_int(item.get("uid")),
+        gid=_as_int(item.get("gid")),
+        link_target=link if isinstance(link, str) and link else None,
+    )
 
 
 def _mode(rights: str) -> int | None:

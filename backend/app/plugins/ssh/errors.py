@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from app.core.errors import AppError
 
 
@@ -46,3 +48,29 @@ class SSHSessionBusyError(AppError):
 
     code = "ssh_session_busy"
     status_code = 409
+
+
+class SSHHostKeyUnknownError(AppError):
+    """Ключ сервера ещё не подтверждён (TOFU): UI показывает отпечаток пользователю,
+    сохраняет его (POST /api/ssh/known-hosts) и подключается снова."""
+
+    code = "ssh_host_key_unknown"
+    status_code = 409
+
+    def __init__(self, detail: str, host_key: dict[str, Any]) -> None:
+        super().__init__(detail)
+        self.host_key = host_key
+        self.extra = {"host_key": host_key}
+
+
+class SSHHostKeyMismatchError(AppError):
+    """Ключ сервера не совпал с подтверждённым: подключение не продолжается и само не
+    повторяется. Сохранённый отпечаток меняет только пользователь (replace=true)."""
+
+    code = "ssh_host_key_mismatch"
+    status_code = 409
+
+    def __init__(self, detail: str, host_key: dict[str, Any]) -> None:
+        super().__init__(detail)
+        self.host_key = host_key
+        self.extra = {"host_key": host_key}

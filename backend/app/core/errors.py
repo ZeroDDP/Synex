@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -8,13 +10,15 @@ logger = structlog.get_logger()
 
 
 class AppError(Exception):
-    """Базовая ошибка приложения. Превращается в JSON {"error", "detail"}."""
+    """Базовая ошибка приложения. Превращается в JSON {"error", "detail"} и поля extra
+    (если ошибке есть что добавить, например отпечаток ключа сервера)."""
 
     code = "app_error"
     status_code = 400
 
     def __init__(self, detail: str) -> None:
         self.detail = detail
+        self.extra: dict[str, Any] = {}
         super().__init__(detail)
 
 
@@ -48,11 +52,20 @@ class WorkerCommandError(WorkerError):
     code = "worker_command_failed"
     status_code = 502
 
-    def __init__(self, action: str, stderr: str, stdout: str = "", exit_code: int = 1) -> None:
+    def __init__(
+        self,
+        action: str,
+        stderr: str,
+        stdout: str = "",
+        exit_code: int = 1,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
         self.action = action
         self.stderr = stderr
         self.stdout = stdout
         self.exit_code = exit_code
+        # Ответ воркера целиком: у ssh_connect в нём отпечаток ключа сервера
+        self.payload: dict[str, Any] = payload or {}
         super().__init__(stderr or f"Worker action '{action}' failed")
 
 
@@ -62,7 +75,7 @@ def register_error_handlers(app: FastAPI) -> None:
         logger.warning("Request failed", path=request.url.path, error=exc.code, detail=exc.detail)
         return JSONResponse(
             status_code=exc.status_code,
-            content={"error": exc.code, "detail": exc.detail},
+            content={**exc.extra, "error": exc.code, "detail": exc.detail},
         )
 
     @app.exception_handler(Exception)

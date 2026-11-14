@@ -5,11 +5,17 @@
 ключи генерируются ssh-keygen во временной папке, вход по ключу под текущим
 пользователем, конфиг не трогает систему (StrictModes no, UsePAM no). Обычный ключ и
 ключ с парольной фразой; пароль включается только для внешнего сервера.
+
+Воркер (с 2026-11-14) подключается только к серверу с подтверждённым ключом (TOFU).
+Отпечаток ключа своего sshd известен заранее (из host.pub); у внешнего сервера его
+узнаёт первое подключение (фикстура ui в conftest.py), как это делает UI.
 """
 
 from __future__ import annotations
 
+import base64
 import getpass
+import hashlib
 import os
 import shutil
 import socket
@@ -32,12 +38,21 @@ class SSHTarget:
     key_path: str
     encrypted_key_path: str | None = None  # ключ с парольной фразой PASSPHRASE
     password: str | None = None
+    # Отпечаток ключа сервера (SHA256:...), если известен заранее (свой sshd)
+    host_key_fingerprint: str | None = None
 
     def connection(self, **auth: object) -> dict:
         """Тело POST /api/ssh/sessions (по умолчанию вход по обычному ключу)."""
         body: dict = {"host": self.host, "port": self.port, "username": self.username}
         body.update(auth or {"key_path": self.key_path})
         return body
+
+
+def public_key_fingerprint(public_key_line: str) -> str:
+    """Отпечаток OpenSSH (как `ssh-keygen -lf`) по строке открытого ключа "тип base64 ..."."""
+    blob = base64.b64decode(public_key_line.split()[1])
+    digest = base64.b64encode(hashlib.sha256(blob).digest()).decode().rstrip("=")
+    return f"SHA256:{digest}"
 
 
 def external_target() -> SSHTarget | None:
@@ -125,6 +140,7 @@ class LocalSSHD:
             username=getpass.getuser(),
             key_path=str(d / "client"),
             encrypted_key_path=str(d / "client_enc"),
+            host_key_fingerprint=public_key_fingerprint((d / "host.pub").read_text()),
         )
 
     def _wait_ready(self, port: int, timeout: float = 10.0) -> None:

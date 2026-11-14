@@ -93,7 +93,9 @@ Backend проверяется и без UI:
   `curl -X POST http://127.0.0.1:8000/api/plugins/docker/disable`);
 - с `DEBUG=true` в `backend/.env` на http://127.0.0.1:8000/api/docs есть Swagger: там
   можно сохранить подключение (`POST /api/connections`), открыть SSH-сессию
-  (`POST /api/connections/{id}/connect`), выполнить команду
+  (`POST /api/connections/{id}/connect`; первый раз ответ 409 с отпечатком ключа
+  сервера: подтвердите его через `POST /api/ssh/known-hosts` и подключитесь снова),
+  выполнить команду
   (`POST /api/ssh/sessions/{id}/exec`), посмотреть файлы сервера
   (`GET /api/sftp/sessions/{id}/list`) и контейнеры
   (`GET /api/docker/sessions/{id}/containers`);
@@ -159,8 +161,10 @@ npm run build
 | Backend: `Invalid settings in backend/.env` | В `.env` неверное значение; в сообщении названа настройка. Исправьте или очистите её |
 | В логе backend `forbidden_origin` | UI открыт не с http://localhost:5173 (или http://127.0.0.1:5173). Откройте этот адрес или добавьте свой в `ALLOWED_ORIGINS` |
 | В `/api/plugins` нет `connections`, `docker`, `git`, `sftp` | В `backend/.env` старый `PLUGINS_ENABLED`: поставьте `*` |
+| Подключение отвечает 409 `ssh_host_key_unknown` | Так и должно быть при первом подключении к серверу: воркер подключается только к серверу с подтверждённым ключом. Сверьте отпечаток из ответа (на сервере: `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`) и подтвердите его: `POST /api/ssh/known-hosts`, затем подключитесь снова |
+| Подключение отвечает 409 `ssh_host_key_mismatch` | Ключ сервера сменился: сервер переустановили или это подмена. Не подключайтесь, пока не выясните причину. Если смена ожидаемая, подтвердите новый ключ: `POST /api/ssh/known-hosts` с `replace: true` |
 | Модуль отвечает 404 `plugin_disabled` | Его выключили на ходу: `POST /api/plugins/<имя>/enable` (или перезапустите backend) |
-| Файлы: 502 `sftp_unavailable` и в тексте `synex_worker build has no SFTP` | Воркер собран до SFTP (так у `synex_worker.exe` в репозитории на 13.11.2026). Соберите его: `cd core && cargo build --release` и перезапустите backend |
+| Файлы: 502 `sftp_unavailable` и в тексте `synex_worker build has no SFTP` | Старая сборка воркера без SFTP. Обновите репозиторий (`git pull`) или соберите воркер: `cd core && cargo build --release`, затем перезапустите backend |
 | Файлы: 502 `sftp_unavailable` и в тексте `Subsystem sftp` | На сервере выключен SFTP: добавьте в `/etc/ssh/sshd_config` строку `Subsystem sftp internal-sftp` и перезапустите sshd |
 | Linux: `GLIBC_2.38 not found` | Готовый воркер не подходит: соберите его (`cd core && cargo build --release`) |
 | macOS: воркер сразу завершается с кодом -9 | Карантин macOS: `xattr -d com.apple.quarantine <путь к synex_worker>` или соберите воркер сами |

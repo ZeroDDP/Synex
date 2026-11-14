@@ -46,6 +46,7 @@ class LocalEntry:
     mode: int | None
     target_type: Literal["file", "dir"] | None
     hidden: bool
+    link_target: str | None = None
 
     @property
     def is_dir(self) -> bool:
@@ -240,7 +241,15 @@ def _entry(item: os.DirEntry[str]) -> LocalEntry:
         mode=info.st_mode if info is not None else None,
         target_type=target_type,  # type: ignore[arg-type]
         hidden=_hidden(item, info),
+        link_target=_link_target(item.path) if is_link else None,
     )
+
+
+def _link_target(path: str) -> str | None:
+    try:
+        return os.readlink(path)
+    except (OSError, ValueError):
+        return None
 
 
 def _hidden(item: os.DirEntry[str], info: os.stat_result | None) -> bool:

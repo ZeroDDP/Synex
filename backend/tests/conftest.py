@@ -42,12 +42,13 @@ def default_app_settings(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def isolated_keystore(monkeypatch, tmp_path: Path) -> Path:
-    """Тесты никогда не трогают настоящее хранилище ключей, сохранённые подключения и
-    системный keychain."""
+    """Тесты никогда не трогают настоящее хранилище ключей, сохранённые подключения,
+    доверенные ключи серверов и системный keychain."""
     path = tmp_path / "keystore" / "keys.json"
     monkeypatch.setattr(settings, "KEYSTORE_PATH", path)
     monkeypatch.setattr(settings, "KEYSTORE_MASTER_KEY", SecretStr(Fernet.generate_key().decode()))
     monkeypatch.setattr(settings, "CONNECTIONS_PATH", path.with_name("connections.json"))
+    monkeypatch.setattr(settings, "KNOWN_HOSTS_PATH", path.with_name("known_hosts.json"))
     return path
 
 

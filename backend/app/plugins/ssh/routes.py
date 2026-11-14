@@ -7,9 +7,13 @@ from fastapi import APIRouter, Depends, Path, Query, WebSocket
 from pydantic import SecretStr
 
 from app.api.deps import Keys
+from app.plugins.ssh.known_hosts import KnownHost, get_known_hosts
 from app.plugins.ssh.manager import ConnectParams, ExecResult, SSHSessionManager, ssh_manager
 from app.plugins.ssh.schemas import (
     SESSION_ID_PATTERN,
+    KnownHostChange,
+    KnownHostInfo,
+    KnownHostRequest,
     SSHCommandRequest,
     SSHConnectRequest,
     SSHConnectResponse,
@@ -38,6 +42,14 @@ SessionId = Annotated[str, Path(pattern=SESSION_ID_PATTERN)]
 
 CONNECT_ERRORS = {
     404: {"description": "Ключа key_id нет в хранилище"},
+    409: {
+        "description": (
+            "Ключ сервера не подтверждён (ssh_host_key_unknown) или изменился "
+            "(ssh_host_key_mismatch). В ответе host_key: {host, port, fingerprint, key_type, "
+            "expected_fingerprint?}. UI показывает отпечаток, после подтверждения "
+            "пользователем сохраняет его (POST /api/ssh/known-hosts) и подключается снова"
+        )
+    },
     422: {"description": "Неверные параметры (например, нет файла ключа)"},
     429: {"description": "Открыто слишком много сессий (SSH_MAX_SESSIONS)"},
     502: {"description": "Воркер не смог подключиться: хост недоступен, ключ или пароль"},
@@ -219,7 +231,65 @@ async def status(
     return SSHStatusResponse(connected=True, sessions=len(manager), **fields)
 
 
+# ------------------------------------------------- доверенные ключи (TOFU)
+
+
+@router.get(
+    "/known-hosts",
+    response_model=list[KnownHostInfo],
+    summary="Доверенные ключи серверов",
+)
+async def list_known_hosts() -> list[KnownHostInfo]:
+    """Отпечатки ключей серверов, которые подтвердил пользователь (по host:port)."""
+    return [_known(host) for host in await get_known_hosts().list_hosts()]
+
+
+@router.post(
+    "/known-hosts",
+    response_model=KnownHostChange,
+    status_code=201,
+    summary="Доверять ключу сервера",
+    responses={
+        409: {
+            "description": (
+                "Для сервера уже сохранён другой отпечаток (ssh_known_host_conflict). "
+                "Заменить его можно только с replace=true по явному действию пользователя"
+            )
+        }
+    },
+)
+async def trust_host_key(request: KnownHostRequest) -> KnownHostChange:
+    """Вызывать только после того, как пользователь увидел отпечаток (`host_key` в ответе
+    409 на подключение) и подтвердил его. Затем подключение повторяется."""
+    record, changed = await get_known_hosts().trust(
+        request.host,
+        request.port,
+        request.fingerprint,
+        request.key_type,
+        replace=request.replace,
+    )
+    return KnownHostChange(changed=changed, known_host=_known(record))
+
+
+@router.delete(
+    "/known-hosts",
+    response_model=KnownHostInfo,
+    summary="Забыть ключ сервера",
+    responses={404: {"description": "Для сервера нет сохранённого ключа"}},
+)
+async def forget_host_key(
+    host: Annotated[str, Query(min_length=1, max_length=255)],
+    port: Annotated[int, Query(ge=1, le=65535)] = 22,
+) -> KnownHostInfo:
+    """Следующее подключение к серверу снова попросит подтвердить его ключ."""
+    return _known(await get_known_hosts().remove(host, port))
+
+
 # --------------------------------------------------------------- helpers
+
+
+def _known(record: KnownHost) -> KnownHostInfo:
+    return KnownHostInfo(**record.model_dump())
 
 
 async def _open(request: SSHConnectRequest, manager: SSHSessionManager, keys: Keys) -> SSHSession:

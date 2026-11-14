@@ -79,6 +79,9 @@ class SSHSession:
     buffer: OutputBuffer
     key_id: str | None = None
     connection_id: str | None = None  # сохранённое подключение, из которого открыта
+    # Ключ сервера, с которым воркер подключился: {"fingerprint", "key_type"}.
+    # None у сборок воркера без проверки ключа (до 2026-11-14).
+    host_key: dict[str, str] | None = None
     cwd: str | None = None  # None = домашняя папка, путь ещё не известен
     marker: str = field(default_factory=new_marker)
     created_at: datetime = field(default_factory=_now)
@@ -102,6 +105,7 @@ class SSHSession:
             "auth": self.auth,
             "key_id": self.key_id,
             "connection_id": self.connection_id,
+            "host_key": self.host_key,
             "cwd": self.cwd,
             "created_at": self.created_at,
             "last_activity_at": self.last_activity_at,

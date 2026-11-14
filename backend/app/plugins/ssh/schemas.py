@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, SecretStr, field_validator, model_validator
 
+from app.plugins.ssh.known_hosts import FINGERPRINT_PATTERN
+
 SESSION_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
 
 
@@ -97,6 +99,11 @@ class SSHConnectResponse(BaseModel):
 AuthMethodName = Literal["key_id", "key_path", "password"]
 
 
+class HostKeyInfo(BaseModel):
+    fingerprint: str = Field(..., description="Отпечаток ключа сервера, SHA256:<base64>")
+    key_type: str = Field(default="", description="Тип ключа, например ssh-ed25519")
+
+
 class SSHSessionInfo(BaseModel):
     session_id: str
     host: str
@@ -106,6 +113,10 @@ class SSHSessionInfo(BaseModel):
     key_id: str | None = None
     connection_id: str | None = Field(
         default=None, description="Сохранённое подключение (/api/connections), если из него"
+    )
+    host_key: HostKeyInfo | None = Field(
+        default=None,
+        description="Ключ сервера, с которым воркер подключился (null: сборка воркера без TOFU)",
     )
     cwd: str | None = Field(default=None, description="Текущая директория (None = домашняя)")
     created_at: datetime
@@ -200,3 +211,46 @@ class SSHOutputResponse(BaseModel):
     gap: bool = Field(..., description="Часть записей после since уже вытеснена из буфера")
     first_seq: int = Field(..., description="Самая старая запись в буфере")
     last_seq: int = Field(..., description="Последняя запись в буфере")
+
+
+# ------------------------------------------------------------ known hosts (TOFU)
+
+
+class KnownHostInfo(BaseModel):
+    host: str
+    port: int
+    fingerprint: str = Field(..., description="Подтверждённый отпечаток, SHA256:<base64>")
+    key_type: str | None = None
+    added_at: datetime
+    updated_at: datetime
+
+
+class KnownHostRequest(BaseModel):
+    host: str = Field(..., min_length=1, max_length=255, description="IP или домен сервера")
+    port: int = Field(default=22, ge=1, le=65535)
+    fingerprint: str = Field(
+        ...,
+        pattern=FINGERPRINT_PATTERN,
+        description="Отпечаток, который подтвердил пользователь (из host_key в ответе 409)",
+    )
+    key_type: str | None = Field(default=None, max_length=64, description="Тип ключа из 409")
+    replace: bool = Field(
+        default=False,
+        description=(
+            "Заменить другой сохранённый отпечаток. Только по явному действию пользователя: "
+            "ключ сервера сменился (переустановка) и пользователь это подтвердил"
+        ),
+    )
+
+    @field_validator("host")
+    @classmethod
+    def _strip_host(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be empty")
+        return value
+
+
+class KnownHostChange(BaseModel):
+    changed: bool = Field(..., description="Запись появилась или изменилась")
+    known_host: KnownHostInfo

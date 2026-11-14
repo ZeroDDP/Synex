@@ -1,13 +1,15 @@
-"""Фейковый synex_worker для тестов. Повторяет поведение сборки от 2026-11-03.
+"""Фейковый synex_worker для тестов. Повторяет поведение сборок от 2026-11-03 до 2026-11-14.
 
 Как настоящий воркер:
   * `id` запроса это ключ SSH-сессии: ssh_connect с id X создаёт сессию X, ssh_exec,
     monitor_get_values и ssh_disconnect с тем же id работают с ней;
   * сессии принадлежат IPC-подключению и закрываются вместе с ним;
   * запросы одного подключения выполняются по очереди (sequential=False отключает);
-  * exit_code всегда 0 (lose_exit_status=False отдаёт настоящий код);
+  * exit_code всегда 0, как до 2026-11-14 (lose_exit_status=False отдаёт настоящий код);
   * stdout отдаётся как есть, с переводом строки в конце;
-  * при ssh_connect печатает в stdout строку лога с паролем и парольной фразой.
+  * при ssh_connect печатает в stdout строку лога с паролем и парольной фразой;
+  * ключ сервера (TOFU, с 2026-11-14): FakeWorkerState.host_key_mode, отпечаток
+    воображаемого сервера даёт fake_host_fingerprint(host, port).
 
 Используется двумя способами:
   * как asyncio.Protocol внутри теста (TCP, Unix socket или Named Pipe);
@@ -26,11 +28,11 @@ monitor_get_values, как сборка с исправленным CPU: пер�
 загрузки сервера» (BOOT_CPU), следующие 10, 11, 12 ... Хост "no-proc" имитирует сервер,
 где команда метрик не выполнилась; FakeWorkerState.monitor_error делает ok=false.
 
-SFTP (sftp_*) как сборка от 2026-11-12: тексты ошибок, "success" у sftp_download_file,
-move без текста ошибки, copy папки без -r «успешно» ничего не копирует. Файловая
-система сервера: с эмулятором shell это его виртуальная ФС (FakeShell.root, домашняя
-папка /home/synex), иначе настоящая ФС этой машины (домашняя папка home). Пути, которые
-не начинаются с "/", считаются от домашней папки, "~" воркер не раскрывает.
+SFTP (sftp_*) как сборка 2026-11-14 или 2026-11-12 (FakeWorkerState.sftp_build, см.
+FakeSftp). Файловая система сервера: с эмулятором shell это его виртуальная ФС
+(FakeShell.root, домашняя папка /home/synex), иначе настоящая ФС этой машины (домашняя
+папка home). Пути, которые не начинаются с "/", считаются от домашней папки, "~" воркер
+не раскрывает.
 FakeWorkerState.sftp_delay: пауза на каждый мегабайт передачи (проверка прогресса).
 
 Служебные action для тестов клиента:
@@ -47,6 +49,9 @@ FAKE_WORKER_ACCEPT_ONCE=1: после первого клиента перест
 from __future__ import annotations
 
 import asyncio
+import base64
+import contextlib
+import hashlib
 import json
 import os
 import posixpath
@@ -56,7 +61,7 @@ import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import msgpack
 
@@ -68,6 +73,15 @@ BOOT_CPU = 2.63  # CPU в первом замере сессии: среднее
 MEM_TOTAL_KB = 2014404
 PASSPHRASE = "right-phrase"
 NO_SESSION = "Session dont founded by key. Create session first!"
+FAKE_KEY_TYPE = "ssh-ed25519"
+
+
+def fake_host_fingerprint(host: str, port: int) -> str:
+    """Отпечаток ключа воображаемого сервера host:port (как у OpenSSH: SHA256 и base64
+    без "=")."""
+    digest = hashlib.sha256(f"fake host key {host}:{port}".encode()).digest()
+    return "SHA256:" + base64.b64encode(digest).decode().rstrip("=")
+
 
 # Пример строки лога tracing настоящего воркера (с ANSI-цветами)
 LOG_LINE = (
@@ -81,11 +95,18 @@ def frame(message: Any) -> bytes:
     return len(data).to_bytes(4, "big") + data
 
 
-def reply(msg_id: str, status: str, stdout: str = "", stderr: str = "", exit_code: int = 0):
+def reply(
+    msg_id: str,
+    status: str,
+    stdout: str = "",
+    stderr: str = "",
+    exit_code: int = 0,
+    **extra: Any,
+) -> dict[str, Any]:
     return {
         "id": msg_id,
         "status": status,
-        "payload": {"stdout": stdout, "stderr": stderr, "exit_code": exit_code},
+        "payload": {"stdout": stdout, "stderr": stderr, "exit_code": exit_code, **extra},
     }
 
 
@@ -144,6 +165,19 @@ class FakeWorkerState:
         self.sftp_fail: dict[str, str] = {}  # action -> текст ошибки (сбой по заказу)
         # Сбой по условию: (action, payload) -> текст ошибки или None (без сбоя)
         self.sftp_fail_if: Callable[[str, dict[str, Any]], str | None] | None = None
+        # Проверка ключа сервера (TOFU):
+        #   "required" как сборка 2026-11-14: без host_key_fingerprint ответ host_key_unknown;
+        #   "optional" (по умолчанию) проверяет только переданный отпечаток: тестам, которым
+        #     TOFU не важен, не нужно подтверждать ключи;
+        #   "none" как сборки до 2026-11-14: поле не читает, ключ не сообщает.
+        # host_keys подменяет ключ сервера: (host, port) -> отпечаток.
+        self.host_key_mode: Literal["required", "optional", "none"] = "optional"
+        # Какую сборку SFTP повторять (см. FakeSftp)
+        self.sftp_build: Literal["2026-11-14", "2026-11-12"] = "2026-11-14"
+        self.host_keys: dict[tuple[str, int], str] = {}
+
+    def host_fingerprint(self, host: str, port: int) -> str:
+        return self.host_keys.get((host, port)) or fake_host_fingerprint(host, port)
 
     def remote(self, path: str) -> Path:
         """Файл сервера для пути SFTP."""
@@ -335,8 +369,26 @@ class FakeWorkerProtocol(asyncio.Protocol):
             self.state.connect_key_files.append(key)
 
         error: str | None = None
-        if connection.get("host") == "unreachable":
+        host, port = str(connection.get("host")), int(connection.get("port") or 22)
+        actual = self.state.host_fingerprint(host, port)
+        expected = connection.get("host_key_fingerprint")
+        key_reply: dict[str, Any] = {"fingerprint": actual, "key_type": FAKE_KEY_TYPE}
+        if self.state.host_key_mode == "none":
+            expected, key_reply = None, {}
+        if host == "unreachable":
             error = "Connection failed: Connection refused"
+        elif expected is None and self.state.host_key_mode == "required":
+            self.send(
+                reply(msg_id, "error", stderr=f"host_key_unknown: unknown host key {actual}",
+                      exit_code=1, **key_reply)
+            )  # fmt: skip
+            return
+        elif expected is not None and expected != actual:
+            self.send(
+                reply(msg_id, "error", stderr=f"host_key_mismatch: expected {expected}, got "
+                      f"{actual}", exit_code=1, expected_fingerprint=expected, **key_reply)
+            )  # fmt: skip
+            return
         elif key_path:
             if key is None:
                 error = "Connection failed: Failed to load SSH key: No such file or directory"
@@ -356,7 +408,7 @@ class FakeWorkerProtocol(asyncio.Protocol):
         if self.transport is None or self.transport.is_closing():
             return  # подключение уже закрыто: воркер закрыл и его сессии
         self.sessions[msg_id] = dict(connection)
-        self.send(reply(msg_id, "ok", stdout=f"Connected successfully, id: {msg_id}"))
+        self.send(reply(msg_id, "ok", stdout=f"Connected successfully, id: {msg_id}", **key_reply))
 
     def _monitor(self, msg_id: str, session: dict[str, Any]) -> dict[str, Any]:
         if session.get("host") == "no-proc":
@@ -413,10 +465,19 @@ def _rights(mode: int) -> str:
 
 
 class FakeSftp:
-    """sftp_* настоящего воркера (synex_core/src/sftp.rs) на файлах этой машины."""
+    """sftp_* настоящего воркера (synex_core/src/sftp.rs) на файлах этой машины.
+
+    FakeWorkerState.sftp_build выбирает сборку:
+      * "2026-11-14" (по умолчанию): коды ошибок в начале stderr (sftp_not_found ...),
+        sftp_stat и sftp_move_dir, в записях size, mtime, uid, gid, link_target; move не
+        заменяет существующую цель (sftp_exists); у всех действий статус "ok";
+      * "2026-11-12": только тексты статусов SFTP, в записях weight, move без текста
+        ошибки, "success" у sftp_download_file, sftp_stat и sftp_move_dir нет.
+    """
 
     def __init__(self, state: FakeWorkerState) -> None:
         self.state = state
+        self.new = state.sftp_build != "2026-11-12"
 
     async def handle(self, msg_id: str, action: str, payload: dict[str, Any]) -> dict[str, Any]:
         remote = payload.get("remote_path")
@@ -425,6 +486,8 @@ class FakeSftp:
         try:
             if action == "sftp_list_dir":
                 return reply(msg_id, "ok", stdout=self.list_dir(remote))
+            if action == "sftp_stat" and self.new:
+                return reply(msg_id, "ok", stdout=self.stat(remote))
             if action == "sftp_create_dir":
                 self.mkdir(remote)
             elif action == "sftp_remove_dir":
@@ -433,91 +496,145 @@ class FakeSftp:
                 await _when_released(lambda: self.remove(remote))
             elif action == "sftp_move_file":
                 if not self.move(remote, target):
-                    return reply(msg_id, "error")  # воркер не передаёт текст ошибки
+                    return reply(msg_id, "error")  # старая сборка не передаёт текст ошибки
+            elif action == "sftp_move_dir" and self.new:
+                self.move(remote, target, expect_dir=True)
             elif action == "sftp_copy_file":
                 self.copy(remote, target)
             elif action == "sftp_upload_file":
                 await self.upload(local, remote)
             elif action == "sftp_download_file":
                 await self.download(remote, local)
-                return reply(msg_id, "success")
+                return reply(msg_id, "ok" if self.new else "success")
             else:
                 return reply(msg_id, "error", stderr=f"Unknown action: {action}", exit_code=1)
         except _SftpError as e:
-            return reply(msg_id, "error", stderr=INTERNAL + str(e), exit_code=1)
+            return reply(msg_id, "error", stderr=str(e), exit_code=1)
         except OSError:
             # Файл занят или имя недопустимо на этой машине (Windows): сервер SFTP
             # ответил бы статусом Failure, а не молчанием
-            stderr = f"{INTERNAL}{action} failed: {FAILURE}"
-            return reply(msg_id, "error", stderr=stderr, exit_code=1)
+            return reply(msg_id, "error", stderr=self._error("failed", action, "f"), exit_code=1)
         return reply(msg_id, "ok")
+
+    # Текст ошибки: kind = код новой сборки без "sftp_", status: n (No such file),
+    # p (Permission denied), f (Failure) или свой текст
+    def _error(self, kind: str, context: str, status: str = "") -> str:
+        text = {"n": "No such file", "p": "Permission denied", "f": "Failure"}.get(status, status)
+        if self.new:
+            return f"sftp_{kind}: {context}" + (f": {text}" if text else "")
+        old = {"No such file": NO_SUCH_FILE, "Failure": FAILURE}.get(text, text or FAILURE)
+        return f"{INTERNAL}{context}: {old}"
+
+    def _raise(self, kind: str, context: str, status: str = "") -> None:
+        raise _SftpError(self._error(kind, context, status))
+
+    def _info(self, item: Path, name: str) -> dict[str, Any]:
+        info = item.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            kind = "symlink"
+        elif stat.S_ISDIR(info.st_mode):
+            kind = "folder"
+        else:
+            kind = "file"
+        rights = _rights(stat.S_IMODE(info.st_mode))
+        if not self.new:
+            return {"Type": kind, "name": name, "weight": info.st_size, "rights": rights}
+        link = None
+        if kind == "symlink":
+            with contextlib.suppress(OSError):
+                link = os.readlink(item)
+        return {
+            "Type": kind,
+            "name": name,
+            "size": info.st_size,
+            "rights": rights,
+            "mtime": int(info.st_mtime),
+            "uid": getattr(info, "st_uid", None),
+            "gid": getattr(info, "st_gid", None),
+            "link_target": link,
+        }
 
     def list_dir(self, path: str | None) -> str:
         if path is None:
-            raise _SftpError("Missing directory path in payload")
+            raise _SftpError(f"{INTERNAL}Missing directory path in payload")
         directory = self.state.remote(path)
+        if not directory.exists():
+            self._raise("not_found", "Failed to read remote directory", "n")
         if not directory.is_dir():
-            raise _SftpError(f"Failed to read remote directory: {NO_SUCH_FILE}")
-        entries = []
-        for item in directory.iterdir():
-            info = item.lstat()
-            if stat.S_ISLNK(info.st_mode):
-                kind = "symlink"
-            elif stat.S_ISDIR(info.st_mode):
-                kind = "folder"
-            else:
-                kind = "file"
-            entries.append(
-                {
-                    "Type": kind,
-                    "name": item.name,
-                    "weight": info.st_size,
-                    "rights": _rights(stat.S_IMODE(info.st_mode)),
-                }
-            )
+            if self.new:
+                self._raise("not_a_directory", f"not a directory: {path}")
+            self._raise("not_found", "Failed to read remote directory", "n")
+        entries = [self._info(item, item.name) for item in directory.iterdir()]
         return json.dumps(entries, ensure_ascii=False, separators=(",", ":"))
+
+    def stat(self, path: str | None) -> str:
+        if path is None:
+            raise _SftpError(f"{INTERNAL}Missing path in payload")
+        item = self.state.remote(path)
+        if not item.exists() and not item.is_symlink():
+            self._raise("not_found", "Failed to stat remote path", "n")
+        name = posixpath.basename(path.rstrip("/")) or path
+        return json.dumps(self._info(item, name), ensure_ascii=False, separators=(",", ":"))
 
     def mkdir(self, path: str | None) -> None:
         target = self.state.remote(path or "")
         if target.exists() or target.is_symlink():
-            raise _SftpError(f"Failed to create remote directory: {FAILURE}")
+            if self.new:
+                self._raise("exists", f"remote path already exists: {path}")
+            self._raise("failed", "Failed to create remote directory", "f")
         if not target.parent.is_dir():
-            raise _SftpError(f"Failed to create remote directory: {NO_SUCH_FILE}")
+            self._raise("not_found", "Failed to create remote directory", "n")
         target.mkdir()
 
     def rmdir(self, path: str | None) -> None:
         target = self.state.remote(path or "")
         if not target.exists():
-            raise _SftpError(f"Failed to remove remote directory: {NO_SUCH_FILE}")
+            self._raise("not_found", "Failed to remove remote directory", "n")
         if not target.is_dir() or target.is_symlink() or any(target.iterdir()):
-            raise _SftpError(f"Failed to remove remote directory: {FAILURE}")
+            self._raise("failed", "Failed to remove remote directory", "f")
         target.rmdir()
 
     def remove(self, path: str | None) -> None:
         target = self.state.remote(path or "")
         if not target.exists() and not target.is_symlink():
-            raise _SftpError(f"Failed to remove remote file: {NO_SUCH_FILE}")
+            self._raise("not_found", "Failed to remove remote file", "n")
         if target.is_dir() and not target.is_symlink():
-            raise _SftpError(f"Failed to remove remote file: {FAILURE}")
+            self._raise("failed", "Failed to remove remote file", "f")
         target.unlink()
 
-    def move(self, source: str | None, target: str | None) -> bool:
+    def move(self, source: str | None, target: str | None, *, expect_dir: bool = False) -> bool:
         src, dst = self.state.remote(source or ""), self.state.remote(target or "")
-        # SFTP rename сервера OpenSSH не заменяет существующий файл
-        if not (src.exists() or src.is_symlink()) or dst.exists() or not dst.parent.is_dir():
-            return False
+        if not self.new:
+            # SFTP rename сервера OpenSSH не заменяет существующий файл
+            if not (src.exists() or src.is_symlink()) or dst.exists() or not dst.parent.is_dir():
+                return False
+            src.rename(dst)
+            return True
+        if not (src.exists() or src.is_symlink()):
+            self._raise("not_found", "Failed to access source", "n")
+        if expect_dir and (src.is_symlink() or not src.is_dir()):
+            self._raise("not_a_directory", f"source is not a directory: {source}")
+        if dst.exists() or dst.is_symlink():
+            self._raise("exists", f"destination already exists: {target}")
+        if not dst.parent.is_dir():
+            self._raise("not_found", "Failed to move remote file", "n")
         src.rename(dst)
         return True
 
     def copy(self, source: str | None, target: str | None) -> None:
         src, dst = self.state.remote(source or ""), self.state.remote(target or "")
         if not src.exists():
-            raise _SftpError(
-                f"Failed to copy remote file: cp: cannot stat '{source}': "
-                "No such file or directory\n"
-            )
+            message = f"cp: cannot stat '{source}': No such file or directory"
+            if self.new:
+                self._raise("failed", f"Failed to copy remote file: {message}")
+            raise _SftpError(f"{INTERNAL}Failed to copy remote file: {message}\n")
         if src.is_dir():
-            return  # cp без -r папку не копирует, а код возврата воркер теряет
+            if self.new:  # код возврата cp теперь доходит
+                self._raise(
+                    "failed", f"Failed to copy remote file: cp: -r not specified; omitting "
+                    f"directory '{source}'",
+                )  # fmt: skip
+            return  # старая сборка теряла код возврата cp: «успех» без копии
         if dst.is_dir():
             dst = dst / src.name
         shutil.copyfile(src, dst)
@@ -525,30 +642,36 @@ class FakeSftp:
     async def upload(self, local: str | None, remote: str | None) -> None:
         source = Path(local or "")
         if not source.is_file():
-            raise _SftpError("Failed to open local file: No such file or directory (os error 2)")
+            raise _SftpError(
+                f"{INTERNAL}Failed to open local file: No such file or directory (os error 2)"
+            )
         path = remote or ""
         target = self.state.remote(path)
         if path.endswith("/") or target.is_dir():
             target = target / source.name
         if not target.parent.is_dir():
-            raise _SftpError(f"Failed to create remote file: {NO_SUCH_FILE}")
+            self._raise("not_found", "Failed to create remote file", "n")
         if target.is_dir():
-            raise _SftpError(f"Failed to create remote file: {FAILURE}")
+            self._raise("failed", "Failed to create remote file", "f")
         await self._copy_stream(source, target)
 
     async def download(self, remote: str | None, local: str | None) -> None:
         source = self.state.remote(remote or "")
         if not source.exists():
-            raise _SftpError(f"Failed to open remote file '{remote}': {NO_SUCH_FILE}")
+            if self.new:
+                self._raise("not_found", "Failed to open remote file", "n")
+            raise _SftpError(f"{INTERNAL}Failed to open remote file '{remote}': {NO_SUCH_FILE}")
         path = local or ""
         target = Path(path)
         if path.endswith(("/", "\\")) or target.is_dir():
             target = target / source.name
         if not target.parent.is_dir():
-            raise _SftpError("Failed to create local file: No such file or directory (os error 2)")
+            raise _SftpError(
+                f"{INTERNAL}Failed to create local file: No such file or directory (os error 2)"
+            )
         if source.is_dir():
             target.write_bytes(b"")  # как воркер: локальный файл уже создан
-            raise _SftpError("Failed to download file: Failure")
+            self._raise("failed", "Failed to download file", "f")
         await self._copy_stream(source, target)
 
     async def _copy_stream(self, source: Path, target: Path) -> None:
