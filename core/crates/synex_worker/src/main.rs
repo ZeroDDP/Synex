@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::{env, result};
+use synex_core::errors::SynexError;
 use synex_core::mon::SshMonitoring;
 use synex_core::sftp::Sftp;
 use synex_core::ssh::SshSession;
@@ -45,6 +46,27 @@ struct ResponsePayload {
     exit_code: i32,
 }
 
+// Ответ на ssh_connect: кроме обычных полей несёт отпечаток сервера для TOFU.
+#[derive(Serialize, Debug)]
+struct ConnectResponse {
+    id: String,
+    status: String,
+    payload: ConnectResponsePayload,
+}
+
+#[derive(Serialize, Debug)]
+struct ConnectResponsePayload {
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fingerprint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected_fingerprint: Option<String>,
+}
+
 #[derive(Serialize)]
 pub struct MetricsResponse {
     pub ok: bool,
@@ -56,7 +78,7 @@ pub struct MetricsResponse {
     pub error: Option<String>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize)]
 struct ConnectPayload {
     host: String,
     port: u16,
@@ -64,7 +86,29 @@ struct ConnectPayload {
     key_path: Option<String>,
     passphrase: Option<String>,
     password: Option<String>,
+    host_key_fingerprint: Option<String>,
 }
+
+// Пароль и passphrase не должны попадать в логи через {:?}.
+impl std::fmt::Debug for ConnectPayload {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectPayload")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("key_path", &self.key_path)
+            .field(
+                "passphrase",
+                &self.passphrase.as_ref().map(|_| "<redacted>"),
+            )
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("host_key_fingerprint", &self.host_key_fingerprint)
+            .finish()
+    }
+}
+
+// Больший кадр считаем ошибкой протокола: иначе клиент может выделить до 4 ГБ памяти.
+const MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 
 #[tokio::main]
 async fn main() {
@@ -110,6 +154,15 @@ where
             break;
         }
         let payload_len = u32::from_be_bytes(len_buf) as usize;
+        if payload_len > MAX_FRAME_LEN {
+            send_error(
+                &mut stream,
+                "",
+                &format!("frame too large: {} bytes", payload_len),
+            )
+            .await;
+            break;
+        }
 
         let mut payload_buf = vec![0u8; payload_len];
         if stream.read_exact(&mut payload_buf).await.is_err() {
@@ -193,13 +246,13 @@ where
                 };
 
                 info!(
-                    "Попытка подключения к {}@{}:{} (key: {}, passphrase: {}, password: {})...",
+                    "Попытка подключения к {}@{}:{} (key: {}, password задан: {}, host key закреплён: {})...",
                     p.username,
                     p.host,
                     p.port,
                     p.key_path.as_deref().unwrap_or("None"),
-                    p.passphrase.as_deref().unwrap_or("None"),
-                    p.password.as_deref().unwrap_or("None")
+                    p.password.is_some(),
+                    p.host_key_fingerprint.is_some()
                 );
 
                 // let session_id = Uuid::new_v4().to_string();
@@ -211,20 +264,25 @@ where
                     &p.key_path,
                     &p.passphrase,
                     &p.password,
+                    &p.host_key_fingerprint,
                 )
                 .await
                 {
                     Ok(sess) => {
                         info!("SSH-подключение успешно!");
+                        let host_key = sess.host_key.clone();
                         let session_arc = Arc::new(Mutex::new(sess));
                         sessions.lock().await.insert(req.id.clone(), session_arc);
-                        let resp = Response {
+                        let resp = ConnectResponse {
                             id: req.id.clone(),
                             status: "ok".to_string(),
-                            payload: ResponsePayload {
+                            payload: ConnectResponsePayload {
                                 stdout: format!("Connected successfully, id: {}", req.id),
                                 stderr: String::new(),
                                 exit_code: 0,
+                                fingerprint: Some(host_key.fingerprint),
+                                key_type: Some(host_key.key_type),
+                                expected_fingerprint: None,
                             },
                         };
                         info!("Отправляю ответ об успешном подключении...");
@@ -233,8 +291,38 @@ where
                     }
                     Err(e) => {
                         eprintln!("❌ Ошибка SSH-подключения: {}", e);
-                        send_error(&mut stream, &req.id, &format!("Connection failed: {}", e))
-                            .await;
+                        // Для host_key_* stderr начинается с кода ошибки, остальные ошибки идут с префиксом
+                        let mut payload = ConnectResponsePayload {
+                            stdout: String::new(),
+                            stderr: format!("Connection failed: {}", e),
+                            exit_code: 1,
+                            fingerprint: None,
+                            key_type: None,
+                            expected_fingerprint: None,
+                        };
+                        match &e {
+                            SynexError::HostKeyUnknown(key) => {
+                                payload.stderr = e.to_string();
+                                payload.fingerprint = Some(key.fingerprint.clone());
+                                payload.key_type = Some(key.key_type.clone());
+                            }
+                            SynexError::HostKeyMismatch { expected, actual } => {
+                                payload.stderr = e.to_string();
+                                payload.fingerprint = Some(actual.fingerprint.clone());
+                                payload.key_type = Some(actual.key_type.clone());
+                                payload.expected_fingerprint = Some(expected.clone());
+                            }
+                            _ => {}
+                        }
+                        send_response(
+                            &mut stream,
+                            ConnectResponse {
+                                id: req.id.clone(),
+                                status: "error".to_string(),
+                                payload,
+                            },
+                        )
+                        .await;
                     }
                 }
             }
@@ -334,6 +422,50 @@ where
                     Ok(entries) => {
                         let stdout =
                             serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string());
+                        send_response(
+                            &mut stream,
+                            Response {
+                                id: req.id,
+                                status: "ok".to_string(),
+                                payload: ResponsePayload {
+                                    stdout,
+                                    stderr: String::new(),
+                                    exit_code: 0,
+                                },
+                            },
+                        )
+                        .await;
+                    }
+                    Err(e) => send_error(&mut stream, &req.id, &e.to_string()).await,
+                }
+            }
+            "sftp_stat" => {
+                let session_arc = match get_session(&sessions, &req.id).await {
+                    Some(session) => session,
+                    None => {
+                        error!("Session dont founded by key: {}", &req.id);
+                        send_error(
+                            &mut stream,
+                            &req.id,
+                            "Session dont founded by key. Create session first!",
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+                let mut sess = session_arc.lock().await;
+                let mut sftp = Sftp::new(&mut *sess);
+                let path = match req.payload.remote_path.as_deref() {
+                    Some(path) => path,
+                    None => {
+                        send_error(&mut stream, &req.id, "Missing path in payload").await;
+                        continue;
+                    }
+                };
+                match sftp.stat(path).await {
+                    Ok(entry) => {
+                        let stdout =
+                            serde_json::to_string(&entry).unwrap_or_else(|_| "{}".to_string());
                         send_response(
                             &mut stream,
                             Response {
@@ -562,7 +694,7 @@ where
                             &mut stream,
                             Response {
                                 id: req.id,
-                                status: "success".to_string(),
+                                status: "ok".to_string(),
                                 payload: ResponsePayload {
                                     stdout: "".to_string(),
                                     stderr: "".to_string(),
@@ -595,27 +727,75 @@ where
                 };
                 let mut sess = session_arc.lock().await;
                 let mut sftp = Sftp::new(&mut *sess);
-                let result = sftp
+                match sftp
                     .move_file(
                         &req.payload.remote_path.unwrap_or_default(),
                         &req.payload.destination_path.unwrap_or_default(),
                     )
-                    .await;
-                let status = if result.is_ok() { "ok" } else { "error" };
-
-                send_response(
-                    &mut stream,
-                    Response {
-                        id: req.id,
-                        status: status.to_string(),
-                        payload: ResponsePayload {
-                            stdout: "".to_string(),
-                            stderr: "".to_string(),
-                            exit_code: 0,
-                        },
-                    },
-                )
-                .await;
+                    .await
+                {
+                    Ok(_) => {
+                        send_response(
+                            &mut stream,
+                            Response {
+                                id: req.id,
+                                status: "ok".to_string(),
+                                payload: ResponsePayload {
+                                    stdout: String::new(),
+                                    stderr: String::new(),
+                                    exit_code: 0,
+                                },
+                            },
+                        )
+                        .await;
+                    }
+                    Err(e) => send_error(&mut stream, &req.id, &e.to_string()).await,
+                }
+            }
+            "sftp_move_dir" => {
+                if req.payload.remote_path.is_none() || req.payload.destination_path.is_none() {
+                    send_error(&mut stream, &req.id, "Missing source or target in payload").await;
+                    continue;
+                }
+                let session_arc = match get_session(&sessions, &req.id).await {
+                    Some(session) => session,
+                    None => {
+                        error!("Session dont founded by key: {}", &req.id);
+                        send_error(
+                            &mut stream,
+                            &req.id,
+                            "Session dont founded by key. Create session first!",
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+                let mut sess = session_arc.lock().await;
+                let mut sftp = Sftp::new(&mut *sess);
+                match sftp
+                    .move_dir(
+                        &req.payload.remote_path.unwrap_or_default(),
+                        &req.payload.destination_path.unwrap_or_default(),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        send_response(
+                            &mut stream,
+                            Response {
+                                id: req.id,
+                                status: "ok".to_string(),
+                                payload: ResponsePayload {
+                                    stdout: String::new(),
+                                    stderr: String::new(),
+                                    exit_code: 0,
+                                },
+                            },
+                        )
+                        .await;
+                    }
+                    Err(e) => send_error(&mut stream, &req.id, &e.to_string()).await,
+                }
             }
             "sftp_copy_file" => {
                 if req.payload.remote_path.is_none() || req.payload.destination_path.is_none() {
@@ -702,7 +882,7 @@ async fn send_error<T: AsyncWrite + Unpin>(stream: &mut T, id: &str, msg: &str) 
     send_response(stream, resp).await;
 }
 
-async fn send_response<T: AsyncWrite + Unpin>(stream: &mut T, resp: Response) {
+async fn send_response<T: AsyncWrite + Unpin, R: Serialize>(stream: &mut T, resp: R) {
     if let Ok(packed) = rmp_serde::to_vec_named(&resp) {
         let len = (packed.len() as u32).to_be_bytes();
         let _ = stream.write_all(&len).await;
@@ -759,9 +939,12 @@ async fn run_named_pipe(pipe_name: String) -> std::io::Result<()> {
 // Linux/Mac: unix socket
 #[cfg(unix)]
 async fn run_unix_socket(path: String) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
     use tokio::net::UnixListener;
     let _ = std::fs::remove_file(&path); // чистим старый файл сокета
     let listener = UnixListener::bind(&path)?;
+    // Сокет доступен только владельцу: другие локальные пользователи не должны подключаться к воркеру
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
     println!("🔌 Listening on socket: {}", path);
     loop {
         let (stream, _) = listener.accept().await?;
