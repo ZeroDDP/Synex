@@ -7,6 +7,9 @@ SYNEX_TEST_WORKER (например, exe через wine).
 SSH-сценарии включаются переменными окружения:
     SYNEX_TEST_SSH_HOST, SYNEX_TEST_SSH_USER, SYNEX_TEST_SSH_KEY, [SYNEX_TEST_SSH_PORT]
     SYNEX_TEST_SSH_PASSWORD      дополнительно проверить вход по паролю
+Воркер (с 2026-11-14) подключается только с отпечатком ключа сервера (TOFU): тесты, как
+UI, узнают его первым подключением (host_key_unknown) и подключаются с ним. Проверку в
+воркере никто не выключает.
 Полный цикл UI → FastAPI → воркер → SSH-сервер с локальным sshd: tests/integration/.
 """
 
@@ -43,6 +46,43 @@ def ssh_connection(**auth) -> dict:
     }
     connection.update(auth or {"key_path": os.environ["SYNEX_TEST_SSH_KEY"]})
     return connection
+
+
+async def tofu_connect(client, request_id: str, connection: dict, timeout: float = 30) -> dict:
+    """ssh_connect так, как его делает backend после подтверждения ключа пользователем:
+    первый вызов без отпечатка отвечает host_key_unknown с payload.fingerprint, второй
+    идёт с ним. Сборки воркера без проверки ключа подключаются с первого раза."""
+    try:
+        return await client.request(
+            "ssh_connect", {"connection": connection}, timeout=timeout, request_id=request_id
+        )
+    except WorkerCommandError as e:
+        if not e.stderr.startswith("host_key_unknown"):
+            raise
+        assert e.payload["fingerprint"].startswith("SHA256:"), e.payload
+        assert e.payload["key_type"], e.payload
+        fingerprint = e.payload["fingerprint"]
+    return await client.request(
+        "ssh_connect",
+        {"connection": {**connection, "host_key_fingerprint": fingerprint}},
+        timeout=timeout,
+        request_id=request_id,
+    )
+
+
+async def trust_server(api: httpx.AsyncClient) -> None:
+    """Подтвердить ключ SSH-сервера в backend, как пользователь в UI (409 → known-hosts)."""
+    first = await api.post("/api/ssh/sessions", json=ssh_connection())
+    if first.status_code == 201:  # воркер без проверки ключа
+        await api.delete(f"/api/ssh/sessions/{first.json()['session_id']}")
+        return
+    assert first.json()["error"] == "ssh_host_key_unknown", first.text
+    host_key = first.json()["host_key"]
+    trusted = await api.post(
+        "/api/ssh/known-hosts",
+        json={key: host_key[key] for key in ("host", "port", "fingerprint", "key_type")},
+    )
+    assert trusted.status_code == 201, trusted.text
 
 
 @pytest.fixture
@@ -91,9 +131,7 @@ async def ssh_client(real_worker):
     if not os.environ.get("SYNEX_TEST_SSH_HOST"):
         pytest.skip("SYNEX_TEST_SSH_* not set")
     client = real_worker.client
-    connected = await client.request(
-        "ssh_connect", {"connection": ssh_connection()}, timeout=30, request_id="s1"
-    )
+    connected = await tofu_connect(client, "s1", ssh_connection())
     assert connected["stdout"] == "Connected successfully, id: s1"
     return client
 
@@ -131,9 +169,7 @@ async def test_real_ssh_session_with_cwd(ssh_client):
 
 async def test_real_sessions_are_request_ids(ssh_client):
     """Сессия воркера = id запроса; ssh_disconnect закрывает только свою."""
-    await ssh_client.request(
-        "ssh_connect", {"connection": ssh_connection()}, timeout=30, request_id="s2"
-    )
+    await tofu_connect(ssh_client, "s2", ssh_connection())
     first = await ssh_client.request("ssh_exec", {"command": "echo one"}, request_id="s1")
     second = await ssh_client.request("ssh_exec", {"command": "echo two"}, request_id="s2")
     assert (first["stdout"].strip(), second["stdout"].strip()) == ("one", "two")
@@ -163,13 +199,12 @@ async def test_real_monitor_get_values(ssh_client):
     assert 0 <= values["mem_usage_percent"] <= 100
 
 
-@pytest.mark.xfail(reason="synex_worker возвращает exit_code=0 (сборка 2026-11-03)", strict=False)
 async def test_real_worker_raw_exit_codes(ssh_client):
-    """Коды возврата от самого воркера, без обёртки Python.
-
-    Пока воркер теряет exit-status, тест помечен xfail. Когда баг исправят, pytest
-    покажет XPASS: тогда отметку можно снять. Вывод показывает, где код теряется.
-    """
+    """Коды возврата от самого воркера, без обёртки Python. Сборки до 2026-11-14 теряли
+    exit-status (всегда 0): для них тест xfail. Вывод показывает, где код теряется."""
+    probe = await ssh_client.request("ssh_exec", {"command": "exit 3"}, timeout=30, request_id="s1")
+    if probe["exit_code"] == 0:
+        pytest.xfail("this synex_worker build loses the exit status (before 2026-11-14)")
     cases = {
         "true": 0,
         "false": 1,
@@ -200,9 +235,7 @@ async def test_real_extra_connections_run_in_parallel(real_worker):
     try:
         assert all(c.transport == real_worker.client.transport for c in channels)
         for i, channel in enumerate(channels):
-            await channel.request(
-                "ssh_connect", {"connection": ssh_connection()}, timeout=30, request_id=f"p{i}"
-            )
+            await tofu_connect(channel, f"p{i}", ssh_connection())
         started = time.monotonic()
         results = await asyncio.gather(
             *[
@@ -226,6 +259,7 @@ async def test_real_terminal_websocket(real_worker_settings):
     async with serve(app) as base:
         http = base.replace("ws://", "http://")
         async with httpx.AsyncClient(base_url=http, timeout=60) as api:
+            await trust_server(api)
             created = await api.post("/api/ssh/sessions", json=ssh_connection())
             assert created.status_code == 201, created.text
             info = created.json()
@@ -255,6 +289,7 @@ async def test_real_monitoring(real_worker_settings):
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1") as api:
+            await trust_server(api)
             ids = []
             for _ in range(2):
                 created = await api.post("/api/ssh/sessions", json=ssh_connection())
@@ -287,6 +322,7 @@ async def test_real_api(real_worker_settings):
         async with httpx.AsyncClient(
             transport=transport, base_url="http://127.0.0.1", timeout=60
         ) as api:
+            await trust_server(api)
             connection = ssh_connection()
             response = await api.post("/api/ssh/connect", json=connection)
             assert response.status_code == 201, response.text

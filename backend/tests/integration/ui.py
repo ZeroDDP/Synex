@@ -7,10 +7,13 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 from websockets.asyncio.client import ClientConnection, connect
+
+if TYPE_CHECKING:
+    from tests.integration.sshd import SSHTarget
 
 UI_ORIGIN = "http://localhost:5173"
 
@@ -74,6 +77,31 @@ class UI:
 
     async def close(self) -> None:
         await self.api.aclose()
+
+    async def trust_server(self, target: SSHTarget) -> str:
+        """Подтвердить ключ сервера, как пользователь в UI: отпечаток своего sshd известен
+        заранее, у внешнего сервера его показывает первое подключение (409
+        ssh_host_key_unknown). Сборки воркера без проверки ключа подключаются сразу:
+        тогда сессия закрывается, а отпечаток берётся из её описания (если есть)."""
+        fingerprint = target.host_key_fingerprint
+        if fingerprint is None:
+            first = await self.api.post("/api/ssh/sessions", json=target.connection())
+            if first.status_code == 201:
+                await self.api.delete(f"/api/ssh/sessions/{first.json()['session_id']}")
+                host_key = first.json()["host_key"]
+                if host_key is None:
+                    return ""
+                fingerprint = host_key["fingerprint"]
+            else:
+                assert first.status_code == 409, first.text
+                assert first.json()["error"] == "ssh_host_key_unknown", first.text
+                fingerprint = first.json()["host_key"]["fingerprint"]
+        trusted = await self.api.post(
+            "/api/ssh/known-hosts",
+            json={"host": target.host, "port": target.port, "fingerprint": fingerprint},
+        )
+        assert trusted.status_code == 201, trusted.text
+        return fingerprint
 
     async def open_session(self, body: dict) -> str:
         response = await self.api.post("/api/ssh/sessions", json=body)

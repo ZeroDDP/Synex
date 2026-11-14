@@ -62,11 +62,14 @@ class Files:
                 await asyncio.sleep(0.02)
 
 
-@pytest.fixture
-async def files(tmp_path: Path, missing_socket_path, monkeypatch) -> AsyncIterator[Files]:
+# Сборки воркера: 2026-11-14 (коды ошибок, sftp_stat, mtime) и 2026-11-12 (только
+# тексты ошибок): backend работает с обеими, каждый тест идёт с каждой
+@pytest.fixture(params=["2026-11-14", "2026-11-12"])
+async def files(request, tmp_path: Path, missing_socket_path, monkeypatch) -> AsyncIterator[Files]:
     monkeypatch.setattr(settings, "SFTP_PROGRESS_INTERVAL", 0.02)
     events: list[dict] = []
     async with plugin_rig(tmp_path, missing_socket_path, ["sftp"], {}) as rig:
+        rig.worker.sftp_build = request.param
 
         async def publish(info: dict) -> None:
             events.append(info)
@@ -166,6 +169,44 @@ async def test_stat(files: Files):
     )
     root = (await files.rig.api.get(f"{files.base}/stat", params={"path": "/"})).json()
     assert (root["path"], root["type"]) == ("/", "dir")
+
+
+async def test_details_of_the_new_worker(files: Files):
+    """Сборка 2026-11-14: время изменения, владелец и цель ссылки в записях, сведения об
+    одном пути через sftp_stat (без списка всей папки). Со старой сборкой этих полей нет."""
+    new = files.rig.worker.sftp_build == "2026-11-14"
+    file = files.put("~/a.txt", b"abc")
+    os.utime(file, (1_700_000_000, 1_700_000_000))
+    listed = {
+        e["name"]: e for e in (await files.rig.api.get(f"{files.base}/list")).json()["entries"]
+    }
+    stat = (await files.rig.api.get(f"{files.base}/stat", params={"path": "~/a.txt"})).json()
+    for entry in (listed["a.txt"], stat):
+        if new:
+            assert entry["modified_at"].startswith("2023-11-14T22:13:20")
+            assert entry["uid"] == getattr(file.stat(), "st_uid", None)
+        else:
+            assert (entry["modified_at"], entry["uid"], entry["gid"]) == (None, None, None)
+    lists_before = len(files.requests("sftp_list_dir"))
+    await files.rig.api.get(f"{files.base}/stat", params={"path": "~/a.txt"})
+    if new:
+        assert len(files.requests("sftp_list_dir")) == lists_before  # хватило sftp_stat
+        assert files.requests("sftp_stat")[-1]["payload"]["remote_path"] == f"{HOME}/a.txt"
+    else:
+        assert len(files.requests("sftp_list_dir")) == lists_before + 1
+
+    if os.name != "nt":  # ссылки на Windows нужны права разработчика
+        files.server("~/link").symlink_to("a.txt")
+        link = (await files.rig.api.get(f"{files.base}/stat", params={"path": "~/link"})).json()
+        assert link["type"] == "link"
+        assert link["link_target"] == ("a.txt" if new else None)
+
+
+async def test_list_of_a_file(files: Files):
+    files.put("~/a.txt")
+    response = await files.rig.api.get(f"{files.base}/list", params={"path": "~/a.txt"})
+    assert (response.status_code, response.json()["error"]) == (409, "sftp_not_a_directory")
+    assert response.json()["detail"] == f"{HOME}/a.txt is not a directory"
 
 
 async def test_mkdir(files: Files):
@@ -767,3 +808,30 @@ async def test_local_listing(files: Files):
     assert listing["entries"][1]["modified_at"] is not None
     relative = await files.rig.api.get("/api/sftp/local/list", params={"path": "relative"})
     assert (relative.status_code, relative.json()["error"]) == (422, "sftp_bad_path")
+
+
+@pytest.mark.parametrize(
+    ("stderr", "code"),
+    [
+        ("sftp_not_found: Failed to read remote directory: No such file", "sftp_not_found"),
+        ("sftp_permission_denied: Failed to create remote file: Permission denied",
+         "sftp_permission_denied"),
+        ("sftp_exists: destination already exists: /a", "sftp_target_exists"),
+        ("sftp_not_a_directory: not a directory: /a", "sftp_not_a_directory"),
+        ("sftp_unavailable: server refused SFTP subsystem: x", "sftp_unavailable"),
+        ("sftp_failed: Failed to copy remote file: cp: boom", "sftp_failed"),
+        ("SSH internal error: Failed to open local file: No such file", "sftp_local_error"),
+        # сборки до 2026-11-14: только тексты
+        ("SSH internal error: Failed to x: No such file: No such file", "sftp_not_found"),
+        ("SSH internal error: Failed to x: Permission denied: Permission denied",
+         "sftp_permission_denied"),
+        ("SSH internal error: Failed to initialize SFTP: Timeout", "sftp_unavailable"),
+        ("Unknown action: sftp_list_dir", "sftp_unavailable"),
+    ],
+)  # fmt: skip
+def test_worker_errors(stderr: str, code: str):
+    from app.plugins.sftp.remote import _translate
+
+    error = _translate(stderr, {"remote_path": "/a", "destination_path": "/b"})
+    assert error.code == code, error.detail
+    assert not error.detail.startswith("sftp_")  # код воркера в текст не попадает

@@ -48,13 +48,15 @@ def ssh_target(tmp_path_factory) -> Iterator[SSHTarget]:
 
 @pytest.fixture
 async def ui(monkeypatch, ssh_target: SSHTarget) -> AsyncIterator[UI]:
-    """Backend целиком (воркер, плагины, /ws) на uvicorn и клиент-UI к нему."""
+    """Backend целиком (воркер, плагины, /ws) на uvicorn и клиент-UI к нему. Ключ
+    тестового сервера уже подтверждён, как после первого подключения в UI."""
     monkeypatch.setattr(settings, "ALLOWED_ORIGINS", UI_ORIGIN)
     with rw.real_worker_settings(monkeypatch):
         app = create_app()
         async with serve(app) as base:
             client = UI(base)
             try:
+                await client.trust_server(ssh_target)
                 yield client
             finally:
                 await client.close()

@@ -137,6 +137,12 @@ async def delete_connection(connection_id: ConnectionId, store: Connections) -> 
     ),
     responses={
         **ERRORS,
+        409: {
+            "description": (
+                "Ключ сервера не подтверждён (ssh_host_key_unknown) или изменился "
+                "(ssh_host_key_mismatch), см. POST /api/ssh/sessions и /api/ssh/known-hosts"
+            )
+        },
         422: {"description": "Нужен пароль или фраза (connection_secret_required)"},
         429: {"description": "Открыто слишком много сессий (SSH_MAX_SESSIONS)"},
         502: {"description": "Воркер не смог подключиться: хост, ключ или пароль"},

@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     # Сохранённые подключения к серверам (плагин connections). По умолчанию
     # connections.json рядом с keys.json; пароли в нём зашифрованы тем же мастер-ключом.
     CONNECTIONS_PATH: Path | None = None
+    # Доверенные ключи SSH-серверов (отпечатки по host:port, схема TOFU). По умолчанию
+    # known_hosts.json рядом с keys.json.
+    KNOWN_HOSTS_PATH: Path | None = None
 
     # Плагины через запятую; * значит все установленные (app/plugins/<name>/plugin.py).
     # Нужные плагинам зависимости включаются сами.
@@ -157,6 +160,14 @@ class Settings(BaseSettings):
         if self.CONNECTIONS_PATH.is_absolute():
             return self.CONNECTIONS_PATH
         return BASE_DIR / self.CONNECTIONS_PATH
+
+    @property
+    def known_hosts_path(self) -> Path:
+        if self.KNOWN_HOSTS_PATH is None:
+            return user_data_dir() / "known_hosts.json"
+        if self.KNOWN_HOSTS_PATH.is_absolute():
+            return self.KNOWN_HOSTS_PATH
+        return BASE_DIR / self.KNOWN_HOSTS_PATH
 
     @property
     def ipc_socket_path(self) -> str:

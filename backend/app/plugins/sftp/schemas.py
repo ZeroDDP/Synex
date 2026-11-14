@@ -25,8 +25,13 @@ class EntryInfo(BaseModel):
         ..., description="Куда ведёт ссылка: на папку (dir) или нет (null)"
     )
     modified_at: datetime | None = Field(
-        ..., description="Время изменения; у файлов сервера пока null (SFTP воркера не отдаёт)"
+        ..., description="Время изменения (у файлов сервера null со сборкой воркера до 2026-11-14)"
     )
+    link_target: str | None = Field(
+        default=None, description="Куда ведёт ссылка (путь, как записан в ней); null не у ссылок"
+    )
+    uid: int | None = Field(default=None, description="Владелец (числовой id) файла сервера")
+    gid: int | None = Field(default=None, description="Группа (числовой id) файла сервера")
 
     @classmethod
     def from_entry(cls, entry: Entry | LocalEntry) -> EntryInfo:
@@ -41,6 +46,9 @@ class EntryInfo(BaseModel):
             mode=(entry.mode & 0o7777) if entry.mode is not None else None,
             target_type=entry.target_type,
             modified_at=entry.modified_at,
+            link_target=entry.link_target,
+            uid=getattr(entry, "uid", None),
+            gid=getattr(entry, "gid", None),
         )
 
 

@@ -40,10 +40,14 @@ async def test_companion_has_its_own_connection_and_is_hidden(ssh, fake_worker, 
     assert companion is not None
     assert companion.id != session_id and companion.parent_id == session_id
     assert companion.channel.client is not ssh.manager.get(session_id).channel.client
-    # Подключение тем же способом, что и основная сессия
+    # Подключение тем же способом, что и основная сессия, и с ключом сервера, который
+    # основная сессия уже проверила
     connects = [r for r in fake_worker.requests if r["action"] == "ssh_connect"]
     assert connects[-1]["id"] == companion.id
-    assert connects[-1]["payload"]["connection"] == connects[0]["payload"]["connection"]
+    first, last = connects[0]["payload"]["connection"], connects[-1]["payload"]["connection"]
+    assert "host_key_fingerprint" not in first  # ключ ещё не подтверждали (воркер без TOFU)
+    host_key = ssh.manager.get(session_id).host_key
+    assert last == {**first, "host_key_fingerprint": host_key["fingerprint"]}
     # В списке сессий её нет
     listed = (await ssh.api.get("/api/ssh/sessions")).json()
     assert [s["session_id"] for s in listed] == [session_id]

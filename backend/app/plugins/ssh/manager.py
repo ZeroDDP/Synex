@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import math
+import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -44,11 +45,14 @@ from app.plugins.ssh.errors import (
     SSHConnectError,
     SSHConnectTimeoutError,
     SSHExecTimeoutError,
+    SSHHostKeyMismatchError,
+    SSHHostKeyUnknownError,
     SSHNotConnectedError,
     SSHSessionBusyError,
     SSHSessionNotFoundError,
     SSHTooManySessionsError,
 )
+from app.plugins.ssh.known_hosts import get_known_hosts, server_name
 from app.plugins.ssh.session import (
     AuthMethod,
     CompanionSession,
@@ -151,6 +155,48 @@ def is_session_missing(stderr: str) -> bool:
     return any(marker in stderr for marker in SESSION_MISSING_MARKERS)
 
 
+HOST_KEY_UNKNOWN = "host_key_unknown"
+HOST_KEY_MISMATCH = "host_key_mismatch"
+_FINGERPRINT_IN_TEXT = re.compile(r"SHA256:[A-Za-z0-9+/]+")
+
+
+def connect_error(
+    error: WorkerCommandError, params: ConnectParams, expected: str | None
+) -> AppError:
+    """Ошибка ssh_connect воркера для API: ключ сервера не подтверждён или изменился
+    (TOFU, 409 с отпечатками в host_key), иначе ssh_connect_failed."""
+    stderr = error.stderr
+    body = error.payload
+    found = _FINGERPRINT_IN_TEXT.findall(stderr)
+    server = server_name(params.host, params.port)
+    if HOST_KEY_UNKNOWN in stderr:
+        fingerprint = _text(body.get("fingerprint")) or (found[-1] if found else "")
+        key_type = _text(body.get("key_type"))
+        return SSHHostKeyUnknownError(
+            f"The key of {server} is not trusted yet: {fingerprint} ({key_type or 'unknown type'})."
+            " Make sure it is the key of your server, trust it (POST /api/ssh/known-hosts) and "
+            "connect again",
+            {"host": params.host, "port": params.port, "fingerprint": fingerprint,
+             "key_type": key_type},
+        )  # fmt: skip
+    if HOST_KEY_MISMATCH in stderr:
+        fingerprint = _text(body.get("fingerprint")) or (found[-1] if found else "")
+        trusted = _text(body.get("expected_fingerprint")) or expected or (found[0] if found else "")
+        return SSHHostKeyMismatchError(
+            f"The key of {server} has changed: trusted {trusted}, the server shows "
+            f"{fingerprint}. Not connecting: this may be an attack (man in the middle) or the "
+            "server was reinstalled. If the change is expected, trust the new key with "
+            "replace=true (POST /api/ssh/known-hosts)",
+            {"host": params.host, "port": params.port, "fingerprint": fingerprint,
+             "key_type": _text(body.get("key_type")), "expected_fingerprint": trusted},
+        )  # fmt: skip
+    return SSHConnectError(stderr)
+
+
+def _text(value: Any) -> str:
+    return value if isinstance(value, str) else ""
+
+
 class SSHSessionManager:
     def __init__(self, provider: WorkerProvider | None = None) -> None:
         self.provider: WorkerProvider = provider or WorkerManagerProvider()
@@ -202,12 +248,18 @@ class SSHSessionManager:
                 "Close unused ones first."
             )
 
+        # Отпечаток, который пользователь уже подтвердил (TOFU): без него воркер не
+        # подключится и вернёт ключ сервера для подтверждения
+        fingerprint = await get_known_hosts().fingerprint(params.host, params.port)
+
         self._opening += 1
         try:
             channel = await self._acquire_channel()
             session_id = new_session_id()
             try:
-                await self._connect_in_worker(channel, session_id, params, keys)
+                host_key = await self._connect_in_worker(
+                    channel, session_id, params, keys, fingerprint=fingerprint
+                )
             except BaseException:
                 if channel.dedicated:
                     await channel.client.disconnect()
@@ -223,6 +275,7 @@ class SSHSessionManager:
             auth=params.auth,
             key_id=params.key_id,
             connection_id=connection_id,
+            host_key=host_key,
             channel=channel,
             buffer=OutputBuffer(settings.SSH_OUTPUT_BUFFER_BYTES),
             connect_params=params,
@@ -245,14 +298,24 @@ class SSHSessionManager:
         return session
 
     async def _connect_in_worker(
-        self, channel: WorkerChannel, session_id: str, params: ConnectParams, keys: KeyStore
-    ) -> None:
+        self,
+        channel: WorkerChannel,
+        session_id: str,
+        params: ConnectParams,
+        keys: KeyStore,
+        *,
+        fingerprint: str | None,
+    ) -> dict[str, str] | None:
+        """ssh_connect в воркере. Возвращает ключ сервера {"fingerprint", "key_type"}
+        (None, если сборка воркера его не сообщает)."""
         async with channel.lock, contextlib.AsyncExitStack() as stack:
             connection: dict[str, Any] = {
                 "host": params.host,
                 "port": params.port,
                 "username": params.username,
             }
+            if fingerprint is not None:
+                connection["host_key_fingerprint"] = fingerprint
             if params.key_id is not None:
                 # Воркер принимает только путь: ключ из хранилища кладётся во временный
                 # файл и удаляется сразу после ответа воркера.
@@ -267,14 +330,14 @@ class SSHSessionManager:
 
             timeout = settings.SSH_CONNECT_TIMEOUT
             try:
-                await channel.client.request(
+                body = await channel.client.request(
                     "ssh_connect",
                     {"connection": connection},
                     request_id=session_id,
                     timeout=timeout,
                 )
             except WorkerCommandError as e:
-                raise SSHConnectError(e.stderr) from e
+                raise connect_error(e, params, fingerprint) from e
             except WorkerTimeoutError as e:
                 # Воркер может довести подключение до конца уже после таймаута. Отдельное
                 # подключение закроется целиком, а в общем сессию надо закрыть явно.
@@ -285,6 +348,11 @@ class SSHSessionManager:
                     "the server does not answer (wrong address or port, firewall, or it is "
                     "down). The limit is SSH_CONNECT_TIMEOUT"
                 ) from e
+        key = body.get("fingerprint")
+        if not isinstance(key, str) or not key:
+            return None
+        key_type = body.get("key_type")
+        return {"fingerprint": key, "key_type": key_type if isinstance(key_type, str) else ""}
 
     async def _acquire_channel(self) -> WorkerChannel:
         shared = self.provider.shared()  # 503, если воркер не подключён
@@ -633,8 +701,16 @@ class SSHSessionManager:
         companion = CompanionSession(
             id=new_session_id(), parent_id=parent.id, purpose=purpose, channel=channel
         )
+        # Тот же ключ, с которым подключилась основная сессия: служебная идёт к тому же
+        # серверу, и его ключ уже проверен
+        fingerprint = parent.host_key["fingerprint"] if parent.host_key else None
+        if fingerprint is None:
+            params = parent.connect_params
+            fingerprint = await get_known_hosts().fingerprint(params.host, params.port)
         try:
-            await self._connect_in_worker(channel, companion.id, parent.connect_params, parent.keys)
+            await self._connect_in_worker(
+                channel, companion.id, parent.connect_params, parent.keys, fingerprint=fingerprint
+            )
         except BaseException:
             await client.disconnect()
             raise
