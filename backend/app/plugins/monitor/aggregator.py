@@ -16,10 +16,13 @@ from app.plugins.monitor.values import Values
 from app.ws.metrics import (
     CpuMetrics,
     DiskMetrics,
+    DiskUsage,
     GpuMetrics,
     MemoryMetrics,
+    NetworkMetrics,
     ServerMetrics,
     ServerStatus,
+    flow,
     percent_stats,
 )
 
@@ -100,6 +103,8 @@ class ServerState:
             "session_ids": session_ids,
             "busy": self.busy,
             "error": self.error,
+            "network": self._network(),
+            "disk": self._root_disk(),
             **self._hardware_fields(),
         }
         if last is None:
@@ -139,11 +144,51 @@ class ServerState:
             ),
         )
 
+    def _network(self) -> NetworkMetrics | None:
+        """Сеть по последнему замеру. Скорость сейчас это последняя известная за окно: в
+        первом замере через другую сессию воркер её не сообщает (как CPU)."""
+        last = self.last
+        if last is None or last.values.net_rx_total is None or last.values.net_tx_total is None:
+            return None
+        rx = [s.values.net_rx_speed for s in self.samples if s.values.net_rx_speed is not None]
+        tx = [s.values.net_tx_speed for s in self.samples if s.values.net_tx_speed is not None]
+        return NetworkMetrics(
+            rx=flow(last.values.net_rx_total, rx[-1] if rx else None, rx),
+            tx=flow(last.values.net_tx_total, tx[-1] if tx else None, tx),
+        )
+
+    def _root_disk(self) -> DiskUsage | None:
+        """Раздел "/": из последнего замера, а если воркер его не сообщает (сборка до
+        2026-11-17), из списка дисков."""
+        values = self.last.values if self.last is not None else None
+        if (
+            values is not None
+            and values.disk_total is not None
+            and values.disk_used is not None
+            and values.disk_available is not None
+            and values.disk_percent is not None
+        ):
+            return DiskUsage(
+                total=values.disk_total,
+                used=values.disk_used,
+                available=values.disk_available,
+                percent=values.disk_percent,
+            )
+        disks = self.hardware.disks if self.hardware is not None else []
+        root = next((d for d in disks if d.mount == "/"), None)
+        if root is None:
+            return None
+        return DiskUsage(
+            total=root.total, used=root.used, available=root.available, percent=root.percent
+        )
+
     def _hardware_fields(self) -> dict[str, object]:
         if self.hardware is None:
             return {}
+        # Раздел "/" первым: по нему UI судит о диске сервера
+        disks = sorted(self.hardware.disks, key=lambda d: d.mount != "/")
         return {
-            "disks": [DiskMetrics(**vars(d)) for d in self.hardware.disks],
+            "disks": [DiskMetrics(**vars(d)) for d in disks],
             "gpus": [GpuMetrics(**vars(g)) for g in self.hardware.gpus],
             "hardware_updated_at": self.hardware_wall_ms,
         }

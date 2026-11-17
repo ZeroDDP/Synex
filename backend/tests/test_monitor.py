@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import time
 from pathlib import Path
@@ -23,6 +24,7 @@ from app.core.errors import register_error_handlers
 from app.core.event_bus import event_bus
 from app.plugins.manager import PluginManager
 from app.plugins.monitor.aggregator import Sample, ServerState
+from app.plugins.monitor.hardware import Disk, Hardware
 from app.plugins.monitor.routes import get_monitor
 from app.plugins.monitor.service import MetricsMonitor
 from app.plugins.monitor.values import MonitorValuesError, Values, parse_values
@@ -31,7 +33,18 @@ from app.plugins.ssh.routes import get_ssh_manager
 from app.worker import worker_manager
 from app.ws.metrics import METRICS_EVENT, MetricsSnapshot
 from tests.conftest import FAKE_WORKER_SCRIPT, start_fake_worker
-from tests.fake_worker import BOOT_CPU, MEM_TOTAL_KB, FakeWorkerState
+from tests.fake_worker import (
+    BOOT_CPU,
+    DISK_AVAILABLE_KB,
+    DISK_TOTAL_KB,
+    DISK_USED_KB,
+    MEM_TOTAL_KB,
+    NET_RX_SPEED,
+    NET_RX_STEP,
+    NET_TX_SPEED,
+    NET_TX_STEP,
+    FakeWorkerState,
+)
 from tests.ssh_helpers import make_api, recv_json, serve
 
 GIB = 1024**3
@@ -114,6 +127,98 @@ def test_parse_values():
     )
 
 
+def worker_json(**fields: object) -> dict:
+    """Ответ monitor_get_values: CPU и память и к ним fields."""
+    data = {
+        "ok": True,
+        "cpu_usage_percent": 2.63,
+        "mem_total_kb": 2014404,
+        "mem_available_kb": 793976,
+        "mem_used_kb": 1220428,
+        "mem_usage_percent": 60.59,
+        **fields,
+        "error": None,
+    }
+    return {"stdout": json.dumps(data), "stderr": "", "exit_code": 0}
+
+
+def test_parse_network_and_root_disk():
+    """Воркер с 2026-11-17: счётчики сети, скорость (в первом вызове сессии её нет) и
+    раздел "/". Пример из core/README.md."""
+    first = parse_values(
+        worker_json(
+            net_rx_bytes_total=123456789,
+            net_tx_bytes_total=98765432,
+            net_rx_bytes_per_sec=None,
+            net_tx_bytes_per_sec=None,
+            disk_total_kb=41152736,
+            disk_used_kb=12345678,
+            disk_available_kb=26000000,
+            disk_usage_percent=32.2,
+        )
+    )
+    assert (first.cpu_percent, first.mem_total) == (2.63, 2014404 * 1024)
+    assert (first.net_rx_total, first.net_tx_total) == (123456789, 98765432)
+    assert (first.net_rx_speed, first.net_tx_speed) == (None, None)
+    assert (first.disk_total, first.disk_used, first.disk_available, first.disk_percent) == (
+        41152736 * 1024,
+        12345678 * 1024,
+        26000000 * 1024,
+        32.2,
+    )
+
+    second = parse_values(
+        worker_json(
+            net_rx_bytes_total=123460000,
+            net_tx_bytes_total=98765500,
+            net_rx_bytes_per_sec=6422.004,
+            net_tx_bytes_per_sec=0,
+        )
+    )
+    assert (second.net_rx_speed, second.net_tx_speed) == (6422.0, 0.0)
+    assert second.disk_total is None  # df на сервере нет: раздела нет, остальное на месте
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {},  # сборка до 2026-11-17
+        {"net_rx_bytes_total": None, "net_tx_bytes_total": None, "disk_total_kb": None},
+        {"net_rx_bytes_total": 100},  # без второго счётчика сети нет
+        {"net_rx_bytes_total": "many", "net_tx_bytes_total": 5},
+        {"net_rx_bytes_total": -1, "net_tx_bytes_total": 5},
+        {"net_rx_bytes_total": True, "net_tx_bytes_total": 5},
+        {"disk_total_kb": 100, "disk_used_kb": 40},  # без свободного места раздела нет
+        {"disk_total_kb": [], "disk_used_kb": 40, "disk_available_kb": 60},
+    ],
+)
+def test_missing_network_and_disk_do_not_break_cpu_and_memory(fields: dict):
+    parsed = parse_values(worker_json(**fields))
+    assert (parsed.cpu_percent, parsed.mem_percent) == (2.63, 60.59)
+    assert parsed.net_rx_total is None and parsed.net_tx_total is None
+    assert parsed.net_rx_speed is None and parsed.net_tx_speed is None
+    assert parsed.disk_total is None and parsed.disk_percent is None
+
+
+def test_strange_speeds_and_percent():
+    parsed = parse_values(
+        worker_json(
+            net_rx_bytes_total=10,
+            net_tx_bytes_total=20,
+            net_rx_bytes_per_sec="fast",
+            net_tx_bytes_per_sec=-5,
+            disk_total_kb=1000,
+            disk_used_kb=400,
+            disk_available_kb=600,
+        )
+    )
+    assert (parsed.net_rx_total, parsed.net_tx_total) == (10, 20)
+    assert (parsed.net_rx_speed, parsed.net_tx_speed) == (None, None)
+    assert parsed.disk_percent == 40.0  # воркер процент не прислал: считается как в df
+    empty = parse_values(worker_json(disk_total_kb=0, disk_used_kb=0, disk_available_kb=0))
+    assert (empty.disk_total, empty.disk_percent) == (0, 0.0)
+
+
 @pytest.mark.parametrize(
     ("response", "message"),
     [
@@ -138,14 +243,101 @@ def test_parse_values_errors(response, message):
 # ---------------------------------------------------------- aggregator
 
 
-def values(cpu: float = 5.0, mem_percent: float = 50.0) -> Values:
+def values(cpu: float = 5.0, mem_percent: float = 50.0, **more: object) -> Values:
     return Values(
         cpu_percent=cpu,
         mem_total=8 * GIB,
         mem_used=int(8 * GIB * mem_percent / 100),
         mem_available=8 * GIB - int(8 * GIB * mem_percent / 100),
         mem_percent=mem_percent,
+        **more,  # type: ignore[arg-type]
     )
+
+
+def test_network_in_server_metrics():
+    state = ServerState("example.com", 22, window=10.0)
+    assert state.metrics(["s1"], stale_after=3.0, now=100.0, now_ms=0).network is None
+
+    def net(rx: int, tx: int, rx_speed: float | None, tx_speed: float | None) -> Values:
+        return values(
+            net_rx_total=rx, net_tx_total=tx, net_rx_speed=rx_speed, net_tx_speed=tx_speed
+        )
+
+    # Первый замер сессии: счётчики есть, скорости ещё нет
+    state.record(Sample(at=100.0, wall_ms=0, cpu=None, values=net(1_000, 500, None, None)))
+    first = state.metrics(["s1"], stale_after=3.0, now=100.0, now_ms=0).network
+    assert first is not None
+    assert first.rx.model_dump() == {
+        "total": 1_000,
+        "speed": None,
+        "avg": None,
+        "min": None,
+        "max": None,
+    }
+
+    for i, (rx_speed, tx_speed) in enumerate([(100.0, 10.0), (300.0, 30.0), (200.0, 0.0)], 1):
+        sample = net(1_000 + i * 150, 500 + i * 15, rx_speed, tx_speed)
+        state.record(Sample(at=100.0 + i, wall_ms=0, cpu=5.0, values=sample))
+    network = state.metrics(["s1"], stale_after=3.0, now=103.5, now_ms=0).network
+    assert network.rx.model_dump() == {
+        "total": 1_450,
+        "speed": 200.0,
+        "avg": 200.0,
+        "min": 100.0,
+        "max": 300.0,
+    }
+    assert network.tx.model_dump() == {
+        "total": 545,
+        "speed": 0.0,
+        "avg": 13.33,
+        "min": 0.0,
+        "max": 30.0,
+    }
+
+    # Замер через другую сессию: воркер там скорость ещё не считал. Счётчик свежий, а
+    # скорость остаётся последней известной (как CPU)
+    state.record(Sample(at=104.0, wall_ms=0, cpu=None, values=net(1_600, 560, None, None)))
+    switched = state.metrics(["s1", "s2"], stale_after=3.0, now=104.0, now_ms=0).network
+    assert (switched.rx.total, switched.rx.speed, switched.tx.speed) == (1_600, 200.0, 0.0)
+
+    # Воркер перестал сообщать сеть (на сервере пропал /proc/net/dev): блока нет
+    state.record(Sample(at=105.0, wall_ms=0, cpu=5.0, values=values()))
+    assert state.metrics(["s1"], stale_after=3.0, now=105.0, now_ms=0).network is None
+
+
+def test_root_disk_in_server_metrics():
+    state = ServerState("example.com", 22, window=10.0)
+    assert state.metrics(["s1"], stale_after=3.0, now=100.0, now_ms=0).disk is None
+
+    # Сборка воркера до 2026-11-17 раздел не сообщает: он берётся из списка дисков, а в
+    # списке "/" идёт первым, в каком бы порядке его ни показал df
+    state.record(Sample(at=100.0, wall_ms=0, cpu=5.0, values=values()))
+    assert state.metrics(["s1"], stale_after=3.0, now=100.0, now_ms=0).disk is None
+    data = Disk("/data", "/dev/sdb1", 200 * GIB, 100 * GIB, 100 * GIB, 50.0)
+    root = Disk("/", "/dev/sda1", 40 * GIB, 10 * GIB, 30 * GIB, 25.0)
+    state.record_hardware(Hardware(disks=[data, root], gpus=[]), at=100.0, wall_ms=0)
+    old = state.metrics(["s1"], stale_after=3.0, now=100.0, now_ms=0)
+    assert [d.mount for d in old.disks] == ["/", "/data"]
+    assert old.disk.model_dump() == {
+        "total": 40 * GIB,
+        "used": 10 * GIB,
+        "available": 30 * GIB,
+        "percent": 25.0,
+    }
+
+    # Новый воркер сообщает раздел с каждым замером: его значения свежее списка
+    fresh = values(
+        disk_total=40 * GIB, disk_used=12 * GIB, disk_available=28 * GIB, disk_percent=30.0
+    )
+    state.record(Sample(at=101.0, wall_ms=0, cpu=5.0, values=fresh))
+    new = state.metrics(["s1"], stale_after=3.0, now=101.0, now_ms=0)
+    assert (new.disk.used, new.disk.percent) == (12 * GIB, 30.0)
+    assert new.disks[0].used == 10 * GIB  # список обновится со своим опросом
+
+    # Без раздела "/" в списке и в замере его нет
+    state.record(Sample(at=102.0, wall_ms=0, cpu=5.0, values=values()))
+    state.record_hardware(Hardware(disks=[data], gpus=[]), at=102.0, wall_ms=0)
+    assert state.metrics(["s1"], stale_after=3.0, now=102.0, now_ms=0).disk is None
 
 
 def test_server_state_statuses_and_window():
@@ -232,6 +424,60 @@ async def test_busy_session_is_skipped(rig):
     assert time.monotonic() - started < 0.3
     assert rig.monitor_requests() == [first, second]
     await command
+
+
+async def test_network_and_root_disk_come_with_every_poll(rig):
+    first = await rig.open("server-a")
+    second = await rig.open("server-a")
+    await rig.poll()
+    server = rig.server("server-a:22")
+    assert (server.network.rx.total, server.network.tx.total) == (NET_RX_STEP, NET_TX_STEP)
+    assert (server.network.rx.speed, server.network.tx.speed) == (None, None)
+    assert server.disk.model_dump() == {
+        "total": DISK_TOTAL_KB * 1024,
+        "used": DISK_USED_KB * 1024,
+        "available": DISK_AVAILABLE_KB * 1024,
+        "percent": round(DISK_USED_KB / (DISK_USED_KB + DISK_AVAILABLE_KB) * 100, 2),
+    }
+    # Список дисков идёт своим опросом (df) и о разделе "/" говорит своё
+    assert server.disks[0].mount == "/" and server.disks[0].percent != server.disk.percent
+
+    await rig.poll()
+    await rig.poll()
+    network = rig.server("server-a:22").network
+    assert (network.rx.total, network.tx.total) == (3 * NET_RX_STEP, 3 * NET_TX_STEP)
+    assert network.rx.model_dump() == {
+        "total": 3 * NET_RX_STEP,
+        "speed": NET_RX_SPEED,
+        "avg": NET_RX_SPEED,
+        "min": NET_RX_SPEED,
+        "max": NET_RX_SPEED,
+    }
+    assert network.tx.speed == NET_TX_SPEED
+
+    # Первая сессия занята: замер идёт через вторую, где воркер скорость ещё не считал.
+    # Счётчик растёт, скорость остаётся последней известной
+    command = asyncio.create_task(rig.manager.execute(first, "sleep 0.5", track_cwd=False))
+    await asyncio.sleep(0.05)
+    await rig.poll()
+    assert rig.monitor_requests()[-1] == second
+    network = rig.server("server-a:22").network
+    assert (network.rx.total, network.rx.speed) == (4 * NET_RX_STEP, NET_RX_SPEED)
+    await command
+
+
+async def test_worker_build_without_network_and_disk(rig):
+    """Сборка воркера до 2026-11-17: сети нет, раздел "/" берётся из списка дисков."""
+    rig.state.monitor_build = "2026-11-14"
+    await rig.open("server-a")
+    await rig.poll()
+    await rig.poll()
+    server = rig.server("server-a:22")
+    assert server.status == "ok" and server.network is None
+    assert server.disks[0].mount == "/"
+    assert server.disk.model_dump() == server.disks[0].model_dump(
+        include={"total", "used", "available", "percent"}
+    )
 
 
 async def test_server_with_all_sessions_busy_becomes_stale(rig):
@@ -413,5 +659,12 @@ async def test_ws_streams_server_metrics(app_settings, key_file):
             server = data.servers[0]
             assert (server.server, server.session_ids) == ("10.0.0.1:22", [session_id])
             assert server.cpu.percent is not None and server.memory.total > 0
+            assert server.network.rx.total > 0 and server.network.tx.total > 0
+            assert server.disk.total == DISK_TOTAL_KB * 1024
+            # В самом сообщении поля так и называются
+            raw = message["data"]["servers"][0]
+            assert set(raw["network"]) == {"rx", "tx"}
+            assert set(raw["network"]["rx"]) == {"total", "speed", "avg", "min", "max"}
+            assert set(raw["disk"]) == {"total", "used", "available", "percent"}
             gaps = [b - a for a, b in zip(stamps, stamps[1:], strict=False)]
             assert all(50 <= gap <= 300 for gap in gaps), gaps

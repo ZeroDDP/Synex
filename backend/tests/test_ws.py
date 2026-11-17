@@ -97,6 +97,7 @@ async def wait_for_no_clients(timeout: float = 5.0) -> None:
 
 def test_fake_metrics_are_plausible():
     source = FakeMetricsSource(seed=1)
+    rx_total = tx_total = disk_used = 0
     for _ in range(500):
         snapshot = source.sample()
         assert snapshot.source == "fake" and snapshot.interval_ms == 500
@@ -109,6 +110,20 @@ def test_fake_metrics_are_plausible():
         assert memory.used + memory.available == memory.total
         assert memory.percent == pytest.approx(memory.used / memory.total * 100, abs=0.1)
         assert memory.min <= memory.percent <= memory.max
+        # Сеть: скорость в пределах канала, счётчики только растут
+        for flow, before in ((server.network.rx, rx_total), (server.network.tx, tx_total)):
+            assert 0 <= flow.min <= flow.speed <= flow.max <= source.NETWORK_LIMIT
+            assert flow.min <= flow.avg <= flow.max
+            assert flow.total >= before
+        rx_total, tx_total = server.network.rx.total, server.network.tx.total
+        # Раздел "/" тот же, что первый диск в списке, и понемногу заполняется
+        disk = server.disk
+        assert disk.used + disk.available == disk.total and disk.used >= disk_used
+        assert disk.percent == pytest.approx(disk.used / disk.total * 100, abs=0.01)
+        assert server.disks[0].mount == "/"
+        assert server.disks[0].model_dump(exclude={"mount", "filesystem"}) == disk.model_dump()
+        disk_used = disk.used
+    assert server.network.rx.total > 3 * 1024**3 and disk_used > source.DISK_USED
 
 
 def test_fake_metrics_change_smoothly():
@@ -116,8 +131,9 @@ def test_fake_metrics_change_smoothly():
     servers = [source.sample().servers[0] for _ in range(200)]
     memory = [s.memory.percent for s in servers]
     cpu = [s.cpu.percent for s in servers]
+    rx = [s.network.rx.speed for s in servers]
     # Значения живые...
-    assert len(set(memory)) > 50 and len(set(cpu)) > 50
+    assert len(set(memory)) > 50 and len(set(cpu)) > 50 and len(set(rx)) > 50
     # ...но без скачков: шаг ограничен (шум + притяжение к центру)
     assert max(abs(a - b) for a, b in zip(memory, memory[1:], strict=False)) < 10
     assert max(abs(a - b) for a, b in zip(cpu, cpu[1:], strict=False)) < 20
