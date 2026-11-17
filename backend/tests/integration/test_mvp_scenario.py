@@ -174,6 +174,7 @@ async def test_mvp_scenario(ui: UI, ssh_target: SSHTarget, containers: list[str]
         assert 0 <= last["cpu"]["percent"] <= 100 * (os.cpu_count() or 1)
         assert 0 < last["memory"]["percent"] < 100 and last["memory"]["total"] > 0
         assert any(d["mount"] == "/" for d in last["disks"] or []), last["disks"]
+        assert last["disk"] is not None and 0 <= last["disk"]["percent"] <= 100, last["disk"]
         summary.append(
             (
                 "Метрики CPU/RAM ≥ 1 Гц, задержка ≤ 500 мс",

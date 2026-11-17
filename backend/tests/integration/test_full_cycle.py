@@ -97,10 +97,26 @@ async def test_metrics_full_cycle(ui: UI, ssh_target: SSHTarget):
         assert 0 <= metrics["cpu"]["percent"] <= 100
         assert 0 < metrics["memory"]["used"] < metrics["memory"]["total"]
         assert metrics["age_ms"] < 3_000
-        # Диски (df) приходят вместе с первым замером; корень есть всегда
-        root = next(d for d in metrics["disks"] if d["mount"] == "/")
+        # Диски (df) приходят вместе с первым замером; корень есть всегда и идёт первым
+        root = metrics["disks"][0]
+        assert root["mount"] == "/"
         assert 0 < root["used"] < root["total"] and 0 <= root["percent"] <= 100
         assert isinstance(metrics["gpus"], list)  # [] без NVIDIA
+        # Раздел "/" и сеть воркер присылает с каждым замером (сборка с 2026-11-17)
+        disk = metrics["disk"]
+        assert disk["total"] == root["total"] and 0 < disk["used"] < disk["total"]
+        assert abs(disk["percent"] - root["percent"]) < 5
+        listed = await ui.exec(first, "cat /proc/net/dev")
+        interfaces = [line.split(":")[0].strip() for line in listed["stdout"].splitlines()[2:]]
+        if any(name != "lo" for name in interfaces):
+            network = metrics["network"]
+            assert network["rx"]["total"] > 0 and network["tx"]["total"] > 0
+            assert network["rx"]["speed"] >= 0 and network["tx"]["speed"] >= 0
+            later = await events.wait_for("metrics", ok_with(2), timeout=30)
+            (after,) = [s for s in later["data"]["servers"] if s["server"] == server]
+            assert after["network"]["rx"]["total"] >= network["rx"]["total"]
+        else:
+            assert metrics["network"] is None
 
         await ui.api.delete(f"/api/ssh/sessions/{first}")
         await events.wait_for("metrics", ok_with(1), timeout=30)

@@ -11,12 +11,13 @@ logger = structlog.get_logger()
 
 
 class MonitorPlugin(BasePlugin):
-    """Метрики серверов (CPU, RAM) через synex_worker: событие metrics в /ws каждые
-    500 мс и GET /api/monitor/metrics. Серверы берутся из SSH-сессий плагина ssh."""
+    """Метрики серверов (CPU, RAM, сеть, диски, GPU) через synex_worker: событие metrics в
+    /ws каждые 500 мс и GET /api/monitor/metrics. Серверы берутся из SSH-сессий плагина
+    ssh."""
 
     name = "monitor"
-    version = "0.1.0"
-    description = "Метрики серверов: CPU, память, диски, видеокарты"
+    version = "0.2.0"
+    description = "Метрики серверов: CPU, память, сеть, диски, видеокарты"
     requires = ("ssh",)
     router = router
 

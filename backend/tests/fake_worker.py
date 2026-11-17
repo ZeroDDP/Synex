@@ -27,6 +27,9 @@ SSH-сервер воображаемый:
 monitor_get_values, как сборка с исправленным CPU: первый вызов в сессии отдаёт CPU «от
 загрузки сервера» (BOOT_CPU), следующие 10, 11, 12 ... Хост "no-proc" имитирует сервер,
 где команда метрик не выполнилась; FakeWorkerState.monitor_error делает ok=false.
+Как сборка 2026-11-17, в ответе есть сеть и раздел "/": счётчики сети у сервера общие
+для всех сессий и растут с каждым вызовом (NET_RX_STEP, NET_TX_STEP), а скорости в первом
+вызове сессии нет. FakeWorkerState.monitor_build = "2026-11-14" убирает эти поля.
 
 SFTP (sftp_*) как сборка 2026-11-14 или 2026-11-12 (FakeWorkerState.sftp_build, см.
 FakeSftp). Файловая система сервера: с эмулятором shell это его виртуальная ФС
@@ -71,6 +74,15 @@ if TYPE_CHECKING:
 PASSWORD = "right-password"
 BOOT_CPU = 2.63  # CPU в первом замере сессии: среднее с загрузки сервера
 MEM_TOTAL_KB = 2014404
+# Сеть и раздел "/" в monitor_get_values: на столько байт растут счётчики сервера за один
+# вызов; скорость считается так, будто вызовы идут раз в полсекунды
+NET_RX_STEP = 50_000
+NET_TX_STEP = 10_000
+NET_RX_SPEED = NET_RX_STEP * 2.0
+NET_TX_SPEED = NET_TX_STEP * 2.0
+DISK_TOTAL_KB = 41_152_736
+DISK_USED_KB = 12_345_678
+DISK_AVAILABLE_KB = 26_000_000
 PASSPHRASE = "right-phrase"
 NO_SESSION = "Session dont founded by key. Create session first!"
 FAKE_KEY_TYPE = "ssh-ed25519"
@@ -137,6 +149,9 @@ class FakeWorkerState:
         self.run_shell = run_shell
         self.connect_delay = connect_delay
         self.monitor_error = monitor_error  # ok=false с этим текстом в monitor_get_values
+        # Какую сборку повторяет monitor_get_values: с 2026-11-17 в ответе сеть и раздел "/"
+        self.monitor_build: Literal["2026-11-17", "2026-11-14"] = "2026-11-17"
+        self.monitor_polls: dict[tuple[str, int], int] = {}  # сервер -> сколько раз опрошен
         # Ответ на команду дисков и GPU мониторинга (без run_shell), см. HARDWARE_OUTPUT
         self.hardware_output = HARDWARE_OUTPUT if hardware_output is None else hardware_output
         self.sequential = sequential
@@ -431,8 +446,25 @@ class FakeWorkerProtocol(asyncio.Protocol):
                 "mem_available_kb": MEM_TOTAL_KB - used,
                 "mem_used_kb": used,
                 "mem_usage_percent": round(used / MEM_TOTAL_KB * 100, 2),
-                "error": None,
             }
+            if self.state.monitor_build != "2026-11-14":
+                server = (str(session.get("host")), int(session.get("port") or 22))
+                polls = self.state.monitor_polls[server] = (
+                    self.state.monitor_polls.get(server, 0) + 1
+                )
+                values.update(
+                    net_rx_bytes_total=polls * NET_RX_STEP,
+                    net_tx_bytes_total=polls * NET_TX_STEP,
+                    net_rx_bytes_per_sec=None if calls == 1 else NET_RX_SPEED,
+                    net_tx_bytes_per_sec=None if calls == 1 else NET_TX_SPEED,
+                    disk_total_kb=DISK_TOTAL_KB,
+                    disk_used_kb=DISK_USED_KB,
+                    disk_available_kb=DISK_AVAILABLE_KB,
+                    disk_usage_percent=round(
+                        DISK_USED_KB / (DISK_USED_KB + DISK_AVAILABLE_KB) * 100, 2
+                    ),
+                )
+            values["error"] = None
         return reply(msg_id, "ok", stdout=json.dumps(values, separators=(",", ":")))
 
     def _run_shell(self, command: str) -> tuple[str, str, int]:

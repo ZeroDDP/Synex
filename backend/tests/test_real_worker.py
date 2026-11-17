@@ -198,6 +198,22 @@ async def test_real_monitor_get_values(ssh_client):
     assert 0 < values["mem_used_kb"] <= values["mem_total_kb"]
     assert 0 <= values["mem_usage_percent"] <= 100
 
+    # Сборка с 2026-11-17: раздел "/" и сеть (все интерфейсы, кроме lo)
+    assert 0 < values["disk_used_kb"] < values["disk_total_kb"], values
+    assert values["disk_available_kb"] <= values["disk_total_kb"]
+    assert 0 <= values["disk_usage_percent"] <= 100
+    again = json.loads(
+        (await ssh_client.request("monitor_get_values", {}, request_id="s1"))["stdout"]
+    )
+    if values["net_rx_bytes_total"] is None:  # у сервера только lo
+        assert again["net_rx_bytes_per_sec"] is None and values["net_tx_bytes_total"] is None
+        return
+    # В первом вызове сессии скорости нет, во втором она посчитана от первого
+    assert values["net_rx_bytes_per_sec"] is None and values["net_tx_bytes_per_sec"] is None
+    assert again["net_rx_bytes_per_sec"] >= 0 and again["net_tx_bytes_per_sec"] >= 0
+    assert again["net_rx_bytes_total"] >= values["net_rx_bytes_total"] >= 0
+    assert again["net_tx_bytes_total"] >= values["net_tx_bytes_total"] >= 0
+
 
 async def test_real_worker_raw_exit_codes(ssh_client):
     """Коды возврата от самого воркера, без обёртки Python. Сборки до 2026-11-14 теряли
@@ -311,6 +327,13 @@ async def test_real_monitoring(real_worker_settings):
             assert 0 < memory["used"] < memory["total"]
             assert 0 < memory["percent"] < 100
             assert server["age_ms"] < 3_000
+            # Раздел "/" и сеть приходят в том же ответе воркера, что CPU и память
+            disk = server["disk"]
+            assert 0 < disk["used"] < disk["total"] and 0 <= disk["percent"] <= 100
+            network = server["network"]
+            if network is not None:  # null: у сервера только lo
+                assert network["rx"]["total"] >= 0 and network["tx"]["total"] >= 0
+                assert network["rx"]["speed"] >= 0 and network["tx"]["speed"] >= 0
 
 
 @needs_ssh
