@@ -1,0 +1,30 @@
+name: Rust Windows
+
+on:
+  push:
+    branches: [ "core", "core/**", "core-ipc-worker" ]
+  pull_request:
+    branches: [ "core", "core/**" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build
+      run: cargo build --verbose --release
+      working-directory: ./core
+    - name: Run tests
+      run: cargo test --verbose
+      working-directory: ./core
+
+    - name: Upload binary artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: synex-worker-windows
+        path: core/target/release/synex_worker.exe
