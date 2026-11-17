@@ -8,81 +8,26 @@ import asyncio
 import hashlib
 import os
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
 import pytest
 
-from app.core.config import settings
 from app.plugins.sftp import service
-from app.plugins.sftp.remote import RemoteFS
 from app.plugins.sftp.routes import TRANSFER_ID_HEADER
-from app.plugins.sftp.service import SftpService, get_sftp
-from app.plugins.sftp.transfers import TransferManager
 from tests.conftest import needs_unicode_file_names
 from tests.fake_shell import HOME
-from tests.plugin_rig import PluginRig, plugin_rig
+from tests.sftp_rig import Files, files_rig
 
 MB = 1024 * 1024
-
-
-@dataclass
-class Files:
-    rig: PluginRig
-    service: SftpService
-    events: list[dict]
-    local: Path  # папка «этого компьютера»
-
-    @property
-    def base(self) -> str:
-        return f"/api/sftp/sessions/{self.rig.session_id}"
-
-    def server(self, path: str) -> Path:
-        """Файл виртуальной ФС сервера (путь от корня или "~/...")."""
-        if path == "~" or path.startswith("~/"):
-            path = HOME + path[1:]
-        return self.rig.worker.remote(path)
-
-    def put(self, path: str, data: bytes = b"x") -> Path:
-        file = self.server(path)
-        file.parent.mkdir(parents=True, exist_ok=True)
-        file.write_bytes(data)
-        return file
-
-    def requests(self, action: str) -> list[dict]:
-        return [r for r in self.rig.worker.requests if r["action"] == action]
-
-    async def finished(self, transfer_id: str, timeout: float = 20) -> dict:
-        async with asyncio.timeout(timeout):
-            while True:
-                info = (await self.rig.api.get(f"/api/sftp/transfers/{transfer_id}")).json()
-                if info["status"] not in ("queued", "running", "verifying"):
-                    return info
-                await asyncio.sleep(0.02)
 
 
 # Сборки воркера: 2026-11-14 (коды ошибок, sftp_stat, mtime) и 2026-11-12 (только
 # тексты ошибок): backend работает с обеими, каждый тест идёт с каждой
 @pytest.fixture(params=["2026-11-14", "2026-11-12"])
 async def files(request, tmp_path: Path, missing_socket_path, monkeypatch) -> AsyncIterator[Files]:
-    monkeypatch.setattr(settings, "SFTP_PROGRESS_INTERVAL", 0.02)
-    events: list[dict] = []
-    async with plugin_rig(tmp_path, missing_socket_path, ["sftp"], {}) as rig:
-        rig.worker.sftp_build = request.param
-
-        async def publish(info: dict) -> None:
-            events.append(info)
-
-        remote = RemoteFS(rig.manager)
-        sftp = SftpService(remote, TransferManager(remote, publish))
-        rig.app.dependency_overrides[get_sftp] = lambda: sftp
-        local = tmp_path / "local"
-        local.mkdir()
-        try:
-            yield Files(rig, sftp, events, local)
-        finally:
-            await sftp.transfers.shutdown()
+    async with files_rig(tmp_path, missing_socket_path, monkeypatch, request.param) as rig:
+        yield rig
 
 
 # ------------------------------------------------------------------- server
@@ -478,8 +423,6 @@ async def test_refusals_before_the_transfer_starts(files: Files):
     cases = [
         ({"direction": "upload", "local_path": str(files.local / "none.bin"),
           "remote_path": "~"}, 404, "sftp_local_not_found"),
-        ({"direction": "upload", "local_path": str(files.local), "remote_path": "~"},
-         409, "sftp_is_a_directory"),
         ({"direction": "upload", "local_path": "relative.bin", "remote_path": "~"},
          422, "sftp_bad_path"),
         ({"direction": "upload", "local_path": str(files.local / "src.bin"),
@@ -488,8 +431,6 @@ async def test_refusals_before_the_transfer_starts(files: Files):
           "remote_path": "no/such/dir/"}, 404, "sftp_not_found"),
         ({"direction": "download", "local_path": str(files.local),
           "remote_path": "exists.bin"}, 409, "sftp_local_exists"),
-        ({"direction": "download", "local_path": str(files.local), "remote_path": "~"},
-         409, "sftp_is_a_directory"),
         ({"direction": "download", "local_path": str(files.local),
           "remote_path": "missing.bin"}, 404, "sftp_not_found"),
     ]  # fmt: skip

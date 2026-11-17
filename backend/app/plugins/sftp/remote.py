@@ -21,7 +21,9 @@
 * копирование папки: `cp -R` служебной командой (воркер копирует только файлы), и после
   копирования результат проверяется: воркер теряет код возврата `cp`;
 * контрольная сумма файла: `sha256sum`, `shasum -a 256` или `openssl` на сервере, если
-  что-то из них есть.
+  что-то из них есть;
+* передача папки целиком (folders.py): обход папки сервера (tree), контрольные суммы
+  пачкой одной командой (checksums) и действия в служебной сессии передачи.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ import json
 import re
 import shlex
 import stat
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -54,6 +57,18 @@ from app.plugins.sftp.errors import (
     SftpTimeoutError,
     SftpUnavailableError,
 )
+from app.plugins.sftp.tree import (
+    MAX_DEPTH,
+    REASON_CONTROL,
+    REASON_DEPTH,
+    REASON_LINK,
+    REASON_SPECIAL,
+    REASON_UNREADABLE,
+    DirItem,
+    Tree,
+    TreeBuilder,
+    depth,
+)
 from app.plugins.ssh.manager import SSHSessionManager
 from app.plugins.ssh.session import CompanionSession
 
@@ -61,9 +76,15 @@ logger = structlog.get_logger()
 
 EntryType = Literal["file", "dir", "link", "other"]
 TargetType = Literal["file", "dir"]
+# Чем кончилась уборка временного пути (RemoteFS.discard)
+Discarded = Literal["removed", "absent", "failed"]
 
 LINK_PROBES = 32  # сколько ссылок одного списка проверять «ведёт ли на папку»
 _SHA256_RE = re.compile(r"\b([0-9a-fA-F]{64})\b")
+# Контрольные суммы пачкой: не больше стольких файлов и символов в одной команде
+CHECKSUM_BATCH = 64
+CHECKSUM_COMMAND_CHARS = 12_000
+_NO_SUM = "-"  # строка ответа о файле, сумму которого посчитать не вышло
 _TYPES: dict[str, EntryType] = {"folder": "dir", "file": "file", "symlink": "link"}
 _TYPE_CHARS = {"dir": "d", "link": "l", "file": "-", "other": "?"}
 
@@ -123,6 +144,25 @@ class UploadPlan:
     temp_dir: str
     temp_file: str
     replace: bool  # целевой файл есть, и его разрешили заменить
+
+
+@dataclass(frozen=True)
+class FolderPlan:
+    """Куда ляжет загружаемая папка. Новая папка собирается во временной рядом с целевой
+    и переносится на место готовой. Если целевая уже есть (merge), файлы кладутся прямо в
+    неё: каждый под временным именем, а на своё место после проверки."""
+
+    session_id: str
+    target: str
+    merge: bool
+    temp_dir: str | None  # None при объединении
+
+    @property
+    def root(self) -> str:
+        """Папка, в которую идут файлы во время передачи."""
+        if self.temp_dir is None:
+            return self.target
+        return paths.join(self.temp_dir, paths.name(self.target))
 
 
 @dataclass
@@ -388,7 +428,10 @@ class RemoteFS:
 
     async def remote_file(self, session_id: str, remote_path: str) -> Entry:
         """Файл, который будут скачивать: он есть и это файл (не папка)."""
-        entry = await self.stat(session_id, remote_path)
+        return self.as_file(await self.stat(session_id, remote_path))
+
+    @staticmethod
+    def as_file(entry: Entry) -> Entry:
         if entry.is_dir:
             raise SftpIsADirectoryError(f"{entry.path} is a directory")
         if entry.type == "other":
@@ -423,19 +466,326 @@ class RemoteFS:
         if found is None:
             if result.timed_out:
                 raise SftpTimeoutError(f"Checksum of {path} took longer than SFTP_LONG_TIMEOUT")
-            info.checksum = False
-            logger.info("No sha256 tool on the server: transfers check only the size")
+            if info.checksum is None:
+                info.checksum = False
+                logger.info("No sha256 tool on the server: transfers check only the size")
+            # Инструмент на сервере есть (уже считал): не вышло с этим файлом
             return None
         info.checksum = True
         return found.group(1).lower()
 
+    async def checksums(
+        self, session_id: str, files: list[str], companion: CompanionSession | None = None
+    ) -> list[str | None] | None:
+        """SHA-256 нескольких файлов сервера, в порядке files: одна команда на пачку, а не
+        на файл. None вместо суммы: с этим файлом не вышло (пропал, нет прав). None
+        вместо списка: на сервере нечем считать. companion: служебная сессия передачи
+        (команда идёт в ней и не ждёт основную)."""
+        info = await self.info(session_id)
+        if info.checksum is False:
+            return None
+        sums: list[str | None] = []
+        for batch in _batches(files):
+            # У каждого файла своя цепочка: ровно одна строка ответа на файл
+            command = "; ".join(
+                f"sha256sum {q} 2>/dev/null || shasum -a 256 {q} 2>/dev/null "
+                f"|| openssl dgst -sha256 -r {q} 2>/dev/null || echo {_NO_SUM}"
+                for q in map(shlex.quote, batch)
+            )
+            if companion is not None:
+                result = await self.manager.companion_run_service(
+                    companion, command, timeout=settings.SFTP_LONG_TIMEOUT
+                )
+            else:
+                result = await self.manager.run_service(
+                    session_id, command, timeout=settings.SFTP_LONG_TIMEOUT,
+                    wait=settings.SFTP_SESSION_WAIT, name="sftp",
+                )  # fmt: skip
+            if result.timed_out:
+                raise SftpTimeoutError("Checksums took longer than SFTP_LONG_TIMEOUT")
+            lines = [line for line in result.stdout.splitlines() if line.strip()]
+            if len(lines) == len(batch):
+                sums.extend(_sum_of(line) for line in lines)
+            else:  # лишний вывод на сервере: считаем по одному
+                for path in batch:
+                    sums.append(await self.checksum(session_id, path))
+        if info.checksum is None and files:
+            # Файлы только что переданы и на месте: ни одной суммы значит, что считать нечем
+            info.checksum = any(value is not None for value in sums)
+            if not info.checksum:
+                logger.info("No sha256 tool on the server: transfers check only the size")
+        return sums if info.checksum is not False else None
+
     def forget(self, session_id: str) -> None:
         self._cache.pop(session_id, None)
 
+    # ---------------------------------------------------------------- folders
+    #
+    # Действия передачи папки. companion: служебная сессия передачи; без неё (воркер не
+    # даёт второе подключение) действие идёт в основной и ждёт её до SFTP_SESSION_WAIT.
+
+    async def plan_upload_dir(
+        self, session_id: str, remote_path: str, local_name: str, transfer_id: str,
+        *, overwrite: bool,
+    ) -> FolderPlan:  # fmt: skip
+        """Куда ляжет папка с этого компьютера. Существующая папка в remote_path (или
+        путь с "/" в конце) значит «в неё под тем же именем»."""
+        home = (await self.info(session_id)).home
+        target = paths.normalize(remote_path, home)
+        existing = await self._find_probed(session_id, target)
+        if remote_path.endswith("/") or (existing is not None and existing.is_dir):
+            if existing is None:
+                raise SftpNotFoundError(f"Directory {target} not found")
+            if not existing.is_dir:
+                raise SftpNotADirectoryError(f"{target} is not a directory")
+            target = paths.join(target, local_name)
+            existing = await self._find_probed(session_id, target)
+        if existing is not None:
+            if not existing.is_dir:
+                raise SftpNotADirectoryError(
+                    f"{target} is a file on the server: a folder cannot replace it"
+                )
+            if not overwrite:
+                raise SftpTargetExistsError(
+                    f"Folder {target} already exists (pass overwrite=true to merge into it)"
+                )
+            return FolderPlan(session_id=session_id, target=target, merge=True, temp_dir=None)
+        parent = paths.parent(target) or "/"
+        await self._require_dir(session_id, parent)
+        temp_dir = paths.join(parent, f".synex-{transfer_id}.part")
+        return FolderPlan(session_id=session_id, target=target, merge=False, temp_dir=temp_dir)
+
+    async def tree(
+        self,
+        session_id: str,
+        root: str,
+        companion: CompanionSession | None,
+        *,
+        limit: int,
+        stopped: Callable[[], bool],
+    ) -> Tree:
+        """Обход папки сервера: что в ней скачивать (см. tree.py)."""
+        builder = TreeBuilder(paths.name(root), limit, stopped)
+        entries = await self.entries(session_id, root, companion)
+        await self._scan(session_id, companion, builder, builder.tree.root, root, entries)
+        return builder.tree
+
+    async def _scan(
+        self,
+        session_id: str,
+        companion: CompanionSession | None,
+        builder: TreeBuilder,
+        item: DirItem,
+        directory: str,
+        entries: list[Entry],
+    ) -> None:
+        for entry in sorted(entries, key=lambda e: e.name):
+            builder.check()
+            if any(ord(ch) < 32 for ch in entry.name):
+                builder.skip(item, entry.name, REASON_CONTROL, folder=entry.type == "dir")
+            elif entry.type == "dir":
+                if depth(item.rel) + 1 > MAX_DEPTH:
+                    builder.skip(item, entry.name, REASON_DEPTH, folder=True)
+                    continue
+                try:
+                    children = await self.entries(session_id, entry.path, companion)
+                except SftpPermissionError:
+                    builder.skip(item, entry.name, REASON_UNREADABLE, folder=True)
+                    continue
+                except (SftpNotFoundError, SftpNotADirectoryError):
+                    continue  # папку убрали, пока шёл обход
+                sub = builder.add_dir(item, entry.name)
+                await self._scan(session_id, companion, builder, sub, entry.path, children)
+            elif entry.type == "file":
+                builder.add_file(item, entry.name, entry.size or 0)
+            elif entry.type == "link":
+                builder.skip(item, entry.name, REASON_LINK)
+            else:
+                builder.skip(item, entry.name, REASON_SPECIAL)
+
+    async def entries(
+        self, session_id: str, path: str, companion: CompanionSession | None
+    ) -> list[Entry]:
+        return await self._list(session_id, path, **self._via(companion))
+
+    async def make_dir(
+        self, session_id: str, path: str, companion: CompanionSession | None
+    ) -> None:
+        await self._call(
+            session_id, "sftp_create_dir", {"remote_path": path}, **self._via(companion)
+        )
+
+    async def rename(
+        self, session_id: str, source: str, target: str, companion: CompanionSession | None
+    ) -> None:
+        """Переименование на сервере; занятое место не заменяется (ошибка)."""
+        payload = {"remote_path": source, "destination_path": target}
+        await self._call(session_id, "sftp_move_file", payload, **self._via(companion))
+
+    async def delete_file(
+        self, session_id: str, path: str, companion: CompanionSession | None
+    ) -> None:
+        await self._call(
+            session_id, "sftp_remove_file", {"remote_path": path}, **self._via(companion)
+        )
+
+    async def delete_dir(
+        self, session_id: str, path: str, companion: CompanionSession | None
+    ) -> None:
+        await self._call(
+            session_id, "sftp_remove_dir", {"remote_path": path}, **self._via(companion)
+        )
+
+    async def is_dir_link(
+        self, session_id: str, path: str, companion: CompanionSession | None
+    ) -> bool:
+        """Ссылка path ведёт на папку (список по ней читается)."""
+        try:
+            await self.entries(session_id, path, companion)
+        except (SftpNotFoundError, SftpNotADirectoryError, SftpPermissionError):
+            return False
+        return True
+
+    async def upload_to(
+        self, session_id: str, local_path: str, remote_path: str,
+        companion: CompanionSession | None,
+    ) -> None:  # fmt: skip
+        payload = {"local_path": local_path, "remote_path": remote_path}
+        await self._transfer(session_id, companion, "sftp_upload_file", payload)
+
+    async def put_in_place(
+        self, session_id: str, temp: str, target: str, *, replace: bool,
+        companion: CompanionSession | None,
+    ) -> None:  # fmt: skip
+        """Проверенный файл с временного имени на своё место (объединение папок). Как в
+        commit_upload: прежний файл сначала отходит в сторону и удаляется, когда новый
+        уже на месте; если поставить новый не вышло, прежний возвращается."""
+        previous: str | None = None
+        if replace:
+            previous = temp + ".previous"
+            try:
+                await self.rename(session_id, target, previous, companion)
+            except SftpNotFoundError:
+                previous = None  # прежний файл за время передачи убрали
+        try:
+            await self.rename(session_id, temp, target, companion)
+        except BaseException:  # и отмена: прежний файл не должен остаться в стороне
+            if previous is not None:
+                await self._put_back(session_id, previous, target, companion)
+            raise
+        if previous is not None:
+            try:
+                await self.delete_file(session_id, previous, companion)
+            except AppError as e:
+                # Новый файл уже на месте: передаче это не мешает
+                logger.warning("The replaced file was not removed", path=previous, error=e.detail)
+
+    async def _put_back(
+        self, session_id: str, previous: str, target: str, companion: CompanionSession | None
+    ) -> None:
+        """Вернуть на место прежний файл, который отошёл в сторону. Служебная сессия к
+        этому времени может быть закрыта (передачу отменили между двумя переименованиями):
+        тогда в основной."""
+        payload = {"remote_path": previous, "destination_path": target}
+        ways: list[dict[str, Any]] = [{"wait": 30}]
+        if companion is not None:
+            ways.insert(0, {"companion": companion})
+        for way in ways:
+            try:
+                await self._call(session_id, "sftp_move_file", payload, **way)
+                return
+            except AppError as e:
+                error = e.detail
+        logger.warning(
+            "The previous file stays under a temporary name: it could not be put back",
+            path=previous,
+            target=target,
+            error=error,
+        )
+
+    async def size_now(self, session_id: str, path: str) -> int | None:
+        """Размер файла для прогресса: в основной сессии и без ожидания. None, если она
+        занята или сборка воркера не знает sftp_stat (список папки для этого дорог)."""
+        if self._stat_supported(session_id) is False:
+            return None
+        try:
+            entry = await self._stat(session_id, path, wait=0)
+        except (AppError, _NoStatError):
+            return None
+        return entry.size if entry is not None else None
+
+    async def size_of(
+        self, session_id: str, path: str, companion: CompanionSession | None
+    ) -> int | None:
+        """Размер файла сервера сейчас; None, если файла нет."""
+        if self._stat_supported(session_id) is not False:
+            try:
+                entry = await self._stat(session_id, path, **self._via(companion))
+                return entry.size if entry is not None else None
+            except _NoStatError:
+                pass
+        try:
+            listed = await self.entries(session_id, paths.parent(path) or "/", companion)
+        except (SftpNotFoundError, SftpNotADirectoryError):
+            return None
+        return next((e.size for e in listed if e.path == path), None)
+
+    async def discard(
+        self,
+        session_id: str,
+        path: str,
+        *,
+        folder: bool = False,
+        companion: CompanionSession | None = None,
+        wait: float = 30,
+    ) -> Discarded:
+        """Убрать временный файл или временную папку с содержимым после сбоя или отмены.
+        Без companion в основной сессии (служебная сессия передачи к этому времени
+        закрыта), с ожиданием до wait секунд. Ошибки не выбрасываются: removed убрано,
+        absent такого пути нет, failed убрать не вышло."""
+        via: dict[str, Any] = {"companion": companion} if companion is not None else {"wait": wait}
+        try:
+            if folder:
+                await self._list(session_id, path, **via)
+            else:
+                await self._call(session_id, "sftp_remove_file", {"remote_path": path}, **via)
+                return "removed"
+        except SftpNotFoundError:
+            return "absent"
+        except AppError:
+            return "failed"
+        try:
+            await self._remove_tree(session_id, path, **via)
+        except AppError:
+            # В том числе «не найдено» в глубине: то, что там есть, меняется прямо сейчас
+            return "failed"
+        return "removed"
+
+    def _via(self, companion: CompanionSession | None) -> dict[str, Any]:
+        if companion is not None:
+            return {"companion": companion}
+        return {"wait": settings.SFTP_SESSION_WAIT}
+
+    async def _find_probed(self, session_id: str, path: str) -> Entry | None:
+        """_find, но о ссылке известно, ведёт ли она на папку."""
+        entry = await self._find(session_id, path)
+        if entry is not None and entry.type == "link":
+            (entry,) = await self._probe_links(session_id, [entry])
+        return entry
+
     # --------------------------------------------------------------- helpers
 
-    async def _list(self, session_id: str, path: str, *, wait: float | None = None) -> list[Entry]:
-        payload = await self._call(session_id, "sftp_list_dir", {"remote_path": path}, wait=wait)
+    async def _list(
+        self,
+        session_id: str,
+        path: str,
+        *,
+        wait: float | None = None,
+        companion: CompanionSession | None = None,
+    ) -> list[Entry]:
+        payload = await self._call(
+            session_id, "sftp_list_dir", {"remote_path": path}, wait=wait, companion=companion
+        )
         try:
             raw = json.loads(str(payload.get("stdout") or "[]"))
         except ValueError:
@@ -445,7 +795,8 @@ class RemoteFS:
             if not isinstance(item, dict):
                 continue
             name = str(item.get("name") or "")
-            if not name or name in (".", ".."):
+            # "/" в имени не бывает: такая запись увела бы в другую папку
+            if not name or name in (".", "..") or "/" in name:
                 continue
             entries.append(_entry(item, name, paths.join(path, name)))
         return entries
@@ -466,11 +817,20 @@ class RemoteFS:
             return None
         return next((e for e in entries if e.name == paths.name(path)), None)
 
-    async def _stat(self, session_id: str, path: str, *, wait: float | None = None) -> Entry | None:
+    async def _stat(
+        self,
+        session_id: str,
+        path: str,
+        *,
+        wait: float | None = None,
+        companion: CompanionSession | None = None,
+    ) -> Entry | None:
         """sftp_stat (без перехода по ссылке). None, если пути нет; _NoStatError, если сборка
         воркера sftp_stat не знает."""
         try:
-            payload = await self._call(session_id, "sftp_stat", {"remote_path": path}, wait=wait)
+            payload = await self._call(
+                session_id, "sftp_stat", {"remote_path": path}, wait=wait, companion=companion
+            )
         except SftpUnavailableError as e:
             if "Unknown action" not in e.detail:
                 raise
@@ -522,13 +882,21 @@ class RemoteFS:
         if overwrite and await self._find(session_id, dst) is not None:
             await self._call(session_id, "sftp_remove_file", {"remote_path": dst})
 
-    async def _remove_tree(self, session_id: str, directory: str) -> None:
-        for entry in await self._list(session_id, directory):
+    async def _remove_tree(
+        self,
+        session_id: str,
+        directory: str,
+        *,
+        wait: float | None = None,
+        companion: CompanionSession | None = None,
+    ) -> None:
+        via: dict[str, Any] = {"wait": wait, "companion": companion}
+        for entry in await self._list(session_id, directory, **via):
             if entry.type == "dir":
-                await self._remove_tree(session_id, entry.path)
+                await self._remove_tree(session_id, entry.path, **via)
             else:
-                await self._call(session_id, "sftp_remove_file", {"remote_path": entry.path})
-        await self._call(session_id, "sftp_remove_dir", {"remote_path": directory})
+                await self._call(session_id, "sftp_remove_file", {"remote_path": entry.path}, **via)
+        await self._call(session_id, "sftp_remove_dir", {"remote_path": directory}, **via)
 
     async def _probe_links(self, session_id: str, entries: list[Entry]) -> list[Entry]:
         result, probes = [], 0
@@ -554,10 +922,16 @@ class RemoteFS:
         *,
         long: bool = False,
         wait: float | None = None,
+        companion: CompanionSession | None = None,
     ) -> dict[str, Any]:
+        """Действие воркера в основной сессии или, если передан companion, в служебной."""
         timeout = settings.SFTP_LONG_TIMEOUT if long else settings.SFTP_TIMEOUT
         self._check_available(session_id)
         try:
+            if companion is not None:
+                return await self.manager.companion_request(
+                    companion, action, payload, timeout=timeout
+                )
             return await self.manager.request(
                 session_id, action, payload, timeout=timeout, wait=wait, name="sftp"
             )
@@ -665,6 +1039,32 @@ def _translate(stderr: str, payload: dict[str, Any]) -> AppError:
     error = SftpCommandError(f"The server refused the operation: {message or 'no reason given'}")
     error.reason = f": {message}" if message else ""
     return error
+
+
+def _batches(files: list[str]) -> Iterator[list[str]]:
+    """Файлы пачками для одной команды контрольных сумм."""
+    batch: list[str] = []
+    chars = 0
+    for path in files:
+        cost = 3 * len(shlex.quote(path)) + 100
+        if batch and (len(batch) >= CHECKSUM_BATCH or chars + cost > CHECKSUM_COMMAND_CHARS):
+            yield batch
+            batch, chars = [], 0
+        batch.append(path)
+        chars += cost
+    if batch:
+        yield batch
+
+
+def _sum_of(line: str) -> str | None:
+    """SHA-256 из строки sha256sum, shasum или openssl; None у строки «не вышло»."""
+    found = _SHA256_RE.findall(line)
+    if not found:
+        return None
+    # sha256sum и shasum ставят сумму первой ("\\" перед ней, если в имени спецсимволы),
+    # старый openssl без -r последней: "SHA256(имя)= сумма"
+    head = line.lstrip("\\")[:64].lower()
+    return head if head == found[0].lower() else found[-1].lower()
 
 
 def _entry(item: dict[str, Any], name: str, path: str) -> Entry:

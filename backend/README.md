@@ -490,11 +490,11 @@ POST /api/connections
   копируется целиком), `DELETE .../entry?path=&recursive=true`. Ответ: сведения о файле
   (как элемент `entries`). Корень и домашнюю папку удалить или переместить нельзя (403
   `sftp_protected_path`); непустая папка удаляется только с `recursive=true`.
-- Передача файла. Два способа, оба видны в `/api/sftp/transfers` и в `/ws`:
+- Передача файла или папки. Два способа, оба видны в `/api/sftp/transfers` и в `/ws`:
   - по пути на этом компьютере, в фоне: `POST .../transfers` `{direction: upload |
     download, local_path, remote_path, overwrite?}` → 202 и описание передачи. Папка
     (или путь с разделителем в конце) в «куда» значит «положить под тем же именем».
-    Передачи одной сессии идут по очереди;
+    Передачи одной сессии идут по очереди. Так передаются и папки целиком (ниже);
   - телом запроса: `POST .../upload?path=<куда>&name=<имя, если path это папка>`
     (тело это содержимое файла, ответ 201 после записи и сверки) и
     `GET .../download?path=` (тело ответа это файл, id передачи в заголовке
@@ -505,18 +505,20 @@ POST /api/connections
 - Состояние передачи (ответы API и событие `sftp.transfer` в `/ws`):
 
 ```json
-{"id": "5f0c2a9e41b7", "session_id": "3f9c0a7b12d4e5f6", "direction": "upload",
- "source": "path", "name": "backup.tar.gz", "remote_path": "/srv/backup.tar.gz",
- "local_path": "C:\\Users\\me\\backup.tar.gz", "status": "running",
- "bytes_done": 41943040, "bytes_total": 104857600, "percent": 40.0,
- "speed": 13981013, "eta_seconds": 4, "error": null, "detail": null,
+{"id": "5f0c2a9e41b7", "session_id": "3f9c0a7b12d4e5f6", "kind": "file",
+ "direction": "upload", "source": "path", "name": "backup.tar.gz",
+ "remote_path": "/srv/backup.tar.gz", "local_path": "C:\\Users\\me\\backup.tar.gz",
+ "status": "running", "bytes_done": 41943040, "bytes_total": 104857600, "percent": 40.0,
+ "speed": 13981013, "eta_seconds": 4, "files_total": null, "files_done": 0,
+ "current": null, "skipped": [], "skipped_count": 0, "error": null, "detail": null,
  "checksum": null, "verified": null, "created_at": "...", "started_at": "...",
  "finished_at": null}
 ```
 
   `status`: `queued` → `running` → `verifying` → `completed`, либо `failed` (`error` и
-  `detail`), либо `cancelled`. Событие приходит при каждой смене статуса и не чаще раза
-  в `SFTP_PROGRESS_INTERVAL` (0,25 с), пока идут данные. `speed` в байтах в секунду.
+  `detail`), либо `cancelled`; у папки после `queued` идёт `scanning`. Событие приходит
+  при каждой смене статуса и не чаще раза в `SFTP_PROGRESS_INTERVAL` (0,25 с), пока идут
+  данные. `speed` в байтах в секунду.
 - Файл передаёт воркер в служебной SSH-сессии к тому же серверу (своё IPC-подключение),
   поэтому терминал, метрики, docker и git этой сессии во время передачи не ждут.
   Прогресс: при скачивании backend смотрит, как растёт временный файл на этом
@@ -533,8 +535,48 @@ POST /api/connections
   возвращается.
 - Отмена идущей передачи сразу отвечает `cancelled`, закрывает её служебную сессию и
   убирает временные файлы; следующая передача сессии начинается сразу. Прерывать
-  передачу воркер (сборка 2026-11-12) не умеет: он дочитывает файл до конца в фоне,
-  результат никуда не попадает. Передавать папки целиком пока нельзя: только файлы.
+  передачу воркер не умеет: он дочитывает файл до конца в фоне, результат никуда не
+  попадает. Если отмена пришла в самом начале файла, воркер создаёт его уже после
+  уборки: такой файл backend убирает следом (проверяет временные пути ещё 15 секунд).
+- Папка целиком: тот же `POST .../transfers`, в `local_path` (загрузка) или в
+  `remote_path` (скачивание) папка. Это одна передача с `kind: "dir"`:
+
+```json
+{"id": "9b1d77c0a2e4", "kind": "dir", "direction": "upload", "name": "site",
+ "remote_path": "/srv/site", "local_path": "C:\\work\\site", "status": "running",
+ "bytes_done": 7340032, "bytes_total": 52428800, "percent": 14.0,
+ "files_total": 318, "files_done": 41, "current": "img/photos/2026/cover.jpg",
+ "skipped": [{"path": "node_modules/.bin/tsc", "reason": "Links are not transferred"}],
+ "skipped_count": 1, "verified": null, "...": "..."}
+```
+
+  - Воркер передаёт только файлы, поэтому папку backend обходит сам и передаёт по
+    одному файлу, все в одной служебной сессии (терминал свободен). Сначала обход
+    (`scanning`, `bytes_total` и `files_total` пока `null`), потом файлы: `files_done`
+    из `files_total`, `current` это файл, который идёт сейчас (путь от корня папки).
+  - Куда: существующая папка в «куда» значит «в неё под тем же именем» (`site` в
+    `/srv` → `/srv/site`); путь, которого ещё нет, это имя новой папки.
+  - Новая папка появляется на месте только готовой: она собирается во временной
+    (`.synex-<id>.part/` рядом на сервере, `<имя>.<id>.synex-part` на компьютере) и
+    встаёт на место переименованием. При ошибке и отмене временная папка удаляется.
+  - Папка уже есть: 409 `sftp_target_exists` (на компьютере `sftp_local_exists`). С
+    `overwrite: true` папки объединяются: файлы с теми же именами заменяются (каждый
+    идёт под временным именем и встаёт на место после проверки), остальное в папке не
+    трогается. При ошибке и отмене уже переданные файлы остаются.
+  - Проверка: SHA-256 каждого файла, одной командой на сервере на пачку файлов (без
+    `sha256sum`, `shasum` и `openssl` сверяется размер; `verified: true`, если SHA-256
+    сверен у всех). Файл, который не сошёлся, передаётся ещё раз: обычно его меняли во
+    время передачи (лог, в который пишут). Не сошёлся снова: пропускается.
+  - Что не передаётся, попадает в `skipped` (первые 50 с причиной, полный счёт в
+    `skipped_count`), а передача идёт дальше и заканчивается `completed`: ссылки (по
+    ним backend не ходит: ссылка может вести наружу или по кругу), сокеты и устройства,
+    то, на что нет прав, файл на месте папки и папка на месте файла при объединении,
+    имена, которые не годятся этому компьютеру (на Windows `a:b.txt`, `con`, а ещё
+    `Readme` рядом с `readme`). Передачу целиком останавливают обрыв связи, отказ
+    сервера без причины (например, кончилось место) и отмена.
+  - Права и время изменения файлов не переносятся. В папке не больше
+    `SFTP_FOLDER_LIMIT` файлов и папок (100 000), иначе `sftp_folder_too_large`. Телом
+    запроса папка не передаётся (`GET .../download` папки: 409 `sftp_is_a_directory`).
 - `GET /api/sftp/local/list?path=C:\Users\me` (без `path` домашняя папка): папка этого
   компьютера для второй панели: `{path, parent, home, roots, separator, entries}`,
   `roots` это диски на Windows и `["/"]` на Linux и macOS. UI работает в окне браузера и
@@ -546,10 +588,11 @@ POST /api/connections
   `sftp_failed` (текст воркера в `detail`), `sftp_unavailable` (на сервере нет SFTP: в
   его `sshd_config` нужна строка `Subsystem sftp ...`; или сборка воркера старая и не знает
   действий `sftp_*`, тогда воркер нужно обновить), `sftp_transfer_corrupted`, 504
-  `sftp_timeout`; для этого компьютера `sftp_local_not_found` (404),
-  `sftp_local_permission_denied` (403), `sftp_local_exists` и `sftp_local_not_a_directory`
-  (409), `sftp_local_error` (422). Сессия, занятая командой пользователя дольше
-  `SSH_SERVICE_WAIT`: 409 `ssh_session_busy`. Настройки `SFTP_*` описаны в `.env.example`.
+  `sftp_timeout`, у передачи папки ещё 422 `sftp_folder_too_large`; для этого компьютера
+  `sftp_local_not_found` (404), `sftp_local_permission_denied` (403), `sftp_local_exists` и
+  `sftp_local_not_a_directory` (409), `sftp_local_error` (422). Сессия, занятая командой
+  пользователя дольше `SSH_SERVICE_WAIT`: 409 `ssh_session_busy`. Настройки `SFTP_*`
+  описаны в `.env.example`.
 
 ### WebSocket /ws
 
@@ -726,8 +769,8 @@ app/
     git/               /api/git/*: commands (команды git и разбор вывода), service,
                        routes, schemas
     sftp/              /api/sftp/*: remote (файлы сервера через SFTP воркера), transfers
-                       (передачи, прогресс, сверка), local (файлы этого компьютера),
-                       paths, routes, schemas
+                       (передачи, прогресс, сверка), folders (папка целиком), tree (обход
+                       папки), local (файлы этого компьютера), paths, routes, schemas
 tests/                 pytest; fake_worker.py имитирует synex_worker
   integration/         полный цикл UI → FastAPI → воркер → SSH-сервер
 ```
@@ -890,7 +933,11 @@ uv run pytest tests/test_real_worker.py -v
 - критерий MVP по SFTP: файл 100 МБ уходит на сервер и возвращается, SHA-256 совпадает,
   прогресс идёт в `/ws`, а команда терминала проходит во время передачи. Размер задаёт
   `SYNEX_TEST_SFTP_MB`; тест печатает время и скорость (`-s`). На локальном `sshd`:
-  около 1с в каждую сторону.
+  около 1с в каждую сторону;
+- папка целиком: больше ста файлов, вложенные и пустая папки, имена с пробелами,
+  кавычками и кириллицей уходят на сервер и возвращаются без отличий; объединение с
+  существующей папкой; ссылка на сервере пропускается; отмена посреди большого файла не
+  оставляет ни папки, ни временных файлов на сервере и на этом компьютере.
 
 Нужны воркер (как для `test_real_worker.py`) и SSH-сервер. Если `SYNEX_TEST_SSH_*`
 не заданы, на Linux и macOS тесты сами поднимают `sshd` на `127.0.0.1` со случайным

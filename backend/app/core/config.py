@@ -131,6 +131,8 @@ class Settings(BaseSettings):
     SFTP_VERIFY: bool = True
     SFTP_PROGRESS_INTERVAL: float = Field(default=0.25, gt=0)
     SFTP_TRANSFER_HISTORY: int = Field(default=100, ge=1)
+    # Сколько файлов и папок может быть в папке, которую передают целиком
+    SFTP_FOLDER_LIMIT: int = Field(default=100_000, ge=1)
 
     # WebSocket /ws (поток данных для UI). Тестовые метрики вместо настоящих: для
     # разработки UI без SSH-сервера; период публикации, сек.

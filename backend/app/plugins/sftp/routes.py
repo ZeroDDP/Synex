@@ -150,12 +150,19 @@ async def remove(
     "/sessions/{session_id}/transfers",
     response_model=TransferInfo,
     status_code=202,
-    summary="Передать файл по пути на этом компьютере (в фоне, прогресс в /ws)",
+    summary="Передать файл или папку по пути на этом компьютере (в фоне, прогресс в /ws)",
     description=(
         "Ответ сразу, со status `queued`. Прогресс: событие `sftp.transfer` в `/ws` и "
-        "`GET /api/sftp/transfers/{id}`. Передачи одной сессии идут по очереди."
+        "`GET /api/sftp/transfers/{id}`. Передачи одной сессии идут по очереди.\n\n"
+        "Папка передаётся целиком одной передачей (`kind: dir`): сначала обход "
+        "(`scanning`), потом файлы по одному (`files_done` из `files_total`, `current`). "
+        "Новая папка появляется на месте только готовой; с `overwrite: true` папки "
+        "объединяются. Ссылки и то, что нельзя прочитать или назвать, попадают в `skipped`."
     ),
-    responses={**ERRORS, 409: {"description": "Файл уже есть (overwrite) или это папка"}},
+    responses={
+        **ERRORS,
+        409: {"description": "Файл или папка уже есть (overwrite) либо на месте не тот тип"},
+    },
 )
 async def start_transfer(
     session_id: SessionId, request: TransferRequest, sftp: Sftp

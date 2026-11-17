@@ -16,6 +16,8 @@ from pathlib import Path
 import pytest
 
 from app.core.config import settings
+from app.plugins.sftp.transfers import ACTIVE
+from tests.conftest import UNICODE_FILE_NAMES
 from tests.integration.sshd import SSHTarget
 from tests.integration.ui import UI
 
@@ -61,7 +63,7 @@ async def wait_transfer(ui: UI, transfer_id: str, timeout: float) -> dict:
     async with asyncio.timeout(timeout):
         while True:
             info = (await ui.api.get(f"/api/sftp/transfers/{transfer_id}")).json()
-            if info["status"] not in ("queued", "running", "verifying"):
+            if info["status"] not in ACTIVE:
                 return info
             await asyncio.sleep(0.2)
 
@@ -176,7 +178,7 @@ async def test_big_file_goes_to_the_server_and_back(ui: UI, workspace, tmp_path:
         terminal = asyncio.ensure_future(ui.exec(session_id, "echo terminal-works"))
         progress: list[dict] = []
         async with asyncio.timeout(limit):
-            while not progress or progress[-1]["status"] in ("queued", "running", "verifying"):
+            while not progress or progress[-1]["status"] in ACTIVE:
                 message = await events.next(timeout=limit)
                 if message["type"] == "sftp.transfer" and message["data"]["id"] == upload_id:
                     progress.append(message["data"])
@@ -219,3 +221,226 @@ async def test_big_file_goes_to_the_server_and_back(ui: UI, workspace, tmp_path:
         f"({megabytes / upload_seconds:.1f} MB/s), down in {download_seconds:.1f}s "
         f"({megabytes / download_seconds:.1f} MB/s), SHA-256 matches"
     )
+
+
+def write_tree(root: Path, content: dict[str, bytes | None]) -> None:
+    """content: путь от root -> содержимое файла или None у папки."""
+    root.mkdir(parents=True)
+    for rel, data in content.items():
+        path = root.joinpath(*rel.split("/"))
+        if data is None:
+            path.mkdir(parents=True, exist_ok=True)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+
+
+def read_tree(root: Path) -> dict[str, bytes | None]:
+    return {
+        path.relative_to(root).as_posix(): None if path.is_dir() else path.read_bytes()
+        for path in sorted(root.rglob("*"))
+    }
+
+
+async def test_folder_goes_to_the_server_and_back(ui: UI, workspace, tmp_path: Path):
+    """Папка целиком: вложенные папки, пустая папка, имена с пробелами, кавычками и
+    кириллицей, сотня файлов. На сервер, обратно, объединение с существующей."""
+    session_id, base, directory = workspace
+    content: dict[str, bytes | None] = {
+        "README.md": b"# project\n",
+        "empty.txt": b"",
+        "empty dir": None,
+        "big/data.bin": os.urandom(3 * MB + 17),
+        "docs/it's a 'quoted' name (v2).txt": b"quotes",
+        "docs/with $dollar & amp; semicolon.txt": b"shell characters",
+        "a/b/c/d/deep.txt": b"deep",
+    }
+    if UNICODE_FILE_NAMES:  # с локалью C и PYTHONUTF8=0 такой файл здесь не создать
+        content["docs/отчёт за май (v2) 'final'.txt"] = b"report"
+    content.update({f"many/part-{i:03}.txt": f"part {i}\n".encode() * i for i in range(100)})
+    files_total = sum(1 for data in content.values() if data is not None)
+    bytes_total = sum(len(data) for data in content.values() if data is not None)
+    source = tmp_path / "project"
+    write_tree(source, content)
+    expected = read_tree(source)
+
+    # ----------------------------------------------------------- на сервер
+    async with ui.events() as events:
+        started = time.monotonic()
+        up = await ui.api.post(
+            f"{base}/transfers",
+            json={"direction": "upload", "local_path": str(source), "remote_path": directory},
+        )
+        assert up.status_code == 202, up.text
+        assert (up.json()["kind"], up.json()["remote_path"]) == ("dir", f"{directory}/project")
+        terminal = asyncio.ensure_future(ui.exec(session_id, "echo terminal-works"))
+        progress: list[dict] = []
+        async with asyncio.timeout(300):
+            while not progress or progress[-1]["status"] in ACTIVE:
+                message = await events.next(timeout=300)
+                if message["type"] == "sftp.transfer" and message["data"]["id"] == up.json()["id"]:
+                    progress.append(message["data"])
+        upload_seconds = time.monotonic() - started
+        assert (await terminal)["stdout"] == "terminal-works"
+    final = progress[-1]
+    assert (final["status"], final["skipped"]) == ("completed", []), final
+    assert (final["files_done"], final["files_total"]) == (files_total, files_total)
+    assert (final["bytes_done"], final["bytes_total"], final["percent"]) == (
+        bytes_total,
+        bytes_total,
+        100.0,
+    )
+    statuses = [p["status"] for p in progress]
+    assert statuses[:2] == ["queued", "scanning"] and "running" in statuses
+    assert [p["bytes_done"] for p in progress] == sorted(p["bytes_done"] for p in progress)
+    checksum = (await ui.api.get(f"{base}/info")).json()["checksum"]
+    assert final["verified"] is (True if checksum else None)
+
+    listing = (await ui.api.get(f"{base}/list", params={"path": directory})).json()
+    assert [e["name"] for e in listing["entries"]] == ["project"]  # временной папки нет
+    counted = await ui.exec(
+        session_id,
+        f"cd {directory}/project && find . -type f | wc -l && find . -type d | wc -l",
+    )
+    dirs_total = sum(1 for data in expected.values() if data is None) + 1  # и сама папка
+    assert counted["stdout"].split() == [str(files_total), str(dirs_total)]
+
+    # ------------------------------------------------------------- обратно
+    started = time.monotonic()
+    down = await ui.api.post(
+        f"{base}/transfers",
+        json={
+            "direction": "download",
+            "local_path": str(tmp_path / "back"),
+            "remote_path": f"{directory}/project",
+        },
+    )
+    assert down.status_code == 202, down.text
+    info = await wait_transfer(ui, down.json()["id"], 300)
+    download_seconds = time.monotonic() - started
+    assert (info["status"], info["skipped"]) == ("completed", []), info
+    assert (info["files_done"], info["bytes_done"]) == (files_total, bytes_total)
+    assert read_tree(tmp_path / "back") == expected
+    assert not list(tmp_path.glob("*.synex-part"))  # временной папки нет
+
+    # ------------------------------------------ объединение и то, что пропускается
+    (source / "README.md").write_bytes(b"# project, second edition\n")
+    (source / "new" / "added.txt").parent.mkdir()
+    (source / "new" / "added.txt").write_bytes(b"added")
+    prepared = await ui.exec(
+        session_id,
+        f"cd {directory}/project && echo only-here > server-only.txt && ln -s /etc etc-link",
+    )
+    assert prepared["exit_code"] == 0, prepared
+    body = {"direction": "upload", "local_path": str(source), "remote_path": directory}
+    refused = await ui.api.post(f"{base}/transfers", json=body)
+    assert (refused.status_code, refused.json()["error"]) == (409, "sftp_target_exists")
+    merge = await ui.api.post(f"{base}/transfers", json={**body, "overwrite": True})
+    assert merge.status_code == 202, merge.text
+    merged = await wait_transfer(ui, merge.json()["id"], 300)
+    assert (merged["status"], merged["skipped"]) == ("completed", []), merged
+    assert merged["files_done"] == files_total + 1
+    shown = await ui.exec(
+        session_id,
+        f"cd {directory}/project && cat README.md server-only.txt new/added.txt "
+        "&& ls -a | grep -c synex-",
+    )
+    assert shown["stdout"].splitlines() == [
+        "# project, second edition",
+        "only-here",
+        "added0",  # и ни одного временного файла
+    ]
+
+    again = await ui.api.post(
+        f"{base}/transfers",
+        json={
+            "direction": "download",
+            "local_path": str(tmp_path / "second"),
+            "remote_path": f"{directory}/project",
+        },
+    )
+    assert again.status_code == 202, again.text
+    second = await wait_transfer(ui, again.json()["id"], 300)
+    assert second["status"] == "completed", second
+    assert second["skipped"] == [{"path": "etc-link", "reason": "Links are not transferred"}]
+    assert (tmp_path / "second" / "server-only.txt").read_bytes() == b"only-here\n"
+    assert (tmp_path / "second" / "README.md").read_bytes() == b"# project, second edition\n"
+    assert not (tmp_path / "second" / "etc-link").exists()
+    assert not list(tmp_path.rglob("*.synex-part"))
+
+    megabytes = bytes_total / MB
+    print(
+        f"\nSFTP folder: {files_total} files, {megabytes:.1f} MB up in {upload_seconds:.1f}s, "
+        f"down in {download_seconds:.1f}s"
+    )
+
+
+async def wait_current(ui: UI, transfer_id: str, name: str) -> None:
+    """Дождаться, когда передача папки дойдёт до файла name."""
+    async with asyncio.timeout(120):
+        while True:
+            info = (await ui.api.get(f"/api/sftp/transfers/{transfer_id}")).json()
+            assert info["status"] in ACTIVE, info
+            if info["current"] == name:
+                return
+            await asyncio.sleep(0.05)
+
+
+async def test_cancelled_folder_leaves_nothing_behind(ui: UI, workspace, tmp_path: Path):
+    """Отмена посреди большого файла: папки на месте нет, временная папка убрана (на
+    сервере и на этом компьютере)."""
+    session_id, base, directory = workspace
+    big = 400 * MB  # файл «с дырой»: создаётся сразу, а передаётся несколько секунд
+
+    # ----------------------------------------------------------- на сервер
+    source = tmp_path / "upload-me"
+    source.mkdir()
+    (source / "a-small.txt").write_bytes(b"small")
+    with (source / "b-big.bin").open("wb") as file:
+        file.truncate(big)
+    up = await ui.api.post(
+        f"{base}/transfers",
+        json={"direction": "upload", "local_path": str(source), "remote_path": directory},
+    )
+    assert up.status_code == 202, up.text
+    await wait_current(ui, up.json()["id"], "b-big.bin")
+    cancelled = await ui.api.delete(f"/api/sftp/transfers/{up.json()['id']}")
+    assert cancelled.status_code == 200, cancelled.text
+    info = await wait_transfer(ui, up.json()["id"], 60)
+    assert (info["status"], info["error"]) == ("cancelled", "sftp_transfer_cancelled"), info
+    async with asyncio.timeout(120):
+        while (await ui.api.get(f"{base}/list", params={"path": directory})).json()["entries"]:
+            await asyncio.sleep(0.2)
+
+    # Сессия после отмены работает: следующая передача идёт сразу
+    (source / "b-big.bin").unlink()
+    again = await ui.api.post(
+        f"{base}/transfers",
+        json={"direction": "upload", "local_path": str(source), "remote_path": directory},
+    )
+    assert again.status_code == 202, again.text
+    assert (await wait_transfer(ui, again.json()["id"], 60))["status"] == "completed"
+
+    # ------------------------------------------------------------- обратно
+    made = await ui.exec(
+        session_id,
+        f"dd if=/dev/zero of={directory}/upload-me/b-big.bin bs=1048576 count=0 seek=400",
+    )
+    assert made["exit_code"] == 0, made
+    down = await ui.api.post(
+        f"{base}/transfers",
+        json={
+            "direction": "download",
+            "local_path": str(tmp_path / "down"),
+            "remote_path": f"{directory}/upload-me",
+        },
+    )
+    assert down.status_code == 202, down.text
+    await wait_current(ui, down.json()["id"], "b-big.bin")
+    await ui.api.delete(f"/api/sftp/transfers/{down.json()['id']}")
+    info = await wait_transfer(ui, down.json()["id"], 60)
+    assert (info["status"], info["error"]) == ("cancelled", "sftp_transfer_cancelled"), info
+    async with asyncio.timeout(120):
+        while list(tmp_path.glob("*.synex-part")):
+            await asyncio.sleep(0.2)
+    assert not (tmp_path / "down").exists()

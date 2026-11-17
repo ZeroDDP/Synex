@@ -9,13 +9,16 @@ from pathlib import Path
 
 import pytest
 
-from app.plugins.sftp import local
+from app.plugins.sftp import local, tree
 from app.plugins.sftp.errors import (
     SftpBadPathError,
+    SftpFolderTooLargeError,
     SftpIsADirectoryError,
+    SftpLocalError,
     SftpLocalExistsError,
     SftpLocalNotADirectoryError,
     SftpLocalNotFoundError,
+    SftpLocalPermissionError,
     SftpNotAFileError,
 )
 from tests.conftest import needs_unicode_file_names
@@ -216,3 +219,174 @@ def test_download_into_a_folder_refuses_a_name_this_computer_cannot_use(tmp_path
     assert local.target_file(str(tmp_path / "good.bin"), "bad\x01name", overwrite=False) == (
         tmp_path / "good.bin"
     )
+
+
+# ------------------------------------------------------------------ folders
+
+
+def write_files(root: Path, files: dict[str, bytes]) -> None:
+    for rel, data in files.items():
+        path = root.joinpath(*rel.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+
+
+def scan(root: Path, limit: int = 1000, stopped: bool = False) -> tree.Tree:
+    return local.scan_tree(root, limit=limit, stopped=lambda: stopped)
+
+
+def flat(item: tree.DirItem) -> list[str]:
+    """Пути дерева по порядку обхода: файлы папки, потом её папки."""
+    paths = [file.rel for file in item.files]
+    for sub in item.dirs:
+        paths.append(sub.rel + "/")
+        paths.extend(flat(sub))
+    return paths
+
+
+def test_scan_tree(tmp_path: Path):
+    root = tmp_path / "project"
+    write_files(root, {"b.txt": b"12", "a.txt": b"1", "src/main.py": b"123", "src/x/y.bin": b""})
+    (root / "empty").mkdir()
+    found = scan(root)
+    assert found.root.name == "project" and found.root.rel == ""
+    assert flat(found.root) == [
+        "a.txt", "b.txt", "empty/", "src/", "src/main.py", "src/x/", "src/x/y.bin",
+    ]  # fmt: skip
+    assert (found.files, found.dirs, found.size, found.skipped) == (4, 3, 6, [])
+    assert [file.size for file in found.root.files] == [1, 2]
+
+
+def test_scan_tree_skips_links(tmp_path: Path):
+    root = tmp_path / "project"
+    write_files(root, {"a.txt": b"a", "real/b.txt": b"b"})
+    make_symlink(root / "to-file", "a.txt")
+    make_symlink(root / "to-dir", root / "real")
+    make_symlink(root / "loop", root)
+    found = scan(root)
+    assert flat(found.root) == ["a.txt", "real/", "real/b.txt"]
+    assert found.skipped == [
+        tree.Skipped("loop", tree.REASON_LINK),
+        tree.Skipped("to-dir", tree.REASON_LINK),
+        tree.Skipped("to-file", tree.REASON_LINK),
+    ]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX permissions and special files")
+def test_scan_tree_skips_what_cannot_be_read(tmp_path: Path):
+    root = tmp_path / "project"
+    write_files(root, {"a.txt": b"a", "closed/x.txt": b"x", "secret.txt": b"s", "tab\tname": b"t"})
+    os.mkfifo(root / "pipe")
+    os.chmod(root / "closed", 0)
+    os.chmod(root / "secret.txt", 0)
+    try:
+        found = scan(root)
+    finally:
+        os.chmod(root / "closed", 0o755)
+    skipped = {item.path: item.reason for item in found.skipped}
+    assert skipped.pop("pipe") == tree.REASON_SPECIAL
+    assert skipped.pop("tab\tname") == tree.REASON_CONTROL
+    if os.geteuid() != 0:  # root читает всё
+        assert skipped.pop("closed/") == tree.REASON_UNREADABLE
+        assert skipped.pop("secret.txt") == tree.REASON_UNREADABLE
+        assert flat(found.root) == ["a.txt"]
+    assert skipped == {}
+
+
+def test_scan_tree_limits(tmp_path: Path, monkeypatch):
+    root = tmp_path / "project"
+    write_files(root, {f"d{i}/f.txt": b"x" for i in range(5)})
+    assert scan(root, limit=10).files == 5
+    with pytest.raises(SftpFolderTooLargeError) as caught:
+        scan(root, limit=9)
+    assert "more than 9 files and folders" in caught.value.detail
+    with pytest.raises(tree.TransferStoppedError):
+        scan(root, stopped=True)
+
+    deep = tmp_path / "deep"
+    write_files(deep, {"1/2/3/4/file.txt": b"x", "1/top.txt": b"x"})
+    monkeypatch.setattr(local, "MAX_DEPTH", 2)
+    found = scan(deep)
+    assert flat(found.root) == ["1/", "1/top.txt", "1/2/"]
+    assert found.skipped == [tree.Skipped("1/2/3/", local.REASON_DEPTH)]
+
+
+def test_source_dir(tmp_path: Path):
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "file.txt").write_bytes(b"x")
+    assert local.source_dir(str(tmp_path / "docs")) == tmp_path / "docs"
+    assert local.is_dir(str(tmp_path / "docs")) is True
+    assert local.is_dir(str(tmp_path / "file.txt")) is False
+    assert local.is_dir(str(tmp_path / "missing")) is False
+    with pytest.raises(SftpLocalNotFoundError):
+        local.source_dir(str(tmp_path / "missing"))
+    with pytest.raises(SftpLocalNotADirectoryError):
+        local.source_dir(str(tmp_path / "file.txt"))
+    with pytest.raises(SftpBadPathError, match="whole disk"):
+        local.source_dir(Path(tmp_path.anchor).as_posix() if os.name != "nt" else tmp_path.anchor)
+
+
+def test_target_dir(tmp_path: Path):
+    (tmp_path / "taken").mkdir()
+    (tmp_path / "taken" / "site").mkdir()
+    (tmp_path / "file.txt").write_bytes(b"x")
+    # Новое имя: папка появится под ним
+    assert local.target_dir(str(tmp_path / "new"), "site", overwrite=False) == (
+        tmp_path / "new",
+        False,
+    )
+    # Существующая папка: «в неё под именем с сервера»
+    assert local.target_dir(str(tmp_path), "site", overwrite=False) == (tmp_path / "site", False)
+    with pytest.raises(SftpLocalExistsError, match="overwrite=true to merge"):
+        local.target_dir(str(tmp_path / "taken"), "site", overwrite=False)
+    assert local.target_dir(str(tmp_path / "taken"), "site", overwrite=True) == (
+        tmp_path / "taken" / "site",
+        True,
+    )
+    with pytest.raises(SftpLocalNotADirectoryError):
+        local.target_dir(str(tmp_path / "file.txt"), "site", overwrite=True)
+    with pytest.raises(SftpLocalNotFoundError):
+        local.target_dir(str(tmp_path / "no" / "such"), "site", overwrite=False)
+    with pytest.raises(SftpLocalNotFoundError):
+        local.target_dir(str(tmp_path / "missing") + os.sep, "site", overwrite=False)
+    with pytest.raises(SftpBadPathError):
+        local.target_dir(str(tmp_path), "/", overwrite=False)  # корень сервера: имени нет
+
+
+def test_folder_goes_into_place_whole(tmp_path: Path):
+    target = tmp_path / "site"
+    part = local.part_dir(target, "abc123")
+    assert part == tmp_path / ("site.abc123" + local.PART_SUFFIX)
+    local.make_dir(part)
+    write_files(part, {"a.txt": b"a", "sub/b.txt": b"b"})
+    local.replace_dir(part, target)
+    assert not part.exists() and (target / "sub" / "b.txt").read_bytes() == b"b"
+
+    again = local.part_dir(target, "def456")
+    local.make_dir(again)
+    with pytest.raises(SftpLocalExistsError, match="appeared"):
+        local.replace_dir(again, target)  # на месте уже есть папка: не заменяется
+    with pytest.raises((SftpLocalError, SftpLocalExistsError, SftpLocalPermissionError)):
+        local.make_dir(again)
+    write_files(again, {"x/y.txt": b"y"})
+    assert local.remove_tree(again) is True and not again.exists()
+    assert local.remove_tree(again) is True  # уже нет: тоже убрано
+    assert local.remove_file(target / "a.txt") is True
+    assert local.remove_file(target / "a.txt") is True
+    assert local.remove_file(target / "sub") is False  # папка: не удалена
+
+
+def test_names_as_the_file_system_tells_them_apart(tmp_path: Path):
+    assert local.name_key("README.md", platform="linux") == "README.md"
+    assert local.name_key("README.md", platform="win32") == "readme.md"
+    # macOS не различает ещё и формы Unicode: "й" одним знаком и "и" с краткой
+    one, two = "\u0439", "\u0438\u0306"
+    assert local.name_key(one, platform="darwin") == local.name_key(two, platform="darwin")
+    assert local.name_key(one, platform="linux") != local.name_key(two, platform="linux")
+
+    write_files(tmp_path, {"File.txt": b"x", "Docs/a.txt": b"a"})
+    assert local.taken_names(tmp_path) == {
+        local.name_key("File.txt"): False,
+        local.name_key("Docs"): True,
+    }
+    assert local.taken_names(tmp_path / "missing") == {}
