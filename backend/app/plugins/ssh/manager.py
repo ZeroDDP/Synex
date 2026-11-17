@@ -40,19 +40,21 @@ from app.core.errors import (
 )
 from app.core.event_bus import event_bus
 from app.keystore import KeyStore
+from app.plugins.ssh import openssh_hosts
 from app.plugins.ssh.buffer import OutputBuffer
 from app.plugins.ssh.errors import (
     SSHConnectError,
     SSHConnectTimeoutError,
     SSHExecTimeoutError,
     SSHHostKeyMismatchError,
+    SSHHostKeyRevokedError,
     SSHHostKeyUnknownError,
     SSHNotConnectedError,
     SSHSessionBusyError,
     SSHSessionNotFoundError,
     SSHTooManySessionsError,
 )
-from app.plugins.ssh.known_hosts import get_known_hosts, server_name
+from app.plugins.ssh.known_hosts import get_known_hosts, is_fingerprint, server_name
 from app.plugins.ssh.session import (
     AuthMethod,
     CompanionSession,
@@ -255,16 +257,15 @@ class SSHSessionManager:
 
         self._opening += 1
         try:
-            channel = await self._acquire_channel()
-            session_id = new_session_id()
             try:
-                host_key = await self._connect_in_worker(
-                    channel, session_id, params, keys, fingerprint=fingerprint
-                )
-            except BaseException:
-                if channel.dedicated:
-                    await channel.client.disconnect()
-                raise
+                channel, session_id, host_key = await self._connect(params, keys, fingerprint)
+            except SSHHostKeyUnknownError as unknown:
+                if fingerprint is not None:
+                    raise
+                # Сервера в known_hosts.json нет. Если его ключу уже доверяет OpenSSH на
+                # этом компьютере, он сохраняется и подключение повторяется, один раз
+                fingerprint = await self._trusted_by_openssh(params, unknown)
+                channel, session_id, host_key = await self._connect(params, keys, fingerprint)
         finally:
             self._opening -= 1
 
@@ -297,6 +298,73 @@ class SSHSessionManager:
         )
         await self._publish("opened", session)
         return session
+
+    async def _connect(
+        self, params: ConnectParams, keys: KeyStore, fingerprint: str | None
+    ) -> tuple[WorkerChannel, str, dict[str, str] | None]:
+        """Одна попытка подключения: (канал воркера, id сессии, ключ сервера)."""
+        channel = await self._acquire_channel()
+        session_id = new_session_id()
+        try:
+            host_key = await self._connect_in_worker(
+                channel, session_id, params, keys, fingerprint=fingerprint
+            )
+        except BaseException:
+            if channel.dedicated:
+                await channel.client.disconnect()
+            raise
+        return channel, session_id, host_key
+
+    async def _trusted_by_openssh(
+        self, params: ConnectParams, unknown: SSHHostKeyUnknownError
+    ) -> str:
+        """Ключ сервера, который воркер не знает (unknown), записан в known_hosts
+        OpenSSH этого компьютера: сохранить его отпечаток и вернуть. Иначе ошибка:
+        unknown (OpenSSH сервера не знает), ssh_host_key_mismatch (знает с другим ключом)
+        или ssh_host_key_revoked."""
+        fingerprint = str(unknown.host_key.get("fingerprint") or "")
+        key_type = str(unknown.host_key.get("key_type") or "")
+        if not settings.OPENSSH_KNOWN_HOSTS or not is_fingerprint(fingerprint):
+            raise unknown
+        try:
+            found = await asyncio.to_thread(
+                openssh_hosts.lookup, params.host, params.port, fingerprint, key_type
+            )
+        except Exception as e:
+            # Поиск в файлах OpenSSH это удобство: его сбой не должен мешать обычному
+            # подтверждению ключа пользователем
+            logger.warning("Cannot read OpenSSH known_hosts", error=repr(e))
+            raise unknown from None
+        server = server_name(params.host, params.port)
+        host_key = {**unknown.host_key, "source": "openssh"}
+        if found.verdict == "trusted":
+            await get_known_hosts().trust(
+                params.host, params.port, fingerprint, key_type or None, source="openssh"
+            )
+            logger.info(
+                "SSH host key is trusted by OpenSSH on this computer",
+                server=server,
+                fingerprint=fingerprint,
+                known_hosts=found.where,
+            )
+            return fingerprint
+        if found.verdict == "changed" and found.line is not None:
+            raise SSHHostKeyMismatchError(
+                f"The key of {server} has changed: OpenSSH on this computer trusts "
+                f"{found.line.fingerprint} ({found.where}), the server shows {fingerprint}. Not "
+                "connecting: this may be an attack (man in the middle) or the server was "
+                "reinstalled. If the change is expected, trust the new key "
+                "(POST /api/ssh/known-hosts)",
+                {**host_key, "expected_fingerprint": found.line.fingerprint},
+            ) from unknown
+        if found.verdict == "revoked":
+            raise SSHHostKeyRevokedError(
+                f"The key of {server} ({fingerprint}) is marked as revoked in OpenSSH "
+                f"known_hosts on this computer ({found.where}). Not connecting: a revoked key "
+                "must not be trusted",
+                host_key,
+            ) from unknown
+        raise unknown
 
     async def _connect_in_worker(
         self,

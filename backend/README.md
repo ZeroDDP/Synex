@@ -116,7 +116,7 @@ glibc 2.38 или новее (Ubuntu 24.04, Debian 13, Fedora 39 и новее).
 | POST | `/api/ssh/exec` | Команда: `{command, session_id?, timeout?, track_cwd?}`, без `session_id` в последней открытой сессии |
 | POST | `/api/ssh/disconnect` | Закрыть сессию: `{session_id?}` |
 | GET | `/api/ssh/status` | Состояние сессии: `?session_id=` или последняя открытая |
-| GET | `/api/ssh/known-hosts` | Доверенные ключи серверов: отпечатки по `host:port` |
+| GET | `/api/ssh/known-hosts` | Доверенные ключи серверов: отпечатки по `host:port`, `source`: кто подтвердил (`user`, `openssh`) |
 | POST | `/api/ssh/known-hosts` | Доверять ключу сервера после подтверждения пользователем: `{host, port?, fingerprint, key_type?, replace?}` → 201 |
 | DELETE | `/api/ssh/known-hosts` | Забыть ключ сервера: `?host=&port=22` |
 | GET | `/api/keys` | Список ключей (без секретной части) |
@@ -251,6 +251,31 @@ Invoke-RestMethod -Method Delete "$api/ssh/sessions/$($s.session_id)"
 `DELETE /api/ssh/known-hosts?host=&port=` забывает ключ: следующее подключение снова
 спросит подтверждение. Сборки воркера без проверки ключа (до 2026-11-14) подключаются
 как раньше, отпечаток им передаётся, но не проверяется.
+
+Серверы, к которым уже подключались через `ssh`, подтверждать второй раз не нужно: их
+ключи записаны в `known_hosts` OpenSSH на этом компьютере. Когда сервера в
+`known_hosts.json` ещё нет, backend ищет ключ, который показал сервер, в этих файлах
+(`~/.ssh/known_hosts`, `~/.ssh/known_hosts2` и общий для компьютера
+`/etc/ssh/ssh_known_hosts`, на Windows `%PROGRAMDATA%\ssh\ssh_known_hosts`):
+
+- ключ записан там для этого сервера: backend сохраняет отпечаток у себя (`source:
+  "openssh"` в `GET /api/ssh/known-hosts`) и подключается, ответ обычный 201. Для сервера
+  на нестандартном порту, как и у `ssh`, годится запись `[host]:port` или запись того
+  же сервера без порта с тем же ключом;
+- для сервера там записан другой ключ того же типа (`ssh` в этом случае пишет REMOTE
+  HOST IDENTIFICATION HAS CHANGED): 409 `ssh_host_key_mismatch`, в `host_key` ещё
+  `source: "openssh"`, а `expected_fingerprint` это отпечаток из файла. Подключения нет;
+  пользователь может подтвердить новый ключ, как в пункте 4;
+- ключ помечен там как отозванный (`@revoked`): 409 `ssh_host_key_revoked`,
+  подключения нет;
+- сервера там нет или записаны ключи только других типов: обычное подтверждение
+  (пункт 1).
+
+Понимаются хешированные имена (`HashKnownHosts`, по умолчанию в Debian и Ubuntu),
+шаблоны `*` и `?` и отрицание `!`; строки `@cert-authority` не учитываются. Файлы
+OpenSSH backend только читает. Запись в `known_hosts.json` важнее: если отпечаток
+сервера там есть, файлы OpenSSH не спрашиваются. `OPENSSH_KNOWN_HOSTS=false` выключает
+поиск, `OPENSSH_KNOWN_HOSTS_FILES` задаёт свои файлы через запятую.
 
 ### WebSocket терминала
 
@@ -722,6 +747,7 @@ ws.onmessage = (e) => console.log(JSON.parse(e.data));
 | 502 | `ssh_connect_failed` | Воркер не смог подключиться (хост, ключ, пароль, фраза) |
 | 409 | `ssh_host_key_unknown` | Ключ сервера ещё не подтверждён: отпечаток в `host_key` (см. «Проверка ключа сервера») |
 | 409 | `ssh_host_key_mismatch` | Ключ сервера сменился: `host_key.fingerprint` и `expected_fingerprint`, подключения нет |
+| 409 | `ssh_host_key_revoked` | Ключ сервера отозван (`@revoked`) в `known_hosts` OpenSSH на этом компьютере, подключения нет |
 | 409 | `ssh_known_host_conflict` | Для сервера сохранён другой отпечаток: заменить только с `replace: true` |
 | 404 | `ssh_known_host_not_found` | Для сервера нет сохранённого ключа |
 | 500 | `known_hosts_corrupted` | `known_hosts.json` повреждён |
@@ -758,7 +784,9 @@ app/
   plugins/             менеджер плагинов
     ssh/               /api/ssh/*: manager (менеджер сессий), session (сессия и её
                        подключение к воркеру), buffer (буфер вывода), ws (терминал),
-                       wrapper (cwd, таймаут), routes, schemas, errors
+                       wrapper (cwd, таймаут), known_hosts (доверенные ключи серверов),
+                       openssh_hosts (ключи из known_hosts OpenSSH), routes, schemas,
+                       errors
     monitor/           /api/monitor/*: service (опрос и публикация), aggregator
                        (окно, статусы), values (ответ воркера), hardware (диски, GPU)
     keys/              /api/keys/*
@@ -909,6 +937,8 @@ uv run pytest tests/test_real_worker.py -v
   открывается; чужой отпечаток даёт 409 `ssh_host_key_mismatch` без повтора, замена
   только с `replace`. Остальные тесты подтверждают ключ своего sshd заранее (фикстура
   `ui`), у внешнего сервера отпечаток показывает первое подключение;
+- сервер, записанный в `known_hosts` OpenSSH, подключается без подтверждения, а другой
+  ключ того же типа в этом файле даёт 409 `ssh_host_key_mismatch`;
 - все плагины загружаются (`PLUGINS_ENABLED=*`); сохранённое подключение открывает
   сессию, а `connection_id` доходит до `/ws`;
 - критерий вехи B4: SSH, SFTP, мониторинг и Docker выключаются и включаются на

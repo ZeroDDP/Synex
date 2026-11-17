@@ -40,6 +40,8 @@ class SSHTarget:
     password: str | None = None
     # Отпечаток ключа сервера (SHA256:...), если известен заранее (свой sshd)
     host_key_fingerprint: str | None = None
+    # Открытый ключ сервера, "тип base64": так он записан в known_hosts (свой sshd)
+    host_public_key: str | None = None
 
     def connection(self, **auth: object) -> dict:
         """Тело POST /api/ssh/sessions (по умолчанию вход по обычному ключу)."""
@@ -134,13 +136,15 @@ class LocalSSHD:
             stderr=self.log.open("wb"),
         )
         self._wait_ready(port)
+        host_public_key = (d / "host.pub").read_text()
         return SSHTarget(
             host="127.0.0.1",
             port=port,
             username=getpass.getuser(),
             key_path=str(d / "client"),
             encrypted_key_path=str(d / "client_enc"),
-            host_key_fingerprint=public_key_fingerprint((d / "host.pub").read_text()),
+            host_key_fingerprint=public_key_fingerprint(host_public_key),
+            host_public_key=" ".join(host_public_key.split()[:2]),
         )
 
     def _wait_ready(self, port: int, timeout: float = 10.0) -> None:
