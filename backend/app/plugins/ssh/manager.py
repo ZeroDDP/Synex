@@ -63,6 +63,7 @@ from app.plugins.ssh.session import (
 from app.plugins.ssh.wrapper import (
     KILL_AFTER,
     build_command,
+    new_marker,
     normalize_newlines,
     parse_output,
 )
@@ -601,20 +602,7 @@ class SSHSessionManager:
         finally:
             session.channel.lock.release()
 
-        duration_ms = round((time.monotonic() - started) * 1000)
-        result = parse_output(
-            str(response.get("stdout") or ""), session.marker, timeout_applied=True
-        )
-        exit_code = result.exit_code
-        if exit_code is None:
-            exit_code = _as_int(response.get("exit_code"), default=-1)
-        return ServiceResult(
-            stdout=result.stdout,
-            stderr=str(response.get("stderr") or "").rstrip("\r\n"),
-            exit_code=exit_code,
-            timed_out=result.timed_out,
-            duration_ms=duration_ms,
-        )
+        return _service_result(response, session.marker, started)
 
     # ------------------------------------------------------ service requests
 
@@ -754,6 +742,22 @@ class SSHSessionManager:
             except WorkerTimeoutError:
                 await self.close_companion(companion)
                 raise
+
+    async def companion_run_service(
+        self, companion: CompanionSession, command: str, *, timeout: float | None = None
+    ) -> ServiceResult:
+        """Служебная команда в служебной сессии. Как run_service (точный код возврата,
+        лимит timeout на сервере, домашняя папка), но основную сессию не занимает и не
+        ждёт: долгая работа плагина не зависит от команды пользователя в терминале."""
+        marker = new_marker()
+        remote_limit = max(1, math.ceil(timeout or settings.SSH_EXEC_TIMEOUT))
+        wrapped = build_command(normalize_newlines(command), None, marker, remote_limit)
+        reply_wait = remote_limit + KILL_AFTER + settings.SSH_EXEC_TIMEOUT_GRACE
+        started = time.monotonic()
+        response = await self.companion_request(
+            companion, "ssh_exec", {"command": wrapped}, timeout=reply_wait
+        )
+        return _service_result(response, marker, started)
 
     async def close_companion(self, companion: CompanionSession) -> None:
         """Закрыть служебную сессию. Идущее в ней действие воркера обрывается: воркер
@@ -946,6 +950,21 @@ class SSHSessionManager:
         task = asyncio.ensure_future(awaitable)
         self._background.add(task)
         task.add_done_callback(self._background.discard)
+
+
+def _service_result(response: dict[str, Any], marker: str, started: float) -> ServiceResult:
+    """Ответ воркера на обёрнутую служебную команду (run_service)."""
+    result = parse_output(str(response.get("stdout") or ""), marker, timeout_applied=True)
+    exit_code = result.exit_code
+    if exit_code is None:
+        exit_code = _as_int(response.get("exit_code"), default=-1)
+    return ServiceResult(
+        stdout=result.stdout,
+        stderr=str(response.get("stderr") or "").rstrip("\r\n"),
+        exit_code=exit_code,
+        timed_out=result.timed_out,
+        duration_ms=round((time.monotonic() - started) * 1000),
+    )
 
 
 def _session_payload(session: SSHSession, **fields: Any) -> dict[str, Any]:

@@ -111,8 +111,9 @@ def _unicode_file_names() -> bool:
 
 # Имена файлов не из ASCII. Windows, macOS и Linux их принимают; не принимает только
 # Linux с локалью C и PYTHONUTF8=0 (так тесты проверяют кодировку файлов как на Windows).
+UNICODE_FILE_NAMES = _unicode_file_names()
 needs_unicode_file_names = pytest.mark.skipif(
-    not _unicode_file_names(), reason="the file system encoding here is ASCII"
+    not UNICODE_FILE_NAMES, reason="the file system encoding here is ASCII"
 )
 
 

@@ -92,6 +92,13 @@ class SftpTransferCancelledError(AppError):
     status_code = 409
 
 
+class SftpFolderTooLargeError(AppError):
+    """В папке больше файлов и папок, чем SFTP_FOLDER_LIMIT."""
+
+    code = "sftp_folder_too_large"
+    status_code = 422
+
+
 # --------------------------------------------------------- на этом компьютере
 
 

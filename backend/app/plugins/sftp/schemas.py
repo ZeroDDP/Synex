@@ -126,12 +126,26 @@ class TransferRequest(BaseModel):
     remote_path: str = Field(
         ..., min_length=1, max_length=4096, description="Файл или папка на сервере"
     )
-    overwrite: bool = Field(default=False, description="Заменить существующий файл")
+    overwrite: bool = Field(
+        default=False,
+        description=(
+            "Заменить существующий файл. Для папки: объединить с папкой, которая уже есть "
+            "(файлы с теми же именами заменяются, остальное в ней не трогается)"
+        ),
+    )
+
+
+class SkippedInfo(BaseModel):
+    path: str = Field(..., description='Путь от корня папки; у папки с "/" в конце')
+    reason: str
 
 
 class TransferInfo(BaseModel):
     id: str
     session_id: str
+    kind: Literal["file", "dir"] = Field(
+        default="file", description="file: один файл; dir: папка целиком"
+    )
     direction: Literal["upload", "download"]
     source: Literal["path", "http"] = Field(
         ..., description="path: по пути на этом компьютере; http: телом запроса или ответа"
@@ -139,17 +153,34 @@ class TransferInfo(BaseModel):
     name: str
     remote_path: str
     local_path: str | None
-    status: Literal["queued", "running", "verifying", "completed", "failed", "cancelled"]
+    status: Literal[
+        "queued", "scanning", "running", "verifying", "completed", "failed", "cancelled"
+    ] = Field(..., description="scanning: обход папки перед передачей (только у папок)")
     bytes_done: int
-    bytes_total: int | None
+    bytes_total: int | None = Field(..., description="null у папки, пока идёт обход")
     percent: float | None
     speed: int | None = Field(..., description="Байт в секунду")
     eta_seconds: int | None
+    files_total: int | None = Field(
+        default=None, description="Папка: сколько файлов передать (null до конца обхода)"
+    )
+    files_done: int = Field(default=0, description="Папка: сколько файлов уже передано")
+    current: str | None = Field(
+        default=None, description="Папка: какой файл идёт сейчас (путь от корня папки)"
+    )
+    skipped: list[SkippedInfo] = Field(
+        default_factory=list,
+        description="Папка: что не передано и почему (первые 50, полный счёт в skipped_count)",
+    )
+    skipped_count: int = 0
     error: str | None = Field(..., description="Код ошибки, если failed или cancelled")
     detail: str | None
-    checksum: str | None = Field(..., description="SHA-256 файла")
+    checksum: str | None = Field(..., description="SHA-256 файла (у папки null)")
     verified: bool | None = Field(
-        ..., description="SHA-256 сверен на сервере; null: на сервере нечем посчитать"
+        ...,
+        description=(
+            "SHA-256 сверен на сервере (у папки: у каждого файла); null: на сервере нечем посчитать"
+        ),
     )
     created_at: datetime
     started_at: datetime | None

@@ -177,6 +177,13 @@ class FakeWorkerState:
         self.server: asyncio.Server | None = None
         self.accept_once = False
         self.sftp_delay = 0.0  # секунд на каждый мегабайт sftp_upload/download
+        # Как настоящий воркер: передача, подключение которой закрыли, не прерывается, а
+        # доделывается в фоне (sftp_zombie); файл она создаёт через sftp_start_delay секунд
+        # после запроса, то есть может создать его уже после отмены. В sftp_finished_late
+        # попадают пути файлов, которые такая передача дописала.
+        self.sftp_zombie = False
+        self.sftp_start_delay = 0.0
+        self.sftp_finished_late: list[str] = []
         self.sftp_fail: dict[str, str] = {}  # action -> текст ошибки (сбой по заказу)
         # Сбой по условию: (action, payload) -> текст ошибки или None (без сбоя)
         self.sftp_fail_if: Callable[[str, dict[str, Any]], str | None] | None = None
@@ -229,6 +236,7 @@ class FakeWorkerProtocol(asyncio.Protocol):
         self.transport: asyncio.BaseTransport | None = None
         self.tasks: set[asyncio.Task] = set()
         self.sftp_tasks: set[asyncio.Task] = set()
+        self.lost = False  # подключение закрыто
         self.queue_lock = asyncio.Lock()
         self.sessions: dict[str, dict[str, Any]] = {}
         state.protocols.append(self)
@@ -241,10 +249,12 @@ class FakeWorkerProtocol(asyncio.Protocol):
     def connection_lost(self, exc: Exception | None) -> None:
         self.sessions.clear()  # авто-закрытие сессий после отключения Python
         # Действия SFTP этого подключения прерываются и закрывают файлы. Настоящий
-        # воркер (сборка 2026-11-12) пока докачивает файл в фоне до конца, но для backend
-        # итог тот же: ответа не будет. А открытый файл на Windows не удалить
-        for task in self.sftp_tasks:
-            task.cancel()
+        # воркер пока докачивает файл в фоне до конца (так ведёт себя sftp_zombie), но
+        # для backend итог тот же: ответа не будет. А открытый файл на Windows не удалить
+        self.lost = True
+        if not self.state.sftp_zombie:
+            for task in self.sftp_tasks:
+                task.cancel()
 
     def data_received(self, data: bytes) -> None:
         self.buffer += data
@@ -335,7 +345,9 @@ class FakeWorkerProtocol(asyncio.Protocol):
             if task is not None:
                 self.sftp_tasks.add(task)
             try:
-                self.send(await FakeSftp(self.state).handle(msg_id, action, payload))
+                self.send(
+                    await FakeSftp(self.state, lambda: self.lost).handle(msg_id, action, payload)
+                )
             finally:
                 self.sftp_tasks.discard(task)  # type: ignore[arg-type]
 
@@ -507,8 +519,10 @@ class FakeSftp:
         ошибки, "success" у sftp_download_file, sftp_stat и sftp_move_dir нет.
     """
 
-    def __init__(self, state: FakeWorkerState) -> None:
+    def __init__(self, state: FakeWorkerState, lost: Callable[[], bool] = lambda: False) -> None:
+        """lost: закрыто ли подключение, по которому пришёл запрос."""
         self.state = state
+        self.lost = lost
         self.new = state.sftp_build != "2026-11-12"
 
     async def handle(self, msg_id: str, action: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -672,6 +686,8 @@ class FakeSftp:
         shutil.copyfile(src, dst)
 
     async def upload(self, local: str | None, remote: str | None) -> None:
+        if self.state.sftp_start_delay:
+            await asyncio.sleep(self.state.sftp_start_delay)
         source = Path(local or "")
         if not source.is_file():
             raise _SftpError(
@@ -688,6 +704,8 @@ class FakeSftp:
         await self._copy_stream(source, target)
 
     async def download(self, remote: str | None, local: str | None) -> None:
+        if self.state.sftp_start_delay:
+            await asyncio.sleep(self.state.sftp_start_delay)
         source = self.state.remote(remote or "")
         if not source.exists():
             if self.new:
@@ -713,6 +731,8 @@ class FakeSftp:
                 writer.flush()
                 if self.state.sftp_delay:
                     await asyncio.sleep(self.state.sftp_delay)
+        if self.lost():
+            self.state.sftp_finished_late.append(str(target))
 
 
 class _SftpError(Exception):

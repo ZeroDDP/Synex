@@ -30,6 +30,7 @@ import pytest
 from websockets.asyncio.client import connect
 
 from app.core.config import settings
+from app.plugins.sftp.transfers import ACTIVE
 from tests.integration import docker_image
 from tests.integration.sshd import SSHTarget
 from tests.integration.ui import UI, UI_ORIGIN, Stream
@@ -131,7 +132,7 @@ async def test_mvp_scenario(ui: UI, ssh_target: SSHTarget, containers: list[str]
             transfer_id = transfer.json()["id"]
             progress: list[dict] = []
             async with asyncio.timeout(60 + FILE_MB):
-                while not progress or progress[-1]["status"] in ("queued", "running", "verifying"):
+                while not progress or progress[-1]["status"] in ACTIVE:
                     message = await events.next(timeout=60 + FILE_MB)
                     if message["type"] == "sftp.transfer" and message["data"]["id"] == transfer_id:
                         progress.append(message["data"])

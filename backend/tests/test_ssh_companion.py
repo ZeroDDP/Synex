@@ -9,6 +9,8 @@ import pytest
 
 from app.core.errors import WorkerCommandError
 from app.plugins.ssh.errors import SSHNotConnectedError, SSHSessionBusyError
+from tests.fake_shell import HOME
+from tests.plugin_rig import plugin_rig
 from tests.ssh_helpers import make_api
 
 
@@ -119,3 +121,30 @@ async def test_request_runs_worker_actions_and_waits_for_a_busy_session(ssh, con
     # В терминал действия плагина не попадают
     entries = ssh.manager.get(session_id).buffer.since(0).entries
     assert [e.kind for e in entries] == ["opened", "command", "result"]
+
+
+async def test_service_command_in_a_companion(tmp_path: Path, missing_socket_path):
+    """Служебная команда в служебной сессии: как run_service (код возврата, домашняя
+    папка), но основная сессия при этом может быть занята, и её терминал команду не видит."""
+    async with plugin_rig(tmp_path, missing_socket_path, ["ssh"], {}) as rig:
+        companion = await rig.manager.open_companion(rig.session_id, "test")
+        assert companion is not None
+        busy = asyncio.ensure_future(
+            rig.manager.request(rig.session_id, "test_sleep", {"seconds": 1}, timeout=5)
+        )
+        await asyncio.sleep(0.05)
+        result = await rig.manager.companion_run_service(companion, "pwd && false", timeout=5)
+        assert (result.stdout.strip(), result.exit_code, result.timed_out) == (HOME, 1, False)
+        ok = await rig.manager.companion_run_service(companion, "echo one; echo two >&2")
+        assert (ok.stdout.strip(), ok.stderr.strip(), ok.exit_code) == ("one", "two", 0)
+        assert not busy.done()
+        await busy
+
+        entries = rig.manager.get(rig.session_id).buffer.since(0).entries
+        assert [entry.kind for entry in entries] == ["opened"]
+        commands = [r for r in rig.worker.requests if r["action"] == "ssh_exec"]
+        assert {r["id"] for r in commands} == {companion.id}
+
+        await rig.manager.close_companion(companion)
+        with pytest.raises(SSHNotConnectedError):
+            await rig.manager.companion_run_service(companion, "pwd", timeout=5)

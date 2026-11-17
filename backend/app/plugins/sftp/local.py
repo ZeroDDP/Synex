@@ -6,9 +6,12 @@ macOS), только абсолютные; "~" это домашняя папк�
 from __future__ import annotations
 
 import os
+import shutil
 import stat
 import string
 import sys
+import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,6 +26,18 @@ from app.plugins.sftp.errors import (
     SftpLocalNotFoundError,
     SftpLocalPermissionError,
     SftpNotAFileError,
+)
+from app.plugins.sftp.tree import (
+    MAX_DEPTH,
+    REASON_CONTROL,
+    REASON_DEPTH,
+    REASON_LINK,
+    REASON_SPECIAL,
+    REASON_UNREADABLE,
+    DirItem,
+    Tree,
+    TreeBuilder,
+    depth,
 )
 
 PART_SUFFIX = ".synex-part"
@@ -132,14 +147,102 @@ def source_file(path: str) -> tuple[Path, int]:
     except OSError as e:
         raise SftpLocalError(f"Cannot read {file}: {e.strerror or e}") from None
     if stat.S_ISDIR(info.st_mode):
-        raise SftpIsADirectoryError(
-            f"{file} is a folder: transfer files one by one (folders are not supported yet)"
-        )
+        raise SftpIsADirectoryError(f"{file} is a folder, not a file")
     if not stat.S_ISREG(info.st_mode):
         raise SftpNotAFileError(f"{file} is not a regular file")
     if not os.access(file, os.R_OK):
         raise SftpLocalPermissionError(f"No permission to read {file}")
     return file, info.st_size
+
+
+def is_dir(path: str) -> bool:
+    """path на этом компьютере это папка (или ссылка на папку)."""
+    try:
+        return resolve(path).is_dir()
+    except OSError:
+        return False
+
+
+def source_dir(path: str) -> Path:
+    """Папка, которую загружают на сервер: есть и читается."""
+    folder = resolve(path)
+    if not folder.name:
+        raise SftpBadPathError(f"{folder} is a whole disk: choose a folder on it")
+    try:
+        with os.scandir(folder):
+            pass
+    except FileNotFoundError:
+        raise SftpLocalNotFoundError(f"Folder {folder} not found on this computer") from None
+    except NotADirectoryError:
+        raise SftpLocalNotADirectoryError(f"{folder} is not a folder") from None
+    except PermissionError:
+        raise SftpLocalPermissionError(f"No permission to read {folder}") from None
+    except OSError as e:
+        raise SftpLocalError(f"Cannot read {folder}: {e.strerror or e}") from None
+    return folder
+
+
+def scan_tree(root: Path, *, limit: int, stopped: Callable[[], bool]) -> Tree:
+    """Обход папки этого компьютера: что в ней загружать (см. tree.py). Работает долго на
+    больших папках: вызывать в потоке."""
+    builder = TreeBuilder(root.name, limit, stopped)
+    try:
+        entries = _scandir(root)
+    except PermissionError:
+        raise SftpLocalPermissionError(f"No permission to read {root}") from None
+    except OSError as e:
+        raise SftpLocalError(f"Cannot read {root}: {e.strerror or e}") from None
+    _scan(builder, builder.tree.root, entries)
+    return builder.tree
+
+
+def _scandir(directory: Path | str) -> list[os.DirEntry[str]]:
+    with os.scandir(directory) as items:
+        return sorted(items, key=lambda item: item.name)
+
+
+def _scan(builder: TreeBuilder, item: DirItem, entries: list[os.DirEntry[str]]) -> None:
+    for entry in entries:
+        builder.check()
+        name = entry.name
+        try:
+            name.encode("utf-8")
+        except UnicodeEncodeError:
+            builder.skip(item, name.encode("utf-8", "replace").decode(), "The name is not UTF-8")
+            continue
+        try:
+            link = entry.is_symlink() or entry.is_junction()
+            folder = not link and entry.is_dir(follow_symlinks=False)
+            regular = not link and entry.is_file(follow_symlinks=False)
+        except OSError:
+            builder.skip(item, name, REASON_UNREADABLE)
+            continue
+        if any(ord(ch) < 32 for ch in name):
+            builder.skip(item, name, REASON_CONTROL, folder=folder)
+        elif link:
+            builder.skip(item, name, REASON_LINK)
+        elif folder:
+            if depth(item.rel) + 1 > MAX_DEPTH:
+                builder.skip(item, name, REASON_DEPTH, folder=True)
+                continue
+            try:
+                children = _scandir(entry.path)
+            except OSError:
+                builder.skip(item, name, REASON_UNREADABLE, folder=True)
+                continue
+            _scan(builder, builder.add_dir(item, name), children)
+        elif regular:
+            try:
+                size = entry.stat(follow_symlinks=False).st_size
+            except OSError:
+                builder.skip(item, name, REASON_UNREADABLE)
+                continue
+            if not os.access(entry.path, os.R_OK):
+                builder.skip(item, name, REASON_UNREADABLE)
+                continue
+            builder.add_file(item, name, size)
+        else:
+            builder.skip(item, name, REASON_SPECIAL)
 
 
 def name_problem(name: str, *, windows: bool = sys.platform == "win32") -> str | None:
@@ -189,6 +292,113 @@ def target_file(path: str, remote_name: str, *, overwrite: bool) -> Path:
     if not os.access(target.parent, os.W_OK):
         raise SftpLocalPermissionError(f"No permission to write to {target.parent}")
     return target
+
+
+def target_dir(path: str, remote_name: str, *, overwrite: bool) -> tuple[Path, bool]:
+    """Куда скачать папку: (папка, объединять ли с существующей). Существующая папка в
+    path (или путь с разделителем в конце) значит «в неё под именем с сервера»."""
+    target = resolve(path)
+    if path.endswith(("/", "\\")) or target.is_dir():
+        if not target.is_dir():
+            raise SftpLocalNotFoundError(f"Folder {target} not found on this computer")
+        problem = name_problem(remote_name)
+        if problem is not None:
+            raise SftpBadPathError(
+                f"The server folder name {remote_name!r} cannot be used on this computer: it "
+                f"has {problem}. Pass local_path with another folder name"
+            )
+        target = target / remote_name
+    if target.is_dir():
+        if not overwrite:
+            raise SftpLocalExistsError(
+                f"Folder {target} already exists on this computer "
+                "(pass overwrite=true to merge into it)"
+            )
+        if not os.access(target, os.W_OK):
+            raise SftpLocalPermissionError(f"No permission to write to {target}")
+        return target, True
+    if target.exists() or target.is_symlink():
+        raise SftpLocalNotADirectoryError(
+            f"{target} is a file on this computer: a folder cannot replace it"
+        )
+    if not target.parent.is_dir():
+        raise SftpLocalNotFoundError(f"Folder {target.parent} not found on this computer")
+    if not os.access(target.parent, os.W_OK):
+        raise SftpLocalPermissionError(f"No permission to write to {target.parent}")
+    return target, False
+
+
+def part_dir(target: Path, tag: str) -> Path:
+    """Временная папка скачивания рядом с целевой: готовая папка встаёт на место
+    переименованием."""
+    return target.with_name(f"{target.name}.{tag}{PART_SUFFIX}")
+
+
+def make_dir(directory: Path) -> None:
+    try:
+        directory.mkdir()
+    except PermissionError:
+        raise SftpLocalPermissionError(f"No permission to create {directory}") from None
+    except OSError as e:
+        raise SftpLocalError(f"Cannot create {directory}: {e.strerror or e}") from None
+
+
+def replace_dir(part: Path, target: Path) -> None:
+    """Готовая временная папка на место целевой (её ещё нет)."""
+    if target.exists() or target.is_symlink():
+        raise SftpLocalExistsError(f"{target} appeared on this computer during the transfer")
+    try:
+        os.replace(part, target)
+    except PermissionError:
+        raise SftpLocalPermissionError(
+            f"Cannot save {target}: no permission or a file in it is open in another program"
+        ) from None
+    except OSError as e:
+        raise SftpLocalError(f"Cannot save {target}: {e.strerror or e}") from None
+
+
+def remove_tree(directory: Path) -> bool:
+    """Убрать временную папку с содержимым. False, если что-то осталось (на Windows файл,
+    открытый другой программой, не удалить)."""
+    shutil.rmtree(directory, ignore_errors=True)
+    return not directory.exists()
+
+
+def remove_file(file: Path) -> bool:
+    try:
+        file.unlink()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def name_key(name: str, *, platform: str = sys.platform) -> str:
+    """Как имя различает файловая система этого компьютера: на Windows и macOS регистр
+    букв не важен ("README" и "readme" один файл), на macOS ещё и форма Unicode.
+    Сравнение с запасом (casefold строже правил NTFS): лучше не скачать файл и сказать
+    об этом, чем молча записать его поверх другого."""
+    if platform == "darwin":
+        return unicodedata.normalize("NFC", name).casefold()
+    if platform == "win32":
+        return name.casefold()
+    return name
+
+
+def taken_names(directory: Path) -> dict[str, bool]:
+    """Что уже лежит в папке: имя (как его различает ФС) -> папка ли это."""
+    taken: dict[str, bool] = {}
+    try:
+        with os.scandir(directory) as items:
+            for item in items:
+                try:
+                    taken[name_key(item.name)] = item.is_dir()
+                except OSError:
+                    taken[name_key(item.name)] = False
+    except OSError:
+        pass
+    return taken
 
 
 def part_file(target: Path, tag: str) -> Path:
