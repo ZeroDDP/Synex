@@ -221,6 +221,13 @@ class KnownHostInfo(BaseModel):
     port: int
     fingerprint: str = Field(..., description="Подтверждённый отпечаток, SHA256:<base64>")
     key_type: str | None = None
+    source: Literal["user", "openssh"] = Field(
+        default="user",
+        description=(
+            "Кто подтвердил ключ: user — пользователь в Synex; openssh — ключ был записан в "
+            "known_hosts OpenSSH на этом компьютере, и backend взял его оттуда"
+        ),
+    )
     added_at: datetime
     updated_at: datetime
 

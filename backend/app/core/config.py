@@ -84,6 +84,14 @@ class Settings(BaseSettings):
     # Доверенные ключи SSH-серверов (отпечатки по host:port, схема TOFU). По умолчанию
     # known_hosts.json рядом с keys.json.
     KNOWN_HOSTS_PATH: Path | None = None
+    # Доверять серверам, ключи которых уже записаны в known_hosts OpenSSH на этом
+    # компьютере (пользователь подключался к ним через ssh): их ключ не нужно подтверждать
+    # ещё раз. false: каждый новый сервер подтверждается в Synex.
+    OPENSSH_KNOWN_HOSTS: bool = True
+    # Свои файлы known_hosts через запятую вместо стандартных (~/.ssh/known_hosts,
+    # ~/.ssh/known_hosts2, /etc/ssh/ssh_known_hosts; на Windows
+    # %USERPROFILE%\.ssh\known_hosts и %PROGRAMDATA%\ssh\ssh_known_hosts).
+    OPENSSH_KNOWN_HOSTS_FILES: str = ""
 
     # Плагины через запятую; * значит все установленные (app/plugins/<name>/plugin.py).
     # Нужные плагинам зависимости включаются сами.

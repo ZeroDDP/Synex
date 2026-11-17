@@ -43,12 +43,17 @@ def default_app_settings(monkeypatch):
 @pytest.fixture(autouse=True)
 def isolated_keystore(monkeypatch, tmp_path: Path) -> Path:
     """Тесты никогда не трогают настоящее хранилище ключей, сохранённые подключения,
-    доверенные ключи серверов и системный keychain."""
+    доверенные ключи серверов и системный keychain и не читают known_hosts OpenSSH этого
+    компьютера (вместо него файл теста, которого по умолчанию нет)."""
     path = tmp_path / "keystore" / "keys.json"
     monkeypatch.setattr(settings, "KEYSTORE_PATH", path)
     monkeypatch.setattr(settings, "KEYSTORE_MASTER_KEY", SecretStr(Fernet.generate_key().decode()))
     monkeypatch.setattr(settings, "CONNECTIONS_PATH", path.with_name("connections.json"))
     monkeypatch.setattr(settings, "KNOWN_HOSTS_PATH", path.with_name("known_hosts.json"))
+    monkeypatch.setattr(settings, "OPENSSH_KNOWN_HOSTS", True)
+    monkeypatch.setattr(
+        settings, "OPENSSH_KNOWN_HOSTS_FILES", str(path.with_name("openssh_known_hosts"))
+    )
     return path
 
 

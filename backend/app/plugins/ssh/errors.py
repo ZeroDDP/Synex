@@ -74,3 +74,16 @@ class SSHHostKeyMismatchError(AppError):
         super().__init__(detail)
         self.host_key = host_key
         self.extra = {"host_key": host_key}
+
+
+class SSHHostKeyRevokedError(AppError):
+    """Ключ сервера помечен как отозванный (@revoked) в known_hosts OpenSSH на этом
+    компьютере: подключения нет."""
+
+    code = "ssh_host_key_revoked"
+    status_code = 409
+
+    def __init__(self, detail: str, host_key: dict[str, Any]) -> None:
+        super().__init__(detail)
+        self.host_key = host_key
+        self.extra = {"host_key": host_key}

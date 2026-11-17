@@ -10,13 +10,17 @@
     и сам не повторяет подключение. Сохранённый отпечаток меняется только явным
     действием пользователя (POST /api/ssh/known-hosts с replace=true).
 
+Ключ, которому уже доверяет OpenSSH на этом компьютере (он записан в ~/.ssh/known_hosts),
+подтверждать ещё раз не нужно: backend находит его там и сохраняет сам, с source
+"openssh" (openssh_hosts.py).
+
 Формат файла:
 
     {
       "version": 1,
       "hosts": [
         {"host", "port", "fingerprint": "SHA256:...", "key_type": "ssh-ed25519",
-         "added_at", "updated_at"}
+         "source": "user" | "openssh", "added_at", "updated_at"}
       ]
     }
 
@@ -30,6 +34,7 @@ import json
 import re
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 import structlog
 from pydantic import BaseModel, Field, ValidationError
@@ -45,6 +50,9 @@ FILE_VERSION = 1
 # Формат OpenSSH: SHA256 и base64 без "=" в конце (43 символа для SHA-256)
 FINGERPRINT_PATTERN = r"^SHA256:[A-Za-z0-9+/]{43}$"
 _FINGERPRINT = re.compile(FINGERPRINT_PATTERN)
+
+# Кто подтвердил ключ: пользователь в Synex или запись в known_hosts OpenSSH
+Source = Literal["user", "openssh"]
 
 
 class KnownHostsCorruptedError(AppError):
@@ -69,6 +77,7 @@ class KnownHost(BaseModel):
     port: int = 22
     fingerprint: str
     key_type: str | None = None
+    source: Source = "user"  # в файлах до появления поля все записи от пользователя
     added_at: datetime
     updated_at: datetime
 
@@ -121,10 +130,11 @@ class KnownHostsStore:
         key_type: str | None = None,
         *,
         replace: bool = False,
+        source: Source = "user",
     ) -> tuple[KnownHost, bool]:
-        """Сохранить отпечаток, который подтвердил пользователь. Возвращает (запись,
-        изменилось ли что-то). Другой отпечаток уже сохранён и replace=False:
-        KnownHostConflictError."""
+        """Сохранить отпечаток, который подтвердил пользователь (source "openssh": ключ
+        найден в known_hosts OpenSSH). Возвращает (запись, изменилось ли что-то). Другой
+        отпечаток уже сохранён и replace=False: KnownHostConflictError."""
         if not is_fingerprint(fingerprint):
             raise ValueError(f"not an OpenSSH SHA256 fingerprint: {fingerprint!r}")
         async with self._lock:
@@ -133,12 +143,19 @@ class KnownHostsStore:
             now = _now()
             if current is not None:
                 if current.fingerprint == fingerprint:
-                    if key_type and current.key_type != key_type:
+                    # Тот же ключ: уточняется тип, а запись из OpenSSH, которую теперь
+                    # подтвердил сам пользователь, становится его записью
+                    new_type = bool(key_type) and current.key_type != key_type
+                    confirmed = source == "user" and current.source != "user"
+                    if not new_type and not confirmed:
+                        return current, False
+                    if new_type:
                         current.key_type = key_type
-                        current.updated_at = now
-                        self._write(content)
-                        return current, True
-                    return current, False
+                    if confirmed:
+                        current.source = "user"
+                    current.updated_at = now
+                    self._write(content)
+                    return current, True
                 if not replace:
                     error = KnownHostConflictError(
                         f"Server {server_name(host, port)} is already trusted with another "
@@ -157,6 +174,7 @@ class KnownHostsStore:
                 previous = current.fingerprint
                 current.fingerprint = fingerprint
                 current.key_type = key_type
+                current.source = source
                 current.updated_at = now
                 self._write(content)
                 logger.warning(
@@ -171,12 +189,18 @@ class KnownHostsStore:
                 port=port,
                 fingerprint=fingerprint,
                 key_type=key_type,
+                source=source,
                 added_at=now,
                 updated_at=now,
             )
             content.hosts.append(record)
             self._write(content)
-        logger.info("SSH host key trusted", server=server_name(host, port), fingerprint=fingerprint)
+        logger.info(
+            "SSH host key trusted",
+            server=server_name(host, port),
+            fingerprint=fingerprint,
+            source=source,
+        )
         return record, True
 
     async def remove(self, host: str, port: int) -> KnownHost:

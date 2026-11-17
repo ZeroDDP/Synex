@@ -44,10 +44,13 @@ CONNECT_ERRORS = {
     404: {"description": "Ключа key_id нет в хранилище"},
     409: {
         "description": (
-            "Ключ сервера не подтверждён (ssh_host_key_unknown) или изменился "
-            "(ssh_host_key_mismatch). В ответе host_key: {host, port, fingerprint, key_type, "
-            "expected_fingerprint?}. UI показывает отпечаток, после подтверждения "
-            "пользователем сохраняет его (POST /api/ssh/known-hosts) и подключается снова"
+            "Ключ сервера не подтверждён (ssh_host_key_unknown), изменился "
+            "(ssh_host_key_mismatch) или отозван в known_hosts OpenSSH "
+            "(ssh_host_key_revoked). В ответе host_key: {host, port, fingerprint, key_type, "
+            "expected_fingerprint?, source?}. UI показывает отпечаток, после подтверждения "
+            "пользователем сохраняет его (POST /api/ssh/known-hosts) и подключается снова. "
+            "Ключ, который уже записан в known_hosts OpenSSH на этом компьютере, backend "
+            "подтверждает сам"
         )
     },
     422: {"description": "Неверные параметры (например, нет файла ключа)"},
@@ -240,7 +243,8 @@ async def status(
     summary="Доверенные ключи серверов",
 )
 async def list_known_hosts() -> list[KnownHostInfo]:
-    """Отпечатки ключей серверов, которые подтвердил пользователь (по host:port)."""
+    """Отпечатки ключей серверов по host:port: которые подтвердил пользователь (source
+    `user`) и которые backend нашёл в known_hosts OpenSSH на этом компьютере (`openssh`)."""
     return [_known(host) for host in await get_known_hosts().list_hosts()]
 
 
