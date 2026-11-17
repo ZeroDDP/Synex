@@ -5,6 +5,7 @@ use russh::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Instant;
 
 use crate::errors::{Result, SftpErrorKind, SynexError}; // файл ошибок
 
@@ -64,7 +65,8 @@ impl Handler for ClientHandler {
 pub struct SshSession {
     session: client::Handle<ClientHandler>,
     pub host_key: HostKey,
-    pub prev_cpu: Option<(u64, u64)>, // idle, total
+    pub prev_cpu: Option<(u64, u64)>,          // idle, total
+    pub prev_net: Option<(u64, u64, Instant)>, // rx, tx, момент замера
 }
 
 impl SshSession {
@@ -125,6 +127,7 @@ impl SshSession {
             session,
             host_key,
             prev_cpu: None,
+            prev_net: None,
         })
     }
 

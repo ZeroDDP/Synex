@@ -153,7 +153,7 @@ Response {
 | `password`             | string/null | Пароль пользователя. Используется, если `key_path` не задан. Не логируется                         |
 | `host_key_fingerprint` | string/null | Доверенный отпечаток ключа сервера в формате `SHA256:<base64>`. Необязательное поле, см. TOFU ниже |
 
-Если не задан ни `key_path`, ни `password`, возвращается ошибка `No authentication method provided`.
+Если не задан ни `key_path`, ни `password`, возвращается `status: "error"`, а в `stderr` строка `Connection failed: SSH internal error: No authentication method provided`.
 
 **Проверка ключа сервера (TOFU).** Воркер не хранит `known_hosts`, доверенные отпечатки хранит backend и передаёт их в `host_key_fingerprint`:
 
@@ -290,7 +290,7 @@ Response {
   "id": "sess-1",
   "status": "ok",
   "payload": {
-    "stdout": "{\"ok\":true,\"cpu_usage_percent\":2.63,\"mem_total_kb\":2014404,\"mem_available_kb\":793976,\"mem_used_kb\":1220428,\"mem_usage_percent\":60.59,\"error\":null}",
+    "stdout": "{\"ok\":true,\"cpu_usage_percent\":2.63,\"mem_total_kb\":2014404,\"mem_available_kb\":793976,\"mem_used_kb\":1220428,\"mem_usage_percent\":60.59,\"net_rx_bytes_total\":123456789,\"net_tx_bytes_total\":98765432,\"net_rx_bytes_per_sec\":null,\"net_tx_bytes_per_sec\":null,\"disk_total_kb\":41152736,\"disk_used_kb\":12345678,\"disk_available_kb\":26000000,\"disk_usage_percent\":32.2,\"error\":null}",
     "stderr": "",
     "exit_code": 0
   }
@@ -299,15 +299,29 @@ Response {
 
 Поля JSON в `stdout`:
 
-| Поле                | Тип         | Описание                                                                                          |
-| ------------------- | ----------- | ------------------------------------------------------------------------------------------------- |
-| `ok`                | bool        | `true`, если метрики разобраны                                                                    |
-| `cpu_usage_percent` | float       | Загрузка CPU в процентах. При первом вызове в сессии `0.0`, потому что предыдущего замера ещё нет |
-| `mem_total_kb`      | int         | Всего памяти, КБ                                                                                  |
-| `mem_available_kb`  | int         | Доступно памяти, КБ                                                                               |
-| `mem_used_kb`       | int         | Использовано памяти, КБ                                                                           |
-| `mem_usage_percent` | float       | Использование памяти в процентах                                                                  |
-| `error`             | string/null | Текст ошибки разбора, если `ok` = `false`                                                         |
+| Поле                   | Тип         | Описание                                                                                          |
+| ---------------------- | ----------- | ------------------------------------------------------------------------------------------------- |
+| `ok`                   | bool        | `true`, если метрики разобраны                                                                    |
+| `cpu_usage_percent`    | float       | Загрузка CPU в процентах. При первом вызове в сессии `0.0`, потому что предыдущего замера ещё нет |
+| `mem_total_kb`         | int         | Всего памяти, КБ                                                                                  |
+| `mem_available_kb`     | int         | Доступно памяти, КБ                                                                               |
+| `mem_used_kb`          | int         | Использовано памяти, КБ                                                                           |
+| `mem_usage_percent`    | float       | Использование памяти в процентах                                                                  |
+| `net_rx_bytes_total`   | int/null    | Принято байт по всем интерфейсам, кроме `lo` (счётчик из `/proc/net/dev`)                         |
+| `net_tx_bytes_total`   | int/null    | Отправлено байт по всем интерфейсам, кроме `lo`                                                   |
+| `net_rx_bytes_per_sec` | float/null  | Скорость приёма, байт/с. Дельта с прошлого вызова в этой сессии. `null` при первом вызове         |
+| `net_tx_bytes_per_sec` | float/null  | Скорость отправки, байт/с. Так же, `null` при первом вызове                                       |
+| `disk_total_kb`        | int/null    | Размер корневого раздела `/`, КБ (`df -P -k /`)                                                   |
+| `disk_used_kb`         | int/null    | Занято на `/`, КБ                                                                                 |
+| `disk_available_kb`    | int/null    | Доступно на `/`, КБ                                                                               |
+| `disk_usage_percent`   | float/null  | Занятость `/` в процентах: `used / (used + available) * 100`, как колонка Capacity в `df`         |
+| `error`                | string/null | Текст ошибки разбора, если `ok` = `false`                                                         |
+
+Примечания:
+
+- Диск считается командой `df -P -k /`, а не `df -h /`: вывод `-h` читается человеком, и размеры в нем округлены. `-P` фиксирует формат одной строкой на файловую систему.
+- Сетевые счётчики суммируются по всем интерфейсам, кроме `lo`. В хосте с Docker трафик через мосты (`docker0`, `veth*`) подсчитывается дважды.
+- Скорости считаются по разнице счётчиков между запросами в одной сессии. Если счётчик уменьшился (перезагрузка или сброс), скорость будет `0`.
 
 Если метрики не удалось разобрать, `stdout` содержит JSON с `"ok": false` и `"error": "..."`. Сам `status` при этом остаётся `"ok"`.
 
@@ -432,21 +446,21 @@ if resp["status"] == "ok":
 | `Unknown action: <name>`          | Неизвестное значение `action`                                | Проверить имя действия по разделу 5 и 8.4  |
 | `Missing 'connection' in payload` | В `ssh_connect` нет `connection`                             | Передать `connection`                      |
 
-Если кадр не распаковался в MessagePack, воркер отвечает ошибкой формата и продолжает работать со следующим кадром.
+Если кадр не распаковался в MessagePack, воркер отвечает с `id: "bad_msgpack"` и `stderr: "Failed to unpack: ..."`, соединение остаётся открытым, воркер продолжает работать со следующим кадром.
 
 ### Ошибки SSH
 
-| Сообщение (stderr)                                   | Причина                                                          | Что делать                                                     |
-| ---------------------------------------------------- | ---------------------------------------------------------------- | -------------------------------------------------------------- |
-| `Session dont founded by key. Create session first!` | Нет сессии с таким `id` (не было `ssh_connect` или он не прошёл) | Выполнить `ssh_connect` с этим `id`                            |
-| `host_key_unknown: unknown host key SHA256:...`      | `host_key_fingerprint` не передан                                | Показать отпечаток пользователю, повторить с ним               |
-| `host_key_mismatch: expected X, got Y`               | Ключ сервера не совпал с сохранённым                             | Не подключаться. Проверить, не сменился ли сервер или не атака |
-| `SSH authentication failed: access denied`           | Сервер отказал в ключе или пароле                                | Проверить логин, пароль, ключ и `passphrase`                   |
-| `No authentication method provided`                  | Не передан ни `key_path`, ни `password`                          | Передать один из них                                           |
-| `Connection failed: ...`                             | Сеть, порт, таймаут SSH                                          | Проверить `host`, `port`, доступность сервера                  |
-| `Session not found`                                  | `ssh_disconnect` для неизвестного `id`                           | Ничего, сессия уже закрыта                                     |
+| Сообщение (stderr)                                                         | Причина                                                          | Что делать                                                     |
+| -------------------------------------------------------------------------- | ---------------------------------------------------------------- | -------------------------------------------------------------- |
+| `Session dont founded by key. Create session first!`                       | Нет сессии с таким `id` (не было `ssh_connect` или он не прошёл) | Выполнить `ssh_connect` с этим `id`                            |
+| `host_key_unknown: unknown host key SHA256:...`                            | `host_key_fingerprint` не передан                                | Показать отпечаток пользователю, повторить с ним               |
+| `host_key_mismatch: expected X, got Y`                                     | Ключ сервера не совпал с сохранённым                             | Не подключаться. Проверить, не сменился ли сервер или не атака |
+| `Connection failed: SSH authentication failed: access denied`              | Сервер отказал в ключе или пароле                                | Проверить логин, пароль, ключ и `passphrase`                   |
+| `Connection failed: SSH internal error: No authentication method provided` | Не передан ни `key_path`, ни `password`                          | Передать один из них                                           |
+| `Connection failed: ...`                                                   | Сеть, порт, таймаут SSH                                          | Проверить `host`, `port`, доступность сервера                  |
+| `Session not found`                                                        | `ssh_disconnect` для неизвестного `id`                           | Ничего, сессия уже закрыта                                     |
 
-Любая ошибка SSH, которой нет в таблице, возвращается как `SSH internal error: ...`.
+Ошибки `ssh_connect`, которых нет в таблице, приходят с префиксом `Connection failed: ` (сеть, порт, таймаут). Ошибки `ssh_exec` и SFTP приходят как `SSH protocol error: ...` (ошибка russh) или `SSH internal error: ...`. SFTP-ошибки дополнительно начинаются с кода `sftp_*`.
 
 ### Ошибки выполнения команд
 
@@ -591,8 +605,9 @@ SFTP-действия используют ту же SSH-сессию, что и
 Наборы проверок:
 
 - `run_tofu_tests`: `host_key_unknown` без отпечатка, успешное подключение с отпечатком, `host_key_mismatch` с чужим отпечатком;
-- `run_exec_tests`: `exit_code` (`exit 3` → 3, `false` → 1, `kill -9 $$` → 137, `kill -TERM $$` → 143), stderr, `monitor_get_values`, неизвестная сессия;
-- `run_sftp_tests`: создание, загрузка, скачивание, перемещение файлов и папок (`sftp_move_dir`), копирование, удаление;
+- `run_exec_tests`: `exit_code` (`exit 3` → 3, `false` → 1, `kill -9 $$` → 137, `kill -TERM $$` → 143), stderr, неизвестная сессия;
+- `run_monitor_tests` (вызвается из `run_exec_tests`): `monitor_get_values` дважды в одной сессии. На первом вызове скорости сети `null`, на втором числа; счетчики rx не уменьшаются; диск `/` заполнен, `disk_usage_percent` в 0..100;
+- `run_sftp_tests`: создание, загрузка, скачивание, перемещение файлов, перемещение папки (`sftp_move_dir`: содержимое едет вместе с папкой, коды `sftp_not_found`, `sftp_not_a_directory`, `sftp_exists`), копирование, удаление;
 - `run_sftp_error_tests`: коды ошибок SFTP, `sftp_stat` (файл, папка, симлинк), поля `list_dir`;
 - `run_socket_permission_test`: права `0600` у Unix-сокета (только unix);
 - `run_frame_limit_test`: кадр сверх `16 MiB`.
@@ -602,19 +617,19 @@ SFTP-действия используют ту же SSH-сессию, что и
 ### 8.7. Запуск тестов
 
 1. Собрать воркер: `cargo build -p synex_worker --release` (из папки `core`).
-2. Запустить воркер отдельно: он не запускается из тестов, потому что `spawn_worker=False` по умолчанию в `__main__`.
+2. Запустить воркер отдельно. В `__main__` стоит `SynexClient(spawn_worker=False)`, поэтому тесты сами его не запускают.
 3. Задать переменные окружения:
 
-| Переменная                | Обязательна  | По умолчанию | Описание                |
-| ------------------------- | ------------ | ------------ | ----------------------- |
-| `SSH_TEST_HOST`           | да           | —            | Адрес тестового сервера |
-| `SSH_TEST_PORT`           | нет          | `22`         | SSH-порт                |
-| `SSH_TEST_USER`           | нет          | `root`       | Пользователь            |
-| `SSH_TEST_PASS`           | одна из двух | —            | Пароль                  |
-| `SSH_TEST_KEY`            | одна из двух | —            | Путь к приватному ключу |
-| `SSH_TEST_KEY_PASSPHRASE` | нет          | —            | Пароль от ключа         |
+| Переменная                | Обязательна  | По умолчанию | Описание                                    |
+| ------------------------- | ------------ | ------------ | ------------------------------------------- |
+| `SSH_TEST_HOST`           | —            | —            | Не читается: адрес зашит в `load_config()`  |
+| `SSH_TEST_PORT`           | нет          | `22`         | SSH-порт                                    |
+| `SSH_TEST_USER`           | нет          | `root`       | Пользователь                                |
+| `SSH_TEST_PASS`           | —            | —            | Не читается: пароль зашит в `load_config()` |
+| `SSH_TEST_KEY`            | одна из двух | —            | Путь к приватному ключу                     |
+| `SSH_TEST_KEY_PASSPHRASE` | нет          | —            | Пароль от ключа                             |
 
-Без `SSH_TEST_HOST` и без пароля или ключа скрипт выходит с кодом `2`.
+Если в `load_config()` не задан ни пароль, ни ключ, скрипт выходит с кодом `2`.
 
 4. Запустить из папки `core`: `python rust_tests.py`. Код выхода `0` — все проверки прошли, `1` — есть провалы.
 
@@ -637,6 +652,7 @@ SFTP-действия используют ту же SSH-сессию, что и
 **Сделано:**
 
 - `exit_code` из `ExitStatus`, сигнал → `128 + N`;
+- мониторинг: сеть (`net_*`, скорости как дельта с прошлого вызова в сессии) и диск `/` (`disk_*`, из `df -P -k /`);
 - TOFU для `ssh_connect` (`host_key_unknown`, `host_key_mismatch`, поля `fingerprint` и `key_type`);
 - ограничение размера кадра (16 MiB);
 - права `0600` у Unix-сокета;

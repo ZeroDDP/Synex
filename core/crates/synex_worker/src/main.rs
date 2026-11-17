@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use std::{env, result};
 use synex_core::errors::SynexError;
 use synex_core::mon::SshMonitoring;
@@ -75,6 +76,14 @@ pub struct MetricsResponse {
     pub mem_available_kb: u64,
     pub mem_used_kb: u64,
     pub mem_usage_percent: f64,
+    pub net_rx_bytes_total: Option<u64>,
+    pub net_tx_bytes_total: Option<u64>,
+    pub net_rx_bytes_per_sec: Option<f64>,
+    pub net_tx_bytes_per_sec: Option<f64>,
+    pub disk_total_kb: Option<u64>,
+    pub disk_used_kb: Option<u64>,
+    pub disk_available_kb: Option<u64>,
+    pub disk_usage_percent: Option<f64>,
     pub error: Option<String>,
 }
 
@@ -347,11 +356,17 @@ where
 
                 let mut sess = session_arc.lock().await;
 
-                let command = "head -n 1 /proc/stat; grep -E 'MemTotal|MemAvailable' /proc/meminfo";
+                let command = "head -n 1 /proc/stat; grep -E 'MemTotal|MemAvailable' /proc/meminfo; cat /proc/net/dev; df -P -k /";
                 info!("Выполняется команда мониторинга");
                 match sess.execute_command(command).await {
                     Ok(output) => {
-                        let stdout_json = parse_metrics_to_json(&output.stdout, &mut sess.prev_cpu);
+                        // Разбираем поля сессии по отдельности, иначе два &mut через DerefMut конфликтуют
+                        let state = &mut *sess;
+                        let stdout_json = parse_metrics_to_json(
+                            &output.stdout,
+                            &mut state.prev_cpu,
+                            &mut state.prev_net,
+                        );
                         let resp = Response {
                             id: req.id,
                             status: "ok".to_string(),
@@ -963,7 +978,45 @@ async fn run_tcp(port: u16) -> std::io::Result<()> {
     }
 }
 
-fn parse_metrics_to_json(raw: &str, prev_cpu: &mut Option<(u64, u64)>) -> String {
+// Строка интерфейса из /proc/net/dev: "eth0: rx_bytes ... tx_bytes ...". Возвращает (rx, tx).
+// Loopback не считаем: это внутренний трафик машины.
+fn parse_net_dev_line(line: &str) -> Option<(u64, u64)> {
+    let (name, rest) = line.split_once(':')?;
+    let name = name.trim();
+    if name.is_empty() || name == "lo" || name.contains(char::is_whitespace) {
+        return None;
+    }
+    let nums: Vec<u64> = rest
+        .split_whitespace()
+        .map(|s| s.parse::<u64>())
+        .collect::<std::result::Result<_, _>>()
+        .ok()?;
+    // rx_bytes — поле 0, tx_bytes — поле 8
+    if nums.len() < 9 {
+        return None;
+    }
+    Some((nums[0], nums[8]))
+}
+
+// Строка `df -P -k`: Filesystem, 1K-blocks, Used, Available, Capacity, Mounted on.
+// Возвращает (total_kb, used_kb, available_kb).
+fn parse_df_line(line: &str) -> Option<(u64, u64, u64)> {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    if tokens.len() < 6 || !tokens[4].ends_with('%') {
+        return None;
+    }
+    Some((
+        tokens[1].parse().ok()?,
+        tokens[2].parse().ok()?,
+        tokens[3].parse().ok()?,
+    ))
+}
+
+fn parse_metrics_to_json(
+    raw: &str,
+    prev_cpu: &mut Option<(u64, u64)>,
+    prev_net: &mut Option<(u64, u64, Instant)>,
+) -> String {
     let make_err = |msg: &str| -> String {
         serde_json::to_string(&MetricsResponse {
             ok: false,
@@ -972,6 +1025,14 @@ fn parse_metrics_to_json(raw: &str, prev_cpu: &mut Option<(u64, u64)>) -> String
             mem_available_kb: 0,
             mem_used_kb: 0,
             mem_usage_percent: 0.0,
+            net_rx_bytes_total: None,
+            net_tx_bytes_total: None,
+            net_rx_bytes_per_sec: None,
+            net_tx_bytes_per_sec: None,
+            disk_total_kb: None,
+            disk_used_kb: None,
+            disk_available_kb: None,
+            disk_usage_percent: None,
             error: Some(msg.to_string()),
         })
         .unwrap_or_else(|_| r#"{"ok":false,"error":"serialization_failed"}"#.to_string())
@@ -984,6 +1045,8 @@ fn parse_metrics_to_json(raw: &str, prev_cpu: &mut Option<(u64, u64)>) -> String
     let mut cur_cpu: Option<(u64, u64)> = None;
     let mut mem_total: Option<u64> = None;
     let mut mem_avail: Option<u64> = None;
+    let mut net_totals: Option<(u64, u64)> = None;
+    let mut disk: Option<(u64, u64, u64)> = None;
 
     for line in raw.lines() {
         let line = line.trim();
@@ -1005,6 +1068,12 @@ fn parse_metrics_to_json(raw: &str, prev_cpu: &mut Option<(u64, u64)>) -> String
             mem_total = line.split_whitespace().nth(1).and_then(|v| v.parse().ok());
         } else if line.starts_with("MemAvailable:") {
             mem_avail = line.split_whitespace().nth(1).and_then(|v| v.parse().ok());
+        } else if let Some((rx, tx)) = parse_net_dev_line(line) {
+            // Суммируем все интерфейсы, кроме loopback
+            let (sum_rx, sum_tx) = net_totals.unwrap_or((0, 0));
+            net_totals = Some((sum_rx + rx, sum_tx + tx));
+        } else if let Some(parsed) = parse_df_line(line) {
+            disk = Some(parsed);
         }
     }
 
@@ -1046,6 +1115,48 @@ fn parse_metrics_to_json(raw: &str, prev_cpu: &mut Option<(u64, u64)>) -> String
 
     let round2 = |val: f64| (val * 100.0).round() / 100.0;
 
+    // Скорость сети — дельта счётчиков за время между запросами этой сессии.
+    // На первом запросе скорости нет (null), как и CPU на первом запросе.
+    let now = Instant::now();
+    let (net_rx_total, net_tx_total, net_rx_rate, net_tx_rate) = match net_totals {
+        Some((rx, tx)) => {
+            let rates = match *prev_net {
+                Some((old_rx, old_tx, at)) => {
+                    let secs = now.duration_since(at).as_secs_f64();
+                    (secs > 0.0).then(|| {
+                        (
+                            round2(rx.saturating_sub(old_rx) as f64 / secs),
+                            round2(tx.saturating_sub(old_tx) as f64 / secs),
+                        )
+                    })
+                }
+                None => None,
+            };
+            *prev_net = Some((rx, tx, now));
+            (
+                Some(rx),
+                Some(tx),
+                rates.map(|(r, _)| r),
+                rates.map(|(_, t)| t),
+            )
+        }
+        None => (None, None, None, None),
+    };
+
+    // df считает занятость как used / (used + available), так же считаем и здесь
+    let (disk_total, disk_used, disk_avail, disk_percent) = match disk {
+        Some((total, used, avail)) => {
+            let denom = used + avail;
+            let percent = if denom == 0 {
+                0.0
+            } else {
+                used as f64 / denom as f64 * 100.0
+            };
+            (Some(total), Some(used), Some(avail), Some(round2(percent)))
+        }
+        None => (None, None, None, None),
+    };
+
     let resp = MetricsResponse {
         ok: true,
         cpu_usage_percent: round2(cpu_percent),
@@ -1053,14 +1164,109 @@ fn parse_metrics_to_json(raw: &str, prev_cpu: &mut Option<(u64, u64)>) -> String
         mem_available_kb: avail_kb,
         mem_used_kb: used_kb,
         mem_usage_percent: round2(mem_percent),
+        net_rx_bytes_total: net_rx_total,
+        net_tx_bytes_total: net_tx_total,
+        net_rx_bytes_per_sec: net_rx_rate,
+        net_tx_bytes_per_sec: net_tx_rate,
+        disk_total_kb: disk_total,
+        disk_used_kb: disk_used,
+        disk_available_kb: disk_avail,
+        disk_usage_percent: disk_percent,
         error: None,
     };
 
     serde_json::to_string(&resp).unwrap_or_else(|_| make_err("Ошибка сериализации JSON"))
 }
+
 async fn get_session(
     sessions: &Arc<Mutex<HashMap<String, Arc<Mutex<SshSession>>>>>,
     id: &str,
 ) -> Option<Arc<Mutex<SshSession>>> {
     sessions.lock().await.get(id).cloned()
+}
+
+#[cfg(test)]
+mod metrics_tests {
+    use super::*;
+
+    #[test]
+    fn net_dev_line_sums_rx_and_tx() {
+        let line = "eth0: 1000 1 0 0 0 0 0 0 2000 2 0 0 0 0 0 0";
+        assert_eq!(parse_net_dev_line(line), Some((1000, 2000)));
+    }
+
+    #[test]
+    fn net_dev_skips_loopback_and_headers() {
+        assert_eq!(
+            parse_net_dev_line("lo: 1000 1 0 0 0 0 0 0 2000 2 0 0 0 0 0 0"),
+            None
+        );
+        assert_eq!(
+            parse_net_dev_line(
+                "Inter-|   Receive                                                |  Transmit"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_net_dev_line(
+                " face |bytes    packets errs drop fifo frame compressed multicast|bytes"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn df_line_parses_kb_values() {
+        assert_eq!(
+            parse_df_line("/dev/sda1 1000 400 600 40% /"),
+            Some((1000, 400, 600))
+        );
+    }
+
+    #[test]
+    fn df_header_is_not_a_disk_line() {
+        assert_eq!(
+            parse_df_line("Filesystem 1024-blocks Used Available Capacity Mounted on"),
+            None
+        );
+    }
+
+    #[test]
+    fn metrics_first_call_has_null_net_rates_and_disk_percent() {
+        let raw = "cpu  100 0 100 800 0 0 0 0 0 0\n\
+MemTotal:       2000 kB\n\
+MemAvailable:   1500 kB\n\
+eth0: 1000 1 0 0 0 0 0 0 2000 2 0 0 0 0 0 0\n\
+/dev/sda1 1000 400 600 40% /";
+        let mut prev_cpu = None;
+        let mut prev_net = None;
+        let json: serde_json::Value =
+            serde_json::from_str(&parse_metrics_to_json(raw, &mut prev_cpu, &mut prev_net))
+                .unwrap();
+
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["net_rx_bytes_total"], 1000);
+        assert_eq!(json["net_tx_bytes_total"], 2000);
+        assert!(json["net_rx_bytes_per_sec"].is_null());
+        assert!(json["net_tx_bytes_per_sec"].is_null());
+        assert_eq!(json["disk_total_kb"], 1000);
+        assert_eq!(json["disk_used_kb"], 400);
+        assert_eq!(json["disk_available_kb"], 600);
+        assert_eq!(json["disk_usage_percent"], 40.0);
+    }
+
+    #[test]
+    fn metrics_without_disk_or_net_return_nulls() {
+        let raw =
+            "cpu  100 0 100 800 0 0 0 0 0 0\nMemTotal:       2000 kB\nMemAvailable:   1500 kB";
+        let mut prev_cpu = None;
+        let mut prev_net = None;
+        let json: serde_json::Value =
+            serde_json::from_str(&parse_metrics_to_json(raw, &mut prev_cpu, &mut prev_net))
+                .unwrap();
+
+        assert_eq!(json["ok"], true);
+        assert!(json["net_rx_bytes_total"].is_null());
+        assert!(json["disk_usage_percent"].is_null());
+    }
 }
