@@ -5,6 +5,8 @@
 **One window for your servers.**<br>
 SSH terminal, live monitoring, Docker, SFTP and git deploys in a single desktop app.
 
+**English** | [Русский](README.ru.md)
+
 [![backend](https://github.com/ZeroDDP/Synex/actions/workflows/backend.yml/badge.svg)](https://github.com/ZeroDDP/Synex/actions/workflows/backend.yml)
 [![core](https://github.com/ZeroDDP/Synex/actions/workflows/rust.yml/badge.svg)](https://github.com/ZeroDDP/Synex/actions/workflows/rust.yml)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
@@ -17,7 +19,7 @@ SSH terminal, live monitoring, Docker, SFTP and git deploys in a single desktop 
 <img src="docs/screenshots/hero.gif" alt="Synex: connecting to a server and watching live metrics" width="100%">
 -->
 
-[Features](#features) · [Architecture](#architecture) · [Quick start](#quick-start) · [Configuration](#configuration) · [Development](#development) · [Roadmap](#roadmap) · [Team](#team) · [Русский](#по-русски)
+[Features](#features) · [Architecture](#architecture) · [Quick start](#quick-start) · [Configuration](#configuration) · [Development](#development) · [Roadmap](#roadmap) · [Team](#team)
 
 </div>
 
@@ -201,13 +203,3 @@ into `main` with green checks. Details: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 [MIT](LICENSE) © 2026 ZeroDDP
 
----
-
-## По-русски
-
-Synex — desktop-приложение для управления серверами: SSH-терминал, мониторинг, Docker,
-SFTP-менеджер и git-деплой в одном окне. Архитектура микроядерная: ядро даёт платформу,
-UI и шину данных, а всё остальное — плагины, которые включаются и выключаются на ходу.
-
-Как запустить: [RUNNING.md](RUNNING.md). Как устроен backend и его API:
-[backend/README.md](backend/README.md). Как мы работаем: [CONTRIBUTING.md](CONTRIBUTING.md).

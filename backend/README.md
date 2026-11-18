@@ -1,30 +1,34 @@
 # Synex backend
 
-FastAPI-сервер между UI и Rust-ядром `synex_worker` (протокол описан в CoreDocs).
-Сейчас умеет три вещи: работать с SSH-сессиями через воркер (несколько одновременно,
-у каждой свой терминал по WebSocket), хранить SSH-ключи в зашифрованном виде и
-передавать UI метрики серверов (CPU, RAM, сеть, диск) по WebSocket каждые 500 мс.
+**English** | [Русский](README.ru.md)
 
-## Запуск
+A FastAPI server between the UI and the Rust worker `synex_worker` (the worker protocol is
+described in [core/README.md](../core/README.md)). It runs SSH sessions through the worker
+(several at once, each with its own terminal over WebSocket), keeps SSH keys encrypted,
+stores saved connections, streams server metrics (CPU, RAM, network, disk) to the UI over
+WebSocket every 500 ms, and manages Docker, git and files (SFTP) on the servers. Every
+feature is a plugin.
 
-Нужны Python 3.12 и [uv](https://docs.astral.sh/uv/).
+## Running
+
+You need Python 3.12 and [uv](https://docs.astral.sh/uv/).
 
 ```powershell
 cd backend
-uv sync                      # зависимости, включая dev-группу (pytest, ruff)
+uv sync                      # dependencies, including the dev group (pytest, ruff)
 uv run python -m app.main    # http://127.0.0.1:8000
 ```
 
-Бэкенд сам запускает `app/core/target/release/synex_worker.exe` как дочерний процесс,
-подключается к нему по Named Pipe (Linux/macOS: Unix socket, запасной вариант TCP)
-и перезапускает воркер, если тот упал. Настройки лежат в `.env`, образец: `.env.example`.
-Пустое значение (`DEBUG=`) означает значение по умолчанию. Если значение неверное,
-бэкенд не запустится и напишет, какая настройка и что с ней не так.
+The backend starts `app/core/target/release/synex_worker.exe` as a child process, connects
+to it over a Named Pipe (Linux/macOS: Unix socket, TCP as a fallback) and restarts the
+worker if it crashes. Settings live in `.env`, the template is `.env.example`. An empty
+value (`DEBUG=`) means the default. If a value is wrong, the backend does not start and
+says which setting is wrong and why.
 
-Не запускайте uvicorn с `--reload` или `--workers` на Windows: тогда uvicorn
-использует SelectorEventLoop, на котором Named Pipe не работает.
+Do not run uvicorn with `--reload` or `--workers` on Windows: uvicorn then uses
+SelectorEventLoop, and Named Pipes do not work on it.
 
-### Linux и macOS
+### Linux and macOS
 
 ```bash
 cd backend
@@ -32,142 +36,143 @@ uv sync
 uv run python -m app.main
 ```
 
-В репозитории лежит `app/core/target/release/synex_worker` для Linux x86_64. Ему нужна
-glibc 2.38 или новее (Ubuntu 24.04, Debian 13, Fedora 39 и новее). На более старом
-дистрибутиве воркер сразу завершается с «version `GLIBC_2.38' not found», и бэкенд
-пишет в лог подсказку: собрать воркер на этой машине (`cargo build --release`) или
-статически (`cargo build --release --target x86_64-unknown-linux-musl`). Для macOS
-и ARM воркер нужно собрать самому. Бэкенд ищет воркер так:
+The repository contains `app/core/target/release/synex_worker` for Linux x86_64. It needs
+glibc 2.38 or newer (Ubuntu 24.04, Debian 13, Fedora 39 and later). On an older
+distribution the worker exits right away with "version `GLIBC_2.38' not found", and the
+backend logs a hint: build the worker on this machine (`cargo build --release`) or
+statically (`cargo build --release --target x86_64-unknown-linux-musl`). For macOS and ARM
+you have to build the worker yourself. The backend looks for the worker like this:
 
-1. `RUST_EXECUTABLE_PATH_UNIX` (относительно `backend/`, затем текущей папки);
-2. сборку под конкретную платформу (`cargo build --release --target <triple>`):
-   `app/core/target/<triple>/release/synex_worker`, где `<triple>` —
+1. `RUST_EXECUTABLE_PATH_UNIX` (relative to `backend/`, then to the current folder);
+2. a build for a specific platform (`cargo build --release --target <triple>`):
+   `app/core/target/<triple>/release/synex_worker`, where `<triple>` is
    `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin`
-   (Apple Silicon) или `x86_64-apple-darwin`;
-3. сборку из исходников воркера в этом репозитории: `core/target/release/synex_worker`
-   (и `core/target/<triple>/release/`) после `cargo build --release` в папке `core/`.
-   На Windows так же ищется `core\target\release\synex_worker.exe`.
+   (Apple Silicon) or `x86_64-apple-darwin`;
+3. a build from the worker sources in this repository: `core/target/release/synex_worker`
+   (and `core/target/<triple>/release/`) after `cargo build --release` in `core/`.
+   On Windows `core\target\release\synex_worker.exe` is searched the same way.
 
-Из всех подходящих файлов берётся самый свежий: только что собранный в `core/` воркер
-новее бинарника из репозитория, а после `git pull` с новым бинарником — наоборот. Какой
-файл запущен, видно в логе (`Rust worker started`, `path`). Если путь в
-`RUST_EXECUTABLE_PATH_*` изменён (не значение по умолчанию), используется только он.
+Of all matching files the newest one wins: a worker just built in `core/` is newer than the
+binary from the repository, and after a `git pull` with a new binary it is the other way
+round. Which file was started is shown in the log (`Rust worker started`, `path`). If the
+path in `RUST_EXECUTABLE_PATH_*` was changed (not the default), only that path is used.
 
-Файл проверяется по заголовку: `synex_worker.exe` или сборка под другой процессор
-пропускается, а в логе написано, для чего она собрана (вместо «Exec format error»).
-Скрипт-обёртка (`#!/bin/sh`) тоже подходит. Право на запуск (`chmod +x`) бэкенд ставит
-сам. macOS может заблокировать неподписанный бинарник, скачанный из интернета (воркер
-умирает сразу с кодом -9): `xattr -d com.apple.quarantine <путь к synex_worker>`.
+The file is checked by its header: `synex_worker.exe` or a build for another CPU is skipped,
+and the log says what it was built for (instead of "Exec format error"). A wrapper script
+(`#!/bin/sh`) works too. The backend sets the execute permission (`chmod +x`) itself. macOS
+may block an unsigned binary downloaded from the internet (the worker dies right away with
+code -9): `xattr -d com.apple.quarantine <path to synex_worker>`.
 
-Воркер слушает Unix socket. По умолчанию (`RUST_IPC_SOCKET_PATH` пустой) он лежит в
-личной папке пользователя, а не в общем `/tmp`: `$XDG_RUNTIME_DIR/synex/worker.sock`
-(Linux, обычно `/run/user/<uid>`), без `XDG_RUNTIME_DIR` — `/tmp/synex-<uid>/worker.sock`,
-на macOS — `$TMPDIR/synex/worker.sock`. Перед запуском воркера бэкенд:
+The worker listens on a Unix socket. By default (`RUST_IPC_SOCKET_PATH` empty) it lives in
+the user's private folder, not in the shared `/tmp`: `$XDG_RUNTIME_DIR/synex/worker.sock`
+(Linux, usually `/run/user/<uid>`), without `XDG_RUNTIME_DIR` `/tmp/synex-<uid>/worker.sock`,
+on macOS `$TMPDIR/synex/worker.sock`. Before starting the worker the backend:
 
-- создаёт папку с правами `0700` и проверяет, что она его и не symlink; иначе берёт
-  временную папку со случайным именем;
-- удаляет файл сокета, который никто не слушает (остался после падения воркера):
-  иначе воркер не смог бы занять путь и ушёл бы на TCP;
-- проверяет длину пути: не больше 103 байт на macOS и 107 на Linux.
+- creates the folder with mode `0700` and checks that it owns it and that it is not a
+  symlink; otherwise it takes a temporary folder with a random name;
+- removes a socket file nobody listens on (left after a worker crash): otherwise the worker
+  could not take the path and would fall back to TCP;
+- checks the path length: at most 103 bytes on macOS and 107 on Linux.
 
-Чтобы воркер не оставался работать без бэкенда (на Windows это делает Job Object):
+So that the worker does not keep running without the backend (on Windows a Job Object takes
+care of it):
 
-- воркер запускается в своей сессии: Ctrl+C в терминале останавливает только бэкенд,
-  а тот штатно закрывает SSH-сессии и затем воркер;
-- Linux: если бэкенд убит (`kill -9`, падение, IDE), ядро сразу посылает воркеру SIGTERM
-  (`PR_SET_PDEATHSIG`);
-- macOS такого механизма не имеет. PID воркера записывается в `worker.sock.pid` рядом
-  с сокетом, и при следующем запуске бэкенд останавливает воркер, оставшийся от
-  прошлого раза: только если тот бэкенд уже не работает и это тот же процесс (совпадают
-  PID и время запуска, так повторно выданный PID не спутать с воркером).
+- the worker runs in its own session: Ctrl+C in the terminal stops only the backend, and the
+  backend closes the SSH sessions and then the worker properly;
+- Linux: if the backend is killed (`kill -9`, a crash, the IDE), the kernel immediately sends
+  the worker SIGTERM (`PR_SET_PDEATHSIG`);
+- macOS has no such mechanism. The worker PID is written to `worker.sock.pid` next to the
+  socket, and on the next start the backend stops a worker left over from last time: only if
+  that backend is no longer running and it is the same process (PID and start time match, so
+  a reused PID is not mistaken for the worker).
 
-### Доступ к API
+### API access
 
-Авторизации у API нет: он слушает только `127.0.0.1` и доверяет программам на этой
-машине. Браузер тоже программа на этой машине, поэтому запросы от веб-страниц
-ограничены. Без этого любая открытая страница могла бы через `fetch` и WebSocket
-читать сессии и выполнять команды на серверах.
+The API has no authentication: it listens on `127.0.0.1` only and trusts programs on this
+machine. A browser is also a program on this machine, so requests from web pages are
+restricted. Without that, any open page could read the sessions and run commands on the
+servers through `fetch` and WebSocket.
 
-- Запрос с заголовком `Origin` (его шлёт браузер) проходит, только если origin — сам
-  backend (`http://127.0.0.1:8000`, `http://localhost:8000`), dev-сервер UI
-  (`http://localhost:5173` и `http://127.0.0.1:5173`, `npm run dev` в `frontend/`) или
-  указан в `ALLOWED_ORIGINS`. Иначе 403 `forbidden_origin`, WebSocket получает отказ при
-  подключении. Dev-сервер UI разрешён без настройки: открыть порт 5173 на этой машине
-  может только программа на ней же, а ей API доступен и без браузера.
-  `UI_DEV_SERVER=false` это выключает (например, в собранном приложении).
-- Запросы без `Origin` (curl, PowerShell, настольное приложение, тесты) проходят.
-- Заголовок `Host` должен быть `127.0.0.1`, `localhost`, `[::1]` или из `ALLOWED_HOSTS`.
-  Иначе 403 `forbidden_host`: это защита от DNS rebinding.
-- `HOST=0.0.0.0` открывает API в сеть без авторизации. При старте backend пишет
-  об этом предупреждение.
+- A request with an `Origin` header (browsers send it) passes only if the origin is the
+  backend itself (`http://127.0.0.1:8000`, `http://localhost:8000`), the UI dev server
+  (`http://localhost:5173` and `http://127.0.0.1:5173`, `npm run dev` in `frontend/`) or is
+  listed in `ALLOWED_ORIGINS`. Otherwise 403 `forbidden_origin`, and a WebSocket is refused
+  on connect. The UI dev server is allowed without configuration: only a program on this
+  machine can open port 5173 here, and such a program can reach the API without a browser
+  anyway. `UI_DEV_SERVER=false` turns this off (for example, in the packaged app).
+- Requests without `Origin` (curl, PowerShell, the desktop app, tests) pass.
+- The `Host` header must be `127.0.0.1`, `localhost`, `[::1]` or from `ALLOWED_HOSTS`.
+  Otherwise 403 `forbidden_host`: this protects against DNS rebinding.
+- `HOST=0.0.0.0` exposes the API to the network without authentication. The backend logs a
+  warning about it on startup.
 
 ## API
 
-| Метод | Путь | Что делает |
+| Method | Path | What it does |
 |---|---|---|
-| GET | `/api/ssh/sessions` | Открытые SSH-сессии |
-| POST | `/api/ssh/sessions` | Открыть сессию: `{host, port, username, key_id \| key_path [+ passphrase] \| password}` → 201 |
-| GET | `/api/ssh/sessions/{id}` | Одна сессия: хост, `cwd`, занята ли, сколько вкладок смотрят |
-| DELETE | `/api/ssh/sessions/{id}` | Закрыть сессию |
-| POST | `/api/ssh/sessions/{id}/exec` | Выполнить команду: `{command, timeout?, track_cwd?}` |
-| GET | `/api/ssh/sessions/{id}/output` | Буфер вывода: `?since=N&limit=M` |
-| WS | `/api/ssh/sessions/{id}/ws` | Терминал сессии: `?since=N` (см. ниже) |
-| POST | `/api/ssh/connect` | То же, что `POST /sessions`, ответ короче |
-| POST | `/api/ssh/exec` | Команда: `{command, session_id?, timeout?, track_cwd?}`, без `session_id` в последней открытой сессии |
-| POST | `/api/ssh/disconnect` | Закрыть сессию: `{session_id?}` |
-| GET | `/api/ssh/status` | Состояние сессии: `?session_id=` или последняя открытая |
-| GET | `/api/ssh/known-hosts` | Доверенные ключи серверов: отпечатки по `host:port`, `source`: кто подтвердил (`user`, `openssh`) |
-| POST | `/api/ssh/known-hosts` | Доверять ключу сервера после подтверждения пользователем: `{host, port?, fingerprint, key_type?, replace?}` → 201 |
-| DELETE | `/api/ssh/known-hosts` | Забыть ключ сервера: `?host=&port=22` |
-| GET | `/api/keys` | Список ключей (без секретной части) |
-| POST | `/api/keys` | Импорт: `{name, private_key \| private_key_path, passphrase?, comment?}` → 201 |
-| POST | `/api/keys/generate` | Новый ключ: `{name, type: ed25519 \| rsa, bits?, comment?}` → 201 |
-| GET | `/api/keys/{id}` | Один ключ |
-| PATCH | `/api/keys/{id}` | Переименовать или сменить комментарий: `{name?, comment?}` |
-| DELETE | `/api/keys/{id}` | Удалить → 204 |
-| GET | `/api/connections` | Сохранённые подключения (без паролей) |
-| POST | `/api/connections` | Сохранить: `{name, host, port?, username, group?, auth, key_id \| key_path [+ passphrase] \| password?}` → 201 |
-| GET | `/api/connections/{id}` | Одно подключение |
-| PATCH | `/api/connections/{id}` | Изменить переданные поля (см. ниже) |
-| DELETE | `/api/connections/{id}` | Удалить → 204 |
-| POST | `/api/connections/{id}/connect` | Открыть SSH-сессию по подключению: `{password?, passphrase?}` → 201, описание сессии |
-| GET | `/api/docker/sessions/{id}/info` | Есть ли Docker на сервере сессии, версии |
-| GET | `/api/docker/sessions/{id}/containers` | Контейнеры: `?all=false` только запущенные |
-| POST | `/api/docker/sessions/{id}/containers/{c}/{action}` | `start`, `stop`, `restart`, `pause`, `unpause`, `kill` (`?timeout=N` для stop/restart) |
-| DELETE | `/api/docker/sessions/{id}/containers/{c}` | Удалить контейнер: `?force=true&volumes=true` |
-| GET | `/api/docker/sessions/{id}/containers/{c}/logs` | Логи: `?tail=200&since=<next_since>` |
-| WS | `/api/docker/sessions/{id}/containers/{c}/logs/ws` | Живой лог контейнера: `?tail=200&since=` (см. ниже) |
-| GET | `/api/docker/sessions/{id}/stats` | CPU, память, сеть и диск запущенных контейнеров |
-| GET | `/api/docker/sessions/{id}/images` | Образы на сервере |
-| GET | `/api/git/sessions/{id}/status` | Репозиторий на сервере: `?path=~/app`, ветка, отставание, изменения |
-| GET | `/api/git/sessions/{id}/log` | Коммиты: `?path=~/app&limit=20` |
-| POST | `/api/git/sessions/{id}/fetch` | `git fetch`: `{path}` → состояние со свежим `behind` |
-| POST | `/api/git/sessions/{id}/pull` | `git pull --ff-only`: `{path}` → пришедшие коммиты |
-| POST | `/api/git/sessions/{id}/deploy` | pull и команда в папке репозитория: `{path, command?, only_if_updated?, timeout?}` |
-| GET | `/api/sftp/sessions/{id}/info` | Файлы на сервере: домашняя папка, пользователь |
-| GET | `/api/sftp/sessions/{id}/list` | Содержимое папки: `?path=/var/log` (без `path` домашняя) |
-| GET | `/api/sftp/sessions/{id}/stat` | Сведения о файле или папке: `?path=` |
-| POST | `/api/sftp/sessions/{id}/mkdir` | Создать папку: `{path, parents?}` → 201 |
-| POST | `/api/sftp/sessions/{id}/move` | Переименовать или переместить: `{source, target, overwrite?}` |
-| POST | `/api/sftp/sessions/{id}/copy` | Скопировать: `{source, target, overwrite?}` → 201 |
-| DELETE | `/api/sftp/sessions/{id}/entry` | Удалить: `?path=&recursive=true` |
-| POST | `/api/sftp/sessions/{id}/upload` | Загрузить файл телом запроса: `?path=&name=&overwrite=false` → 201 |
-| GET | `/api/sftp/sessions/{id}/download` | Скачать файл телом ответа: `?path=` |
-| POST | `/api/sftp/sessions/{id}/transfers` | Передать файл по пути на этом компьютере, в фоне → 202 |
-| GET | `/api/sftp/transfers` | Передачи: `?session_id=&active=true` |
-| GET | `/api/sftp/transfers/{id}` | Состояние передачи |
-| DELETE | `/api/sftp/transfers/{id}` | Отменить передачу или убрать завершённую из списка |
-| GET | `/api/sftp/local/list` | Папка этого компьютера (вторая панель): `?path=` |
-| GET | `/api/monitor/metrics` | Метрики серверов сейчас (то же, что `metrics` в `/ws`) |
-| GET | `/api/health` | Состояние бэкенда и воркера, загруженные плагины |
-| GET | `/api/plugins` | Плагины: версия, описание, зависимости, `status` и причина сбоя (см. ниже) |
-| POST | `/api/plugins/{name}/enable` | Включить плагин без перезапуска (вместе с зависимостями); выбор запоминается |
-| POST | `/api/plugins/{name}/disable` | Выключить плагин без перезапуска: `?cascade=true` вместе с зависящими; выбор запоминается |
-| WS | `/ws` | Поток данных для UI: метрики серверов каждые 500 мс (см. ниже) |
+| GET | `/api/ssh/sessions` | Open SSH sessions |
+| POST | `/api/ssh/sessions` | Open a session: `{host, port, username, key_id \| key_path [+ passphrase] \| password}` → 201 |
+| GET | `/api/ssh/sessions/{id}` | One session: host, `cwd`, whether it is busy, how many tabs watch it |
+| DELETE | `/api/ssh/sessions/{id}` | Close the session |
+| POST | `/api/ssh/sessions/{id}/exec` | Run a command: `{command, timeout?, track_cwd?}` |
+| GET | `/api/ssh/sessions/{id}/output` | Output buffer: `?since=N&limit=M` |
+| WS | `/api/ssh/sessions/{id}/ws` | Session terminal: `?since=N` (see below) |
+| POST | `/api/ssh/connect` | Same as `POST /sessions`, shorter response |
+| POST | `/api/ssh/exec` | Command: `{command, session_id?, timeout?, track_cwd?}`, without `session_id` in the last opened session |
+| POST | `/api/ssh/disconnect` | Close a session: `{session_id?}` |
+| GET | `/api/ssh/status` | Session state: `?session_id=` or the last opened one |
+| GET | `/api/ssh/known-hosts` | Trusted server keys: fingerprints by `host:port`, `source`: who confirmed it (`user`, `openssh`) |
+| POST | `/api/ssh/known-hosts` | Trust a server key after the user confirmed it: `{host, port?, fingerprint, key_type?, replace?}` → 201 |
+| DELETE | `/api/ssh/known-hosts` | Forget a server key: `?host=&port=22` |
+| GET | `/api/keys` | Key list (without the secret part) |
+| POST | `/api/keys` | Import: `{name, private_key \| private_key_path, passphrase?, comment?}` → 201 |
+| POST | `/api/keys/generate` | New key: `{name, type: ed25519 \| rsa, bits?, comment?}` → 201 |
+| GET | `/api/keys/{id}` | One key |
+| PATCH | `/api/keys/{id}` | Rename or change the comment: `{name?, comment?}` |
+| DELETE | `/api/keys/{id}` | Delete → 204 |
+| GET | `/api/connections` | Saved connections (without passwords) |
+| POST | `/api/connections` | Save: `{name, host, port?, username, group?, auth, key_id \| key_path [+ passphrase] \| password?}` → 201 |
+| GET | `/api/connections/{id}` | One connection |
+| PATCH | `/api/connections/{id}` | Change the fields that are passed (see below) |
+| DELETE | `/api/connections/{id}` | Delete → 204 |
+| POST | `/api/connections/{id}/connect` | Open an SSH session from a connection: `{password?, passphrase?}` → 201, session description |
+| GET | `/api/docker/sessions/{id}/info` | Whether the session's server has Docker, versions |
+| GET | `/api/docker/sessions/{id}/containers` | Containers: `?all=false` running only |
+| POST | `/api/docker/sessions/{id}/containers/{c}/{action}` | `start`, `stop`, `restart`, `pause`, `unpause`, `kill` (`?timeout=N` for stop/restart) |
+| DELETE | `/api/docker/sessions/{id}/containers/{c}` | Remove a container: `?force=true&volumes=true` |
+| GET | `/api/docker/sessions/{id}/containers/{c}/logs` | Logs: `?tail=200&since=<next_since>` |
+| WS | `/api/docker/sessions/{id}/containers/{c}/logs/ws` | Live container log: `?tail=200&since=` (see below) |
+| GET | `/api/docker/sessions/{id}/stats` | CPU, memory, network and disk of running containers |
+| GET | `/api/docker/sessions/{id}/images` | Images on the server |
+| GET | `/api/git/sessions/{id}/status` | Repository on the server: `?path=~/app`, branch, how far behind, changes |
+| GET | `/api/git/sessions/{id}/log` | Commits: `?path=~/app&limit=20` |
+| POST | `/api/git/sessions/{id}/fetch` | `git fetch`: `{path}` → state with a fresh `behind` |
+| POST | `/api/git/sessions/{id}/pull` | `git pull --ff-only`: `{path}` → the incoming commits |
+| POST | `/api/git/sessions/{id}/deploy` | pull and a command in the repository folder: `{path, command?, only_if_updated?, timeout?}` |
+| GET | `/api/sftp/sessions/{id}/info` | Files on the server: home folder, user |
+| GET | `/api/sftp/sessions/{id}/list` | Folder contents: `?path=/var/log` (home folder without `path`) |
+| GET | `/api/sftp/sessions/{id}/stat` | About a file or folder: `?path=` |
+| POST | `/api/sftp/sessions/{id}/mkdir` | Create a folder: `{path, parents?}` → 201 |
+| POST | `/api/sftp/sessions/{id}/move` | Rename or move: `{source, target, overwrite?}` |
+| POST | `/api/sftp/sessions/{id}/copy` | Copy: `{source, target, overwrite?}` → 201 |
+| DELETE | `/api/sftp/sessions/{id}/entry` | Delete: `?path=&recursive=true` |
+| POST | `/api/sftp/sessions/{id}/upload` | Upload a file in the request body: `?path=&name=&overwrite=false` → 201 |
+| GET | `/api/sftp/sessions/{id}/download` | Download a file in the response body: `?path=` |
+| POST | `/api/sftp/sessions/{id}/transfers` | Transfer a file or folder by a path on this computer, in the background → 202 |
+| GET | `/api/sftp/transfers` | Transfers: `?session_id=&active=true` |
+| GET | `/api/sftp/transfers/{id}` | Transfer state |
+| DELETE | `/api/sftp/transfers/{id}` | Cancel a transfer or remove a finished one from the list |
+| GET | `/api/sftp/local/list` | A folder of this computer (second pane): `?path=` |
+| GET | `/api/monitor/metrics` | Server metrics right now (same as `metrics` in `/ws`) |
+| GET | `/api/health` | State of the backend and the worker, loaded plugins |
+| GET | `/api/plugins` | Plugins: version, description, dependencies, `status` and failure reason (see below) |
+| POST | `/api/plugins/{name}/enable` | Enable a plugin without a restart (with its dependencies); the choice is remembered |
+| POST | `/api/plugins/{name}/disable` | Disable a plugin without a restart: `?cascade=true` together with the plugins that depend on it; the choice is remembered |
+| WS | `/ws` | Data stream for the UI: server metrics every 500 ms (see below) |
 
-С `DEBUG=true` Swagger доступен на `/api/docs`.
+With `DEBUG=true` Swagger is available at `/api/docs`.
 
-### Пример: ключ из хранилища → подключение → команда → отключение
+### Example: key from the vault → connect → command → disconnect
 
 ```powershell
 $api = "http://127.0.0.1:8000/api"
@@ -181,52 +186,53 @@ Invoke-RestMethod "$api/ssh/sessions/$($s.session_id)/output"
 Invoke-RestMethod -Method Delete "$api/ssh/sessions/$($s.session_id)"
 ```
 
-### SSH-сессии
+### SSH sessions
 
-- Каждый `POST /api/ssh/sessions` (или `/api/ssh/connect`) открывает новую сессию и
-  возвращает `session_id`. Уже открытые сессии продолжают работать. У каждой сессии
-  своя `cwd`. Одновременно можно держать `SSH_MAX_SESSIONS` (20) сессий, дальше 429.
-- У каждой сессии своё IPC-подключение к воркеру: воркер выполняет запросы одного
-  подключения по очереди, а разных параллельно. Команды одной сессии идут по очереди,
-  разных сессий параллельно. Если воркер не принял отдельное подключение, сессии
-  работают через общее (`channel: "shared"` в описании сессии) и команды всех сессий
-  идут по одной.
-- Способ входа ровно один: `key_id` (ключ из хранилища), `key_path` (файл ключа на этой
-  машине; если ключ зашифрован, добавьте `passphrase`) или `password`. Пароль и фраза
-  никуда не сохраняются и не попадают в логи.
-- `exec`, `disconnect` и `status` без `session_id` работают с последней открытой
-  сессией. Так клиент, который знает только про одну сессию, работает как раньше.
-- Сессия живёт внутри воркера и привязана к своему IPC-подключению. Если воркер упал
-  или подключение оборвалось, сессия закрывается: вкладки получают `closed`, `exec`
-  вернёт 404/409, нужно подключиться заново.
-- Закрытие сессии (`DELETE`, `close` из WebSocket) прерывает и команду, которая в ней
-  ещё выполняется: её запрос вернёт 409 `ssh_not_connected`.
-- Всё, что происходит в сессии, пишется в её буфер вывода: `opened`, `command`
-  (команда и `cwd`, откуда пришла: `api` или `ws`), `result` (`stdout`, `stderr`,
-  `exit_code`, `cwd`, `timed_out`, `duration_ms`) и `error`. У записи номер `seq`, он
-  растёт на 1. Буфер ограничен `SSH_OUTPUT_BUFFER_BYTES` (1 МиБ на сессию): старое
-  вытесняется, у слишком большого вывода остаётся конец и `truncated: true`.
-- О каждом открытии и закрытии в шину событий уходит `ssh.session`
+- Every `POST /api/ssh/sessions` (or `/api/ssh/connect`) opens a new session and returns a
+  `session_id`. Sessions that are already open keep working. Each session has its own `cwd`.
+  Up to `SSH_MAX_SESSIONS` (20) sessions at a time, then 429.
+- Each session has its own IPC connection to the worker: the worker handles the requests of
+  one connection one by one and those of different connections in parallel. Commands of one
+  session run one by one, of different sessions in parallel. If the worker does not accept
+  a separate connection, sessions share one (`channel: "shared"` in the session description)
+  and the commands of all sessions run one at a time.
+- Exactly one login method: `key_id` (a key from the vault), `key_path` (a key file on this
+  machine; if the key is encrypted, add `passphrase`) or `password`. The password and the
+  passphrase are never saved and never reach the logs.
+- `exec`, `disconnect` and `status` without `session_id` work with the last opened session.
+  So a client that knows about a single session only works as before.
+- A session lives inside the worker and is tied to its IPC connection. If the worker crashes
+  or the connection drops, the session is closed: tabs get `closed`, `exec` returns
+  404/409, you need to connect again.
+- Closing a session (`DELETE`, `close` from the WebSocket) also aborts a command still running
+  in it: its request returns 409 `ssh_not_connected`.
+- Everything that happens in a session goes into its output buffer: `opened`, `command`
+  (the command and `cwd`, and where it came from: `api` or `ws`), `result` (`stdout`,
+  `stderr`, `exit_code`, `cwd`, `timed_out`, `duration_ms`) and `error`. Each record has a
+  number `seq` that grows by 1. The buffer is limited by `SSH_OUTPUT_BUFFER_BYTES` (1 MiB per
+  session): old records are evicted, and an output that is too large keeps its end and
+  `truncated: true`.
+- Every open and close sends `ssh.session` to the event bus
   (`{action: opened | closed, session_id, host, port, username, connection_id, reason?}`).
-- В описании сессии `host_key: {fingerprint, key_type}`: ключ сервера, с которым воркер
-  подключился (`null` у сборок воркера без проверки ключа). Как подтверждается ключ,
-  см. «Проверка ключа сервера».
-- Плагины (docker, git) выполняют в сессии свои служебные команды
-  (`ssh_manager.run_service`). Они не попадают в буфер вывода и терминал, не меняют
-  `cwd` сессии и выполняются из домашней папки, с лимитом на сервере и точным кодом
-  возврата. Если в сессии идёт команда пользователя, служебная ждёт её до
-  `SSH_SERVICE_WAIT` (10 с), потом 409 `ssh_session_busy`. Для долгих команд плагина
-  (деплой, логи) UI лучше открыть отдельную сессию к тому же серверу.
+- The session description has `host_key: {fingerprint, key_type}`: the server key the worker
+  connected with (`null` for worker builds without key verification). How a key is
+  confirmed: see "Server key verification".
+- Plugins (docker, git) run their own service commands in a session
+  (`ssh_manager.run_service`). They do not go into the output buffer or the terminal, do not
+  change the session `cwd`, run from the home folder, with a limit on the server and an exact
+  exit code. If a user command is running in the session, the service command waits for it
+  up to `SSH_SERVICE_WAIT` (10 s), then 409 `ssh_session_busy`. For long plugin commands
+  (deploys, logs) the UI should open a separate session to the same server.
 
-### Проверка ключа сервера (TOFU)
+### Server key verification (TOFU)
 
-Воркер (сборки с 2026-11-14) подключается только к серверу, ключ которого подтвердил
-пользователь: так подмена сервера («человек посередине») не проходит незаметно, а
-пароль не уходит на чужой сервер. Отпечатки хранит backend в `known_hosts.json` рядом с
-`keys.json` (`KNOWN_HOSTS_PATH`), по `host:port`.
+The worker (builds since 2026-11-14) connects only to a server whose key the user has
+confirmed: this way a substituted server (man in the middle) does not go unnoticed, and the
+password does not go to someone else's server. The backend keeps the fingerprints in
+`known_hosts.json` next to `keys.json` (`KNOWN_HOSTS_PATH`), by `host:port`.
 
-1. Первое подключение к серверу (`POST /api/ssh/sessions`, `/api/ssh/connect` или
-   `/api/connections/{id}/connect`) отвечает 409 `ssh_host_key_unknown`:
+1. The first connection to a server (`POST /api/ssh/sessions`, `/api/ssh/connect` or
+   `/api/connections/{id}/connect`) answers 409 `ssh_host_key_unknown`:
 
    ```json
    {"error": "ssh_host_key_unknown", "detail": "The key of 1.2.3.4:22 is not trusted yet: ...",
@@ -235,73 +241,72 @@ Invoke-RestMethod -Method Delete "$api/ssh/sessions/$($s.session_id)"
                  "key_type": "ssh-ed25519"}}
    ```
 
-2. UI показывает отпечаток и тип ключа и спрашивает пользователя. Сверить отпечаток можно
-   на сервере: `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`.
-3. Только после подтверждения UI сохраняет его: `POST /api/ssh/known-hosts` с `host`,
-   `port`, `fingerprint` и `key_type` из `host_key`, и повторяет подключение. Дальше
-   backend передаёт отпечаток воркеру при каждом подключении к этому `host:port`
-   (служебные сессии, например для передачи файлов, идут с ключом своей сессии).
-4. Если ключ сервера сменился, подключение отвечает 409 `ssh_host_key_mismatch`, в
-   `host_key` полученный `fingerprint` и сохранённый `expected_fingerprint`. Backend сам
-   подключение не повторяет и сохранённый отпечаток не меняет. UI предупреждает: это
-   может быть атака или переустановленный сервер. Заменить отпечаток можно только явным
-   действием пользователя: `POST /api/ssh/known-hosts` с новым `fingerprint` и
-   `replace: true` (без `replace` 409 `ssh_known_host_conflict`).
+2. The UI shows the fingerprint and the key type and asks the user. The fingerprint can be
+   checked on the server: `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`.
+3. Only after confirmation the UI saves it: `POST /api/ssh/known-hosts` with `host`, `port`,
+   `fingerprint` and `key_type` from `host_key`, and repeats the connection. From then on the
+   backend passes the fingerprint to the worker on every connection to this `host:port`
+   (service sessions, for example for file transfers, use the key of their session).
+4. If the server key has changed, connecting answers 409 `ssh_host_key_mismatch`, with the
+   received `fingerprint` and the saved `expected_fingerprint` in `host_key`. The backend
+   does not retry the connection and does not change the saved fingerprint. The UI warns:
+   this may be an attack or a reinstalled server. The fingerprint can be replaced only by an
+   explicit user action: `POST /api/ssh/known-hosts` with the new `fingerprint` and
+   `replace: true` (without `replace`: 409 `ssh_known_host_conflict`).
 
-`DELETE /api/ssh/known-hosts?host=&port=` забывает ключ: следующее подключение снова
-спросит подтверждение. Сборки воркера без проверки ключа (до 2026-11-14) подключаются
-как раньше, отпечаток им передаётся, но не проверяется.
+`DELETE /api/ssh/known-hosts?host=&port=` forgets a key: the next connection asks for
+confirmation again. Worker builds without key verification (before 2026-11-14) connect as
+before; the fingerprint is passed to them but not checked.
 
-Серверы, к которым уже подключались через `ssh`, подтверждать второй раз не нужно: их
-ключи записаны в `known_hosts` OpenSSH на этом компьютере. Когда сервера в
-`known_hosts.json` ещё нет, backend ищет ключ, который показал сервер, в этих файлах
-(`~/.ssh/known_hosts`, `~/.ssh/known_hosts2` и общий для компьютера
-`/etc/ssh/ssh_known_hosts`, на Windows `%PROGRAMDATA%\ssh\ssh_known_hosts`):
+Servers you have already connected to with `ssh` need no second confirmation: their keys are
+in the OpenSSH `known_hosts` on this computer. When a server is not in `known_hosts.json`
+yet, the backend looks for the key the server showed in these files (`~/.ssh/known_hosts`,
+`~/.ssh/known_hosts2` and the machine-wide `/etc/ssh/ssh_known_hosts`, on Windows
+`%PROGRAMDATA%\ssh\ssh_known_hosts`):
 
-- ключ записан там для этого сервера: backend сохраняет отпечаток у себя (`source:
-  "openssh"` в `GET /api/ssh/known-hosts`) и подключается, ответ обычный 201. Для сервера
-  на нестандартном порту, как и у `ssh`, годится запись `[host]:port` или запись того
-  же сервера без порта с тем же ключом;
-- для сервера там записан другой ключ того же типа (`ssh` в этом случае пишет REMOTE
-  HOST IDENTIFICATION HAS CHANGED): 409 `ssh_host_key_mismatch`, в `host_key` ещё
-  `source: "openssh"`, а `expected_fingerprint` это отпечаток из файла. Подключения нет;
-  пользователь может подтвердить новый ключ, как в пункте 4;
-- ключ помечен там как отозванный (`@revoked`): 409 `ssh_host_key_revoked`,
-  подключения нет;
-- сервера там нет или записаны ключи только других типов: обычное подтверждение
-  (пункт 1).
+- the key is recorded there for this server: the backend saves the fingerprint (`source:
+  "openssh"` in `GET /api/ssh/known-hosts`) and connects, the answer is a normal 201. For a
+  server on a non-standard port, as with `ssh`, an `[host]:port` entry works, or an entry of
+  the same server without a port with the same key;
+- a different key of the same type is recorded there for the server (`ssh` prints REMOTE
+  HOST IDENTIFICATION HAS CHANGED in this case): 409 `ssh_host_key_mismatch`, `host_key` also
+  has `source: "openssh"`, and `expected_fingerprint` is the fingerprint from the file. No
+  connection; the user can confirm the new key as in step 4;
+- the key is marked there as revoked (`@revoked`): 409 `ssh_host_key_revoked`, no connection;
+- the server is not there, or only keys of other types are recorded: the normal confirmation
+  (step 1).
 
-Понимаются хешированные имена (`HashKnownHosts`, по умолчанию в Debian и Ubuntu),
-шаблоны `*` и `?` и отрицание `!`; строки `@cert-authority` не учитываются. Файлы
-OpenSSH backend только читает. Запись в `known_hosts.json` важнее: если отпечаток
-сервера там есть, файлы OpenSSH не спрашиваются. `OPENSSH_KNOWN_HOSTS=false` выключает
-поиск, `OPENSSH_KNOWN_HOSTS_FILES` задаёт свои файлы через запятую.
+Hashed names (`HashKnownHosts`, the default in Debian and Ubuntu), the `*` and `?` patterns and
+`!` negation are understood; `@cert-authority` lines are ignored. The backend only reads the
+OpenSSH files. An entry in `known_hosts.json` wins: if the server fingerprint is there, the
+OpenSSH files are not consulted. `OPENSSH_KNOWN_HOSTS=false` turns the lookup off,
+`OPENSSH_KNOWN_HOSTS_FILES` sets your own files, comma-separated.
 
-### WebSocket терминала
+### Terminal WebSocket
 
-`ws://127.0.0.1:8000/api/ssh/sessions/{id}/ws?since=N`. Одно подключение смотрит одну
-сессию, одну сессию могут смотреть несколько вкладок. Конверт тот же, что у `/ws`:
+`ws://127.0.0.1:8000/api/ssh/sessions/{id}/ws?since=N`. One connection watches one session;
+one session can be watched by several tabs. The envelope is the same as in `/ws`:
 `{"type", "ts", "data"}`.
 
-| type | Кто и когда шлёт | data |
+| type | Who sends it and when | data |
 |---|---|---|
-| `hello` | сервер, сразу после подключения | `{protocol, session, replay: {since, count, gap, first_seq, last_seq}}` |
-| `output` | сервер: сначала записи буфера после `since`, потом новые | запись буфера `{seq, ts, kind, ...}` |
-| `closed` | сервер, когда сессию закрыли; затем закрывает подключение | `{reason}`: `closed`, `worker_connection_lost`, `lost_in_worker`, `exec_timeout`, `shutdown` |
-| `error` | сервер, если сообщение не разобрано или команда не запустилась | `{error, detail, request_id?}` |
-| `pong` | сервер, в ответ на `ping` | `data` из `ping` |
-| `exec` | UI | `{command, timeout?, track_cwd?, id?}`: `id` вернётся в записях как `request_id` |
-| `close` | UI | закрыть сессию для всех вкладок |
-| `ping` | UI | что угодно |
+| `hello` | server, right after connecting | `{protocol, session, replay: {since, count, gap, first_seq, last_seq}}` |
+| `output` | server: first the buffer records after `since`, then new ones | a buffer record `{seq, ts, kind, ...}` |
+| `closed` | server, when the session was closed; then it closes the connection | `{reason}`: `closed`, `worker_connection_lost`, `lost_in_worker`, `exec_timeout`, `shutdown` |
+| `error` | server, if a message could not be parsed or a command did not start | `{error, detail, request_id?}` |
+| `pong` | server, in reply to `ping` | `data` from `ping` |
+| `exec` | UI | `{command, timeout?, track_cwd?, id?}`: `id` comes back in the records as `request_id` |
+| `close` | UI | close the session for all tabs |
+| `ping` | UI | anything |
 
-- Команду из одной вкладки и её результат видят все вкладки этой сессии, команды через
-  REST тоже.
-- Закрытие вкладки не закрывает сессию: команда продолжает выполняться, результат ждёт
-  в буфере. При переподключении передайте `since` = последний полученный `seq` и
-  получите только пропущенное; `gap: true` значит, что часть уже вытеснена.
-- Вывод терминала не выбрасывается молча. Если UI не успевает читать, подключение
-  закрывается кодом 1013: переподключитесь с `since`. Другие коды закрытия: 1000
-  (сессию закрыли), 1001 (backend остановлен), 4404 (сессии нет).
+- A command from one tab and its result are seen by all tabs of the session, and so are
+  commands sent through REST.
+- Closing a tab does not close the session: the command keeps running, the result waits in
+  the buffer. When reconnecting, pass `since` = the last received `seq` and get only what was
+  missed; `gap: true` means part of it has already been evicted.
+- Terminal output is never dropped silently. If the UI cannot keep up, the connection is
+  closed with code 1013: reconnect with `since`. Other close codes: 1000 (the session was
+  closed), 1001 (the backend stopped), 4404 (no such session).
 
 ```js
 const ws = new WebSocket(`ws://127.0.0.1:8000/api/ssh/sessions/${id}/ws`);
@@ -311,58 +316,62 @@ ws.onopen = () => ws.send(JSON.stringify({type: "exec", data: {command: "uptime"
 
 ### /api/ssh/exec
 
-Ответ: `{session_id, seq, stdout, stderr, exit_code, cwd, timed_out, duration_ms}`
-(`seq`: номер записи с результатом в буфере вывода). То же для `/sessions/{id}/exec`.
+Response: `{session_id, seq, stdout, stderr, exit_code, cwd, timed_out, duration_ms}`
+(`seq`: the number of the result record in the output buffer). The same for
+`/sessions/{id}/exec`.
 
-- `timeout`: лимит выполнения в секундах (по умолчанию `SSH_EXEC_TIMEOUT=30`, максимум 3600).
-  Применяется **на сервере** через coreutils `timeout`. Команда и все её дочерние процессы
-  получают TERM, через 3 секунды KILL; после прерывания обёртка добивает KILL всю группу
-  процессов команды, чтобы процесс, игнорирующий TERM, не держал канал (так ведёт себя
-  и GNU `timeout`, и `timeout` из uutils в Ubuntu 26.04). Ответ приходит с кодом 200, `timed_out: true`,
-  `exit_code` 124 (TERM) или 137 (KILL) и выводом, который успел накопиться. Это важно:
-  воркер выполняет запросы по одному, и `tail -f` без лимита занял бы его навсегда.
-- Команды одной сессии выполняются по одной. Следующая ждёт окончания предыдущей,
-  и её таймаут начинает идти, только когда она реально отправлена воркеру.
-- `cwd` сохраняется между командами: после `cd /var/log` следующая команда стартует там.
-  Если директорию удалили, команда не выполняется (`exit_code` 1, `cwd` = домашняя папка).
-- `track_cwd: false` отправляет команду воркеру как есть: без cwd, без таймаута на
-  сервере и с `exit_code` от воркера (настоящий код с воркера 2026-11-14, у старых
-  сборок всегда 0). Нужно для не-POSIX оболочек вроде fish.
-- Переводы строк приводятся к `\n`: `\r\n` из Windows-текста и одиночный `\r` (Enter в
-  терминале) на сервере стали бы частью команды (`cd /tmp\r` → "can't cd to /tmp").
-- Ввод команды (stdin) — `/dev/null`: передать его через API нельзя, поэтому `cat`,
-  `read`, `sudo` с паролем или вопрос `apt install` [Y/n] сразу получают конец ввода и
-  завершаются, а не ждут до таймаута. Для `sudo` нужен NOPASSWD, для apt — `-y`.
-- 504 `ssh_exec_timeout` означает, что воркер не вернул результат даже через
-  `timeout + 3 + SSH_EXEC_TIMEOUT_GRACE` секунд. Например, на сервере нет coreutils
-  `timeout` (macOS, старый busybox) или команда без `track_cwd`. Воркер выполняет
-  запросы сессии по очереди и отменять команду не умеет, поэтому все следующие команды
-  встали бы за зависшей: сессия закрывается (`ssh.session` с `reason: exec_timeout`,
-  терминал получает `closed`), UI открывает новую.
+- `timeout`: execution limit in seconds (default `SSH_EXEC_TIMEOUT=30`, at most 3600). It is
+  applied **on the server** with coreutils `timeout`. The command and all its children get
+  TERM, and KILL 3 seconds later; after the abort the wrapper also KILLs the whole process
+  group of the command, so that a process ignoring TERM does not hold the channel (this is
+  how both GNU `timeout` and the uutils `timeout` in Ubuntu 26.04 behave). The response comes
+  with code 200, `timed_out: true`, `exit_code` 124 (TERM) or 137 (KILL) and whatever output
+  had accumulated. This matters: the worker handles requests one by one, and `tail -f`
+  without a limit would occupy it forever.
+- Commands of one session run one at a time. The next one waits for the previous one to
+  finish, and its timeout starts only when it is actually sent to the worker.
+- `cwd` is kept between commands: after `cd /var/log` the next command starts there. If the
+  directory was deleted, the command is not run (`exit_code` 1, `cwd` = the home folder).
+- `track_cwd: false` sends the command to the worker as is: no cwd, no timeout on the server,
+  and the `exit_code` comes from the worker (a real code since the 2026-11-14 worker, always 0
+  in older builds). Needed for non-POSIX shells such as fish.
+- Line breaks are normalized to `\n`: `\r\n` from Windows text and a lone `\r` (Enter in a
+  terminal) would become part of the command on the server (`cd /tmp\r` → "can't cd to
+  /tmp").
+- The command input (stdin) is `/dev/null`: it cannot be passed through the API, so `cat`,
+  `read`, `sudo` with a password or an `apt install` [Y/n] prompt get end-of-input at once and
+  exit instead of waiting until the timeout. `sudo` needs NOPASSWD, apt needs `-y`.
+- 504 `ssh_exec_timeout` means the worker did not return a result even after
+  `timeout + 3 + SSH_EXEC_TIMEOUT_GRACE` seconds. For example, the server has no coreutils
+  `timeout` (macOS, old busybox), or the command was sent without `track_cwd`. The worker
+  handles the requests of a session one by one and cannot cancel a command, so all following
+  commands would be stuck behind the hung one: the session is closed (`ssh.session` with
+  `reason: exec_timeout`, the terminal gets `closed`), and the UI opens a new one.
 
-### Хранилище ключей
+### Key vault
 
-- Файл: `%LOCALAPPDATA%\Synex\keys.json` (macOS `~/Library/Application Support/Synex`,
-  Linux `~/.local/share/synex`), путь меняется через `KEYSTORE_PATH`.
-- Приватные ключи зашифрованы Fernet (AES-128-CBC + HMAC-SHA256). В открытом виде лежат
-  только имя, тип, отпечаток и публичный ключ. Запись атомарная; на Linux/macOS права
-  файла 0600.
-- Мастер-ключ Fernet создаётся при первом сохранении ключа и хранится в Windows
-  Credential Manager (`synex` / `keystore-master-key`), а не рядом с файлом. Копия
-  `keys.json` без учётной записи пользователя бесполезна. Если удалить запись из
-  Credential Manager, сохранённые ключи будет не расшифровать: API вернёт
-  `keystore_corrupted`, новый мастер-ключ молча не создастся. Там, где системного
-  хранилища нет (CI, headless Linux), мастер-ключ задаётся в `KEYSTORE_MASTER_KEY`.
-- Поддерживаются Ed25519, RSA от 2048 бит и ECDSA (P-256/384/521) в форматах OpenSSH и
-  PEM. Ключ с парольной фразой расшифровывается при импорте (фраза не сохраняется):
-  в хранилище ключ уже защищён Fernet, и при подключении по `key_id` фраза не нужна.
-- Приватный ключ API не отдаёт никогда. Для `ssh_connect` воркеру нужен путь к файлу,
-  поэтому при `key_id` ключ на время подключения расшифровывается во временный файл
-  (`runtime/` рядом с `keys.json`, права 0600) и сразу удаляется.
+- File: `%LOCALAPPDATA%\Synex\keys.json` (macOS `~/Library/Application Support/Synex`, Linux
+  `~/.local/share/synex`); the path is set with `KEYSTORE_PATH`.
+- Private keys are encrypted with Fernet (AES-128-CBC + HMAC-SHA256). Only the name, type,
+  fingerprint and public key are stored in the clear. Writes are atomic; on Linux/macOS the
+  file mode is 0600.
+- The Fernet master key is created when the first key is saved and is stored in the Windows
+  Credential Manager (`synex` / `keystore-master-key`), not next to the file. A copy of
+  `keys.json` is useless without the user account. If the Credential Manager entry is
+  deleted, the saved keys can no longer be decrypted: the API returns `keystore_corrupted`,
+  and no new master key is created silently. Where there is no system store (CI, headless
+  Linux), the master key is set in `KEYSTORE_MASTER_KEY`.
+- Ed25519, RSA from 2048 bits and ECDSA (P-256/384/521) in OpenSSH and PEM formats are
+  supported. A key with a passphrase is decrypted on import (the passphrase is not saved):
+  in the vault the key is already protected by Fernet, and connecting by `key_id` needs no
+  passphrase.
+- The API never returns a private key. `ssh_connect` needs a file path for the worker, so with
+  `key_id` the key is decrypted into a temporary file for the time of the connection
+  (`runtime/` next to `keys.json`, mode 0600) and deleted right away.
 
-### Сохранённые подключения (плагин `connections`)
+### Saved connections (plugin `connections`)
 
-Список серверов для UI: имя, адрес, пользователь, папка (`group`) и способ входа.
+The server list for the UI: name, address, user, folder (`group`) and login method.
 
 ```json
 POST /api/connections
@@ -370,34 +379,34 @@ POST /api/connections
  "auth": "key_id", "key_id": "3f2a..."}
 ```
 
-- `auth`: `key_id` (ключ из хранилища), `key_path` (файл ключа на этой машине,
-  + `passphrase`, если он зашифрован) или `password`. Пароль можно не передавать:
-  тогда его спрашивают при каждом подключении.
-- Файл: `connections.json` рядом с `keys.json` (`CONNECTIONS_PATH`). Пароли и фразы в
-  нём зашифрованы тем же мастер-ключом, что и ключи; API их никогда не отдаёт, только
-  `has_password` и `has_passphrase`.
-- `PATCH` меняет только переданные поля. Новый способ входа передаётся целиком (`auth`
-  и его поля); без `auth` можно сменить ключ, пароль или фразу текущего способа, а
-  `"password": null` забывает сохранённый пароль.
-- Имена уникальны без учёта регистра (409 `connection_exists`). Несогласованный способ
-  входа (например, `auth: key_id` без `key_id` или с паролем) это 422
+- `auth`: `key_id` (a key from the vault), `key_path` (a key file on this machine,
+  + `passphrase` if it is encrypted) or `password`. The password may be omitted: then it is
+  asked on every connection.
+- File: `connections.json` next to `keys.json` (`CONNECTIONS_PATH`). Passwords and
+  passphrases in it are encrypted with the same master key as the keys; the API never
+  returns them, only `has_password` and `has_passphrase`.
+- `PATCH` changes only the fields that are passed. A new login method is passed in full
+  (`auth` and its fields); without `auth` you can change the key, password or passphrase of
+  the current method, and `"password": null` forgets the saved password.
+- Names are unique case-insensitively (409 `connection_exists`). An inconsistent login method
+  (for example, `auth: key_id` without `key_id` or with a password) is 422
   `invalid_connection`.
-- `POST /api/connections/{id}/connect` открывает новую SSH-сессию, как
-  `POST /api/ssh/sessions`, и отвечает её описанием. Несохранённый пароль или фразу
-  передайте в теле (`{"password": "..."}`), иначе 422 `connection_secret_required`.
-  У сессии (и в событии `ssh.session`) есть `connection_id`: UI видит, какие сессии
-  открыты из какого подключения. Время подключения сохраняется в `last_connected_at`.
+- `POST /api/connections/{id}/connect` opens a new SSH session like `POST /api/ssh/sessions`
+  and answers with its description. Pass a password or passphrase that is not saved in the
+  body (`{"password": "..."}`), otherwise 422 `connection_secret_required`. The session (and
+  the `ssh.session` event) has `connection_id`: the UI sees which sessions were opened from
+  which connection. The connection time is saved in `last_connected_at`.
 
-### Docker на серверах (плагин `docker`)
+### Docker on servers (plugin `docker`)
 
-Плагин выполняет на сервере обычный `docker` через открытую SSH-сессию: это служебные
-команды сессии, в её терминал они не попадают. Все пути начинаются с
-`/api/docker/sessions/{session_id}/`. Нужен Docker 20.10 или новее.
+The plugin runs the regular `docker` on the server through an open SSH session: these are
+service commands of the session and do not show up in its terminal. All paths start with
+`/api/docker/sessions/{session_id}/`. Docker 20.10 or newer is required.
 
-- `GET .../info` отвечает всегда 200: `status` `ok`, `not_installed` (нет docker),
-  `permission_denied` (пользователь SSH не в группе docker) или `daemon_unavailable`
-  (демон не запущен), текст ошибки в `detail`, версии клиента и сервера.
-- `GET .../containers` (`?all=false`: только запущенные) отдаёт контейнеры:
+- `GET .../info` always answers 200: `status` `ok`, `not_installed` (no docker),
+  `permission_denied` (the SSH user is not in the docker group) or `daemon_unavailable` (the
+  daemon is not running), the error text in `detail`, client and server versions.
+- `GET .../containers` (`?all=false`: running only) returns the containers:
 
 ```json
 {"id": "6de6...", "name": "web", "names": ["web"], "image": "nginx:1.27",
@@ -409,92 +418,93 @@ POST /api/connections
  "compose_service": "web"}
 ```
 
-- `POST .../containers/{имя или ID}/{action}`: `start`, `stop`, `restart`, `pause`,
-  `unpause`, `kill`; для `stop` и `restart` можно `?timeout=N` (секунд до KILL).
-  `DELETE .../containers/{имя или ID}` удаляет (`?force=true` и запущенный,
-  `?volumes=true` вместе с анонимными томами). Ответ `{container, action, output}`.
-  Действие, которое не подходит к состоянию (пауза остановленного, удаление
-  запущенного без `force`), это 409 `docker_container_conflict`.
-- `GET .../containers/{имя или ID}/logs?tail=200` отдаёт последние строки stdout и
-  stderr контейнера по времени: `{container, lines: [{time, stream, text}],
-  next_since}`. `since` принимает `next_since` прошлого ответа (уже показанные строки
-  не повторяются), RFC3339, Unix-время или длительность (`10m`, `1h`).
-- Живой лог: WebSocket `.../containers/{имя или ID}/logs/ws?tail=200`. Сервер шлёт
-  `hello`, затем `logs` `{lines: [{time, stream, text}], next_since, truncated}`: сразу
-  последние `tail` строк, потом новые по мере появления. После переподключения UI
-  передаёт `?since=<последний next_since>` и не получает строки повторно. Сообщения в
-  том же конверте `{type, ts, data}`, что у `/ws`:
+- `POST .../containers/{name or ID}/{action}`: `start`, `stop`, `restart`, `pause`,
+  `unpause`, `kill`; `stop` and `restart` accept `?timeout=N` (seconds before KILL).
+  `DELETE .../containers/{name or ID}` removes it (`?force=true` even if running,
+  `?volumes=true` together with anonymous volumes). Response `{container, action, output}`.
+  An action that does not fit the state (pausing a stopped container, removing a running one
+  without `force`) is 409 `docker_container_conflict`.
+- `GET .../containers/{name or ID}/logs?tail=200` returns the last lines of the container's
+  stdout and stderr by time: `{container, lines: [{time, stream, text}], next_since}`.
+  `since` takes the `next_since` of the previous response (lines already shown are not
+  repeated), RFC3339, Unix time or a duration (`10m`, `1h`).
+- Live log: WebSocket `.../containers/{name or ID}/logs/ws?tail=200`. The server sends `hello`,
+  then `logs` `{lines: [{time, stream, text}], next_since, truncated}`: first the last `tail`
+  lines, then new ones as they appear. After a reconnect the UI passes
+  `?since=<last next_since>` and does not get lines twice. Messages use the same envelope
+  `{type, ts, data}` as `/ws`:
 
   | type | data |
   |---|---|
   | `hello` | `{protocol, session_id, container, tail, interval_ms}` |
-  | `logs` | `{lines, next_since, truncated}`; `truncated: true`, если строк между опросами было больше 10 000 и старые пропущены |
-  | `error` | `{error, detail, fatal}`. `fatal: false`: временная помеха (сессия занята командой пользователя, демон не отвечает), поток продолжится сам. `fatal: true`: контейнера или Docker нет, подключение закрывается (код 4404 или 4403) |
-  | `closed` | `{reason}`: `session_closed` (SSH-сессию закрыли, код 1000) или `shutdown` (плагин или backend останавливается, код 1001) |
-  | `pong` | `data` из `ping` UI |
+  | `logs` | `{lines, next_since, truncated}`; `truncated: true` if there were more than 10,000 lines between polls and older ones were skipped |
+  | `error` | `{error, detail, fatal}`. `fatal: false`: a temporary hiccup (the session is busy with a user command, the daemon does not answer), the stream resumes by itself. `fatal: true`: no such container or no Docker, the connection is closed (code 4404 or 4403) |
+  | `closed` | `{reason}`: `session_closed` (the SSH session was closed, code 1000) or `shutdown` (the plugin or the backend is stopping, code 1001) |
+  | `pong` | `data` from the UI's `ping` |
 
-  Docker в Rust-ядре ещё нет, а воркер отдаёт вывод команды только целиком, поэтому
-  поток собирается опросом `docker logs --since` раз в `DOCKER_LOGS_INTERVAL` (1 с).
-  Когда логи будет отдавать ядро, протокол для UI не изменится.
-- `GET .../stats`: один замер `docker stats` запущенных контейнеров (пара секунд):
-  `cpu_percent` (100 = одно ядро), `memory_used`, `memory_limit`, `memory_percent`,
-  `net_rx`, `net_tx`, `block_read`, `block_write` (байты), `pids`.
-- `GET .../images`: образы (`repository` и `tag` = `null` у образов без имени,
-  `size` в байтах).
-- Если пользователь SSH не в группе docker, можно задать `DOCKER_COMMAND=sudo -n docker`
-  (нужен sudo без пароля). Лимит одной команды `DOCKER_TIMEOUT` (60 с).
-- Ошибки: 404 `docker_not_installed`, 403 `docker_permission_denied`, 503
+  The Rust core has no Docker support yet, and the worker returns command output only as a
+  whole, so the stream is built by polling `docker logs --since` every
+  `DOCKER_LOGS_INTERVAL` (1 s). When the core starts serving logs, the protocol for the UI
+  will not change.
+- `GET .../stats`: one `docker stats` sample of the running containers (a couple of seconds):
+  `cpu_percent` (100 = one core), `memory_used`, `memory_limit`, `memory_percent`, `net_rx`,
+  `net_tx`, `block_read`, `block_write` (bytes), `pids`.
+- `GET .../images`: images (`repository` and `tag` = `null` for untagged images, `size` in
+  bytes).
+- If the SSH user is not in the docker group, set `DOCKER_COMMAND=sudo -n docker` (needs
+  passwordless sudo). The limit for one command is `DOCKER_TIMEOUT` (60 s).
+- Errors: 404 `docker_not_installed`, 403 `docker_permission_denied`, 503
   `docker_daemon_unavailable`, 404 `docker_container_not_found`, 409
-  `docker_container_conflict`, 504 `docker_timeout`,
-  502 `docker_command_failed` (текст docker в `detail`). Сессия, занятая командой
-  пользователя, даёт 409 `ssh_session_busy`: для панели Docker UI лучше открыть
-  отдельную сессию.
+  `docker_container_conflict`, 504 `docker_timeout`, 502 `docker_command_failed` (the docker
+  text in `detail`). A session busy with a user command gives 409 `ssh_session_busy`: the UI
+  should open a separate session for the Docker panel.
 
-### Git на серверах (плагин `git`)
+### Git on servers (plugin `git`)
 
-Репозиторий на сервере (например, папка проекта, который потом деплоится): плагин
-выполняет `git` через SSH-сессию служебными командами. Все пути начинаются с
-`/api/git/sessions/{session_id}/`, папка репозитория передаётся в `path`: абсолютный
-путь, `~/app` или путь от домашней папки.
+A repository on the server (for example, the folder of a project that gets deployed): the
+plugin runs `git` through an SSH session with service commands. All paths start with
+`/api/git/sessions/{session_id}/`; the repository folder is passed in `path`: an absolute
+path, `~/app` or a path relative to the home folder.
 
-- `GET .../status?path=~/app`: `head`, `branch` (`null` и `detached: true` при detached
-  HEAD), `upstream`, `ahead` и `behind` (по последнему fetch), `clean`, `changes`
-  (`[{path, kind: changed|renamed|conflict|untracked, index, worktree, orig_path}]`) и
+- `GET .../status?path=~/app`: `head`, `branch` (`null` and `detached: true` for a detached
+  HEAD), `upstream`, `ahead` and `behind` (as of the last fetch), `clean`, `changes`
+  (`[{path, kind: changed|renamed|conflict|untracked, index, worktree, orig_path}]`) and
   `last_commit`.
-- `GET .../log?path=~/app&limit=20`: коммиты текущей ветки, новые первыми
+- `GET .../log?path=~/app&limit=20`: commits of the current branch, newest first
   (`{hash, short_hash, author_name, author_email, date, subject}`).
-- `POST .../fetch` `{"path": "~/app"}`: `git fetch --prune`, ответ как у `status` со
-  свежими `ahead` и `behind` (сколько коммитов придёт с pull).
-- `POST .../pull` `{"path": "~/app"}`: `git pull --ff-only`, только перемотка вперёд,
-  без merge-коммитов. Ответ `{path, before, after, updated, commits, output}`:
-  `commits` это пришедшие коммиты (новые первыми). Если обновиться нельзя, файлы не
-  меняются, а ответ 409 с причиной: `git_local_changes` (на сервере правки, которые
-  pull перезапишет), `git_not_fast_forward` (на сервере свои коммиты),
-  `git_no_upstream`, `git_detached_head`. Недоступный remote (сеть, ключ, логин):
-  502 `git_remote_unavailable`.
+- `POST .../fetch` `{"path": "~/app"}`: `git fetch --prune`, the response is like `status`
+  with fresh `ahead` and `behind` (how many commits a pull will bring).
+- `POST .../pull` `{"path": "~/app"}`: `git pull --ff-only`, fast-forward only, no merge
+  commits. Response `{path, before, after, updated, commits, output}`: `commits` are the
+  incoming commits (newest first). If the update is not possible, the files do not change,
+  and the answer is 409 with the reason: `git_local_changes` (changes on the server that pull
+  would overwrite), `git_not_fast_forward` (the server has its own commits),
+  `git_no_upstream`, `git_detached_head`. An unreachable remote (network, key, login): 502
+  `git_remote_unavailable`.
 - `POST .../deploy` `{"path": "~/app", "command": "docker compose up -d --build",
-  "only_if_updated": false, "timeout": 600}`: pull (ошибки как у `/pull`, тогда команда
-  не выполняется), затем `command` в папке репозитория с лимитом `timeout` секунд.
-  Ответ 200 `{path, ok, pull, command: {command, exit_code, stdout, stderr, timed_out,
-  duration_ms}}`, `ok: false`, если команда упала или не уложилась в лимит. С
-  `only_if_updated: true` команда выполняется, только если pull принёс коммиты. Деплой
-  занимает сессию до конца команды: для него UI лучше открыть отдельную сессию.
-- Сообщения git на английском (`LC_ALL=C`), вопросы логина и пароля отключены
-  (`GIT_TERMINAL_PROMPT=0`): приватный remote должен открываться ключом сервера.
-- Ошибки: 404 `git_not_installed`, `git_path_not_found`, `git_not_a_repository`, 504
-  `git_timeout` (`GIT_TIMEOUT`, 120 с), 502 `git_command_failed` (текст git в `detail`).
+  "only_if_updated": false, "timeout": 600}`: pull (errors as for `/pull`, then the command
+  is not run), then `command` in the repository folder with a limit of `timeout` seconds.
+  Response 200 `{path, ok, pull, command: {command, exit_code, stdout, stderr, timed_out,
+  duration_ms}}`, `ok: false` if the command failed or did not fit into the limit. With
+  `only_if_updated: true` the command runs only if pull brought commits. A deploy occupies
+  the session until the command ends: the UI should open a separate session for it.
+- Git messages are in English (`LC_ALL=C`), login and password prompts are off
+  (`GIT_TERMINAL_PROMPT=0`): a private remote must open with the server's key.
+- Errors: 404 `git_not_installed`, `git_path_not_found`, `git_not_a_repository`, 504
+  `git_timeout` (`GIT_TIMEOUT`, 120 s), 502 `git_command_failed` (the git text in `detail`).
 
-### Файлы на серверах (плагин `sftp`)
+### Files on servers (plugin `sftp`)
 
-Файловый менеджер: файлы и папки сервера, файлы этого компьютера (вторая панель) и
-передача между ними с прогрессом. Работает через SFTP Rust-воркера (действия `sftp_*`;
-сборки 2026-11-12 и 2026-11-14). Пути сервера начинаются с `/api/sftp/sessions/{session_id}/`.
+A file manager: files and folders on the server, files on this computer (the second pane)
+and transfers between them with progress. It works through the SFTP of the Rust worker
+(`sftp_*` actions; builds 2026-11-12 and 2026-11-14). Server paths start with
+`/api/sftp/sessions/{session_id}/`.
 
-- Путь на сервере: абсолютный (`/var/log`), от домашней папки (`docs/a.txt`) или
-  `~/docs`. В ответах пути всегда абсолютные, их и передавайте дальше.
-- `GET .../info`: `{engine: "core", home, user, checksum}`; `checksum`: можно ли сверить
-  SHA-256 на сервере (`null`, пока не проверяли).
-- `GET .../list?path=/var/log` (без `path` домашняя папка):
+- A path on the server: absolute (`/var/log`), relative to the home folder (`docs/a.txt`) or
+  `~/docs`. Paths in responses are always absolute; pass them on as they are.
+- `GET .../info`: `{engine: "core", home, user, checksum}`; `checksum`: whether SHA-256 can be
+  verified on the server (`null` until checked).
+- `GET .../list?path=/var/log` (home folder without `path`):
 
 ```json
 {"path": "/var/log", "parent": "/var", "home": "/home/deploy", "entries": [
@@ -506,28 +516,30 @@ POST /api/connections
 ]}
 ```
 
-  Сначала папки, внутри по имени. `type`: `file`, `dir`, `link`, `other`; у ссылки на
-  папку `target_type: "dir"` и `is_dir: true` (открывается по клику), в `link_target`
-  путь, записанный в ссылке. `modified_at`, `uid`, `gid` и `link_target` у файлов сервера
-  отдаёт воркер с 2026-11-14; со старой сборкой они `null`.
-- `GET .../stat?path=`, `POST .../mkdir` `{path, parents?}` → 201, `POST .../move` и
-  `POST .../copy` `{source, target, overwrite?}` (`target` это новый полный путь; папка
-  копируется целиком), `DELETE .../entry?path=&recursive=true`. Ответ: сведения о файле
-  (как элемент `entries`). Корень и домашнюю папку удалить или переместить нельзя (403
-  `sftp_protected_path`); непустая папка удаляется только с `recursive=true`.
-- Передача файла или папки. Два способа, оба видны в `/api/sftp/transfers` и в `/ws`:
-  - по пути на этом компьютере, в фоне: `POST .../transfers` `{direction: upload |
-    download, local_path, remote_path, overwrite?}` → 202 и описание передачи. Папка
-    (или путь с разделителем в конце) в «куда» значит «положить под тем же именем».
-    Передачи одной сессии идут по очереди. Так передаются и папки целиком (ниже);
-  - телом запроса: `POST .../upload?path=<куда>&name=<имя, если path это папка>`
-    (тело это содержимое файла, ответ 201 после записи и сверки) и
-    `GET .../download?path=` (тело ответа это файл, id передачи в заголовке
-    `X-Synex-Transfer-Id`).
+  Folders first, by name within each group. `type`: `file`, `dir`, `link`, `other`; a link to
+  a folder has `target_type: "dir"` and `is_dir: true` (it opens on click), and `link_target`
+  holds the path stored in the link. `modified_at`, `uid`, `gid` and `link_target` of server
+  files come from the worker since 2026-11-14; with an older build they are `null`.
+- `GET .../stat?path=`, `POST .../mkdir` `{path, parents?}` → 201, `POST .../move` and
+  `POST .../copy` `{source, target, overwrite?}` (`target` is the new full path; a folder is
+  copied as a whole), `DELETE .../entry?path=&recursive=true`. Response: the entry (like an
+  item of `entries`). The root and the home folder cannot be deleted or moved (403
+  `sftp_protected_path`); a non-empty folder is deleted only with `recursive=true`.
+- Transferring a file or a folder. Two ways, both visible in `/api/sftp/transfers` and in
+  `/ws`:
+  - by a path on this computer, in the background: `POST .../transfers` `{direction: upload |
+    download, local_path, remote_path, overwrite?}` → 202 and the transfer description. A
+    folder (or a path ending with a separator) as the destination means "put it there under
+    the same name". Transfers of one session run one after another. Whole folders are
+    transferred this way too (below);
+  - in the request body: `POST .../upload?path=<where>&name=<name, if path is a folder>`
+    (the body is the file content, 201 after it is written and verified) and
+    `GET .../download?path=` (the response body is the file, the transfer id is in the
+    `X-Synex-Transfer-Id` header).
 - `GET /api/sftp/transfers?session_id=&active=true`, `GET /api/sftp/transfers/{id}`,
-  `DELETE /api/sftp/transfers/{id}`: идущую передачу отменяет (недописанный файл
-  удаляется), завершённую убирает из списка.
-- Состояние передачи (ответы API и событие `sftp.transfer` в `/ws`):
+  `DELETE /api/sftp/transfers/{id}`: cancels a running transfer (the unfinished file is
+  deleted), removes a finished one from the list.
+- Transfer state (API responses and the `sftp.transfer` event in `/ws`):
 
 ```json
 {"id": "5f0c2a9e41b7", "session_id": "3f9c0a7b12d4e5f6", "kind": "file",
@@ -540,31 +552,33 @@ POST /api/connections
  "finished_at": null}
 ```
 
-  `status`: `queued` → `running` → `verifying` → `completed`, либо `failed` (`error` и
-  `detail`), либо `cancelled`; у папки после `queued` идёт `scanning`. Событие приходит
-  при каждой смене статуса и не чаще раза в `SFTP_PROGRESS_INTERVAL` (0,25 с), пока идут
-  данные. `speed` в байтах в секунду.
-- Файл передаёт воркер в служебной SSH-сессии к тому же серверу (своё IPC-подключение),
-  поэтому терминал, метрики, docker и git этой сессии во время передачи не ждут.
-  Прогресс: при скачивании backend смотрит, как растёт временный файл на этом
-  компьютере, при загрузке спрашивает размер временного файла на сервере. Если
-  служебную сессию открыть нельзя (воркер не принимает дополнительные подключения),
-  передача идёт в основной сессии, а прогресс загрузки появляется только в конце.
-- Файл не появляется на месте наполовину: данные пишутся во временный файл
-  (`.synex-<id>.part/` рядом с целевым на сервере, `<имя>.synex-part` на компьютере),
-  после передачи сверяются размер и SHA-256 (`checksum`, `verified: true`; если на
-  сервере нет `sha256sum`, `shasum` и `openssl`, сверяется только размер), и только
-  потом временный файл заменяет целевой. При ошибке или отмене он удаляется.
-- Заменить файл (`overwrite: true`): старый сначала уходит во временную папку и
-  удаляется, только когда новый уже на месте. Если поставить новый не вышло, старый
-  возвращается.
-- Отмена идущей передачи сразу отвечает `cancelled`, закрывает её служебную сессию и
-  убирает временные файлы; следующая передача сессии начинается сразу. Прерывать
-  передачу воркер не умеет: он дочитывает файл до конца в фоне, результат никуда не
-  попадает. Если отмена пришла в самом начале файла, воркер создаёт его уже после
-  уборки: такой файл backend убирает следом (проверяет временные пути ещё 15 секунд).
-- Папка целиком: тот же `POST .../transfers`, в `local_path` (загрузка) или в
-  `remote_path` (скачивание) папка. Это одна передача с `kind: "dir"`:
+  `status`: `queued` → `running` → `verifying` → `completed`, or `failed` (`error` and
+  `detail`), or `cancelled`; a folder goes through `scanning` after `queued`. The event comes
+  on every status change and at most once per `SFTP_PROGRESS_INTERVAL` (0.25 s) while data
+  flows. `speed` is in bytes per second.
+- The worker transfers the file in a service SSH session to the same server (its own IPC
+  connection), so the terminal, metrics, docker and git of the session do not wait during a
+  transfer. Progress: on download the backend watches the temporary file grow on this
+  computer, on upload it asks for the size of the temporary file on the server. If a service
+  session cannot be opened (the worker does not accept extra connections), the transfer runs
+  in the main session, and upload progress shows up only at the end.
+- A file never appears half-written: the data goes into a temporary file
+  (`.synex-<id>.part/` next to the target on the server, `<name>.synex-part` on the
+  computer), after the transfer the size and SHA-256 are compared (`checksum`,
+  `verified: true`; if the server has none of `sha256sum`, `shasum` and `openssl`, only the
+  size is compared), and only then the temporary file replaces the target. On an error or a
+  cancel it is deleted.
+- Replacing a file (`overwrite: true`): the old one first moves into the temporary folder and
+  is deleted only when the new one is in place. If the new one cannot be put in place, the
+  old one comes back.
+- Cancelling a running transfer answers `cancelled` at once, closes its service session and
+  removes the temporary files; the next transfer of the session starts right away. The
+  worker cannot abort a transfer: it reads the file to the end in the background, and the
+  result goes nowhere. If the cancel arrived at the very start of a file, the worker creates
+  it after the cleanup: the backend removes such a file afterwards (it keeps checking the
+  temporary paths for another 15 seconds).
+- A whole folder: the same `POST .../transfers`, with a folder in `local_path` (upload) or in
+  `remote_path` (download). It is one transfer with `kind: "dir"`:
 
 ```json
 {"id": "9b1d77c0a2e4", "kind": "dir", "direction": "upload", "name": "site",
@@ -575,67 +589,72 @@ POST /api/connections
  "skipped_count": 1, "verified": null, "...": "..."}
 ```
 
-  - Воркер передаёт только файлы, поэтому папку backend обходит сам и передаёт по
-    одному файлу, все в одной служебной сессии (терминал свободен). Сначала обход
-    (`scanning`, `bytes_total` и `files_total` пока `null`), потом файлы: `files_done`
-    из `files_total`, `current` это файл, который идёт сейчас (путь от корня папки).
-  - Куда: существующая папка в «куда» значит «в неё под тем же именем» (`site` в
-    `/srv` → `/srv/site`); путь, которого ещё нет, это имя новой папки.
-  - Новая папка появляется на месте только готовой: она собирается во временной
-    (`.synex-<id>.part/` рядом на сервере, `<имя>.<id>.synex-part` на компьютере) и
-    встаёт на место переименованием. При ошибке и отмене временная папка удаляется.
-  - Папка уже есть: 409 `sftp_target_exists` (на компьютере `sftp_local_exists`). С
-    `overwrite: true` папки объединяются: файлы с теми же именами заменяются (каждый
-    идёт под временным именем и встаёт на место после проверки), остальное в папке не
-    трогается. При ошибке и отмене уже переданные файлы остаются.
-  - Проверка: SHA-256 каждого файла, одной командой на сервере на пачку файлов (без
-    `sha256sum`, `shasum` и `openssl` сверяется размер; `verified: true`, если SHA-256
-    сверен у всех). Файл, который не сошёлся, передаётся ещё раз: обычно его меняли во
-    время передачи (лог, в который пишут). Не сошёлся снова: пропускается.
-  - Что не передаётся, попадает в `skipped` (первые 50 с причиной, полный счёт в
-    `skipped_count`), а передача идёт дальше и заканчивается `completed`: ссылки (по
-    ним backend не ходит: ссылка может вести наружу или по кругу), сокеты и устройства,
-    то, на что нет прав, файл на месте папки и папка на месте файла при объединении,
-    имена, которые не годятся этому компьютеру (на Windows `a:b.txt`, `con`, а ещё
-    `Readme` рядом с `readme`). Передачу целиком останавливают обрыв связи, отказ
-    сервера без причины (например, кончилось место) и отмена.
-  - Права и время изменения файлов не переносятся. В папке не больше
-    `SFTP_FOLDER_LIMIT` файлов и папок (100 000), иначе `sftp_folder_too_large`. Телом
-    запроса папка не передаётся (`GET .../download` папки: 409 `sftp_is_a_directory`).
-- `GET /api/sftp/local/list?path=C:\Users\me` (без `path` домашняя папка): папка этого
-  компьютера для второй панели: `{path, parent, home, roots, separator, entries}`,
-  `roots` это диски на Windows и `["/"]` на Linux и macOS. UI работает в окне браузера и
-  диск не видит, поэтому папки ему показывает backend.
-- Ошибки: 404 `sftp_not_found`, 403 `sftp_permission_denied`, `sftp_protected_path`, 409
+  - The worker transfers files only, so the backend walks the folder itself and transfers
+    the files one by one, all in one service session (the terminal stays free). First the
+    walk (`scanning`, `bytes_total` and `files_total` are still `null`), then the files:
+    `files_done` of `files_total`, `current` is the file in progress (a path from the folder
+    root).
+  - Destination: an existing folder means "into it under the same name" (`site` into `/srv`
+    → `/srv/site`); a path that does not exist yet is the name of the new folder.
+  - A new folder appears in place only when complete: it is assembled in a temporary one
+    (`.synex-<id>.part/` next to it on the server, `<name>.<id>.synex-part` on the computer)
+    and is moved into place by a rename. On an error and a cancel the temporary folder is
+    deleted.
+  - The folder already exists: 409 `sftp_target_exists` (on the computer
+    `sftp_local_exists`). With `overwrite: true` the folders are merged: files with the same
+    names are replaced (each goes under a temporary name and is moved into place after the
+    check), everything else in the folder is left alone. On an error and a cancel the files
+    already transferred stay.
+  - Verification: SHA-256 of every file, one command on the server per batch of files
+    (without `sha256sum`, `shasum` and `openssl` the size is compared; `verified: true` if
+    SHA-256 matched for all of them). A file that does not match is transferred once more:
+    usually it was changing during the transfer (a log being written to). If it does not
+    match again, it is skipped.
+  - Whatever is not transferred goes into `skipped` (the first 50 with a reason, the full
+    count in `skipped_count`), and the transfer goes on and ends as `completed`: links (the
+    backend does not follow them: a link may lead outside or in a loop), sockets and devices,
+    anything without permission, a file in place of a folder and a folder in place of a file
+    when merging, names this computer cannot use (on Windows `a:b.txt`, `con`, and also
+    `Readme` next to `readme`). The whole transfer is stopped by a lost connection, a server
+    refusal without a reason (for example, out of space) and a cancel.
+  - Permissions and modification times are not carried over. A folder may hold at most
+    `SFTP_FOLDER_LIMIT` files and folders (100,000), otherwise `sftp_folder_too_large`. A
+    folder cannot be transferred in a request body (`GET .../download` of a folder: 409
+    `sftp_is_a_directory`).
+- `GET /api/sftp/local/list?path=C:\Users\me` (home folder without `path`): a folder of this
+  computer for the second pane: `{path, parent, home, roots, separator, entries}`, `roots`
+  are the drives on Windows and `["/"]` on Linux and macOS. The UI runs in a browser window
+  and cannot see the disk, so the backend lists the folders for it.
+- Errors: 404 `sftp_not_found`, 403 `sftp_permission_denied`, `sftp_protected_path`, 409
   `sftp_target_exists`, `sftp_is_a_directory`, `sftp_not_a_directory`, `sftp_not_a_file`,
-  `sftp_directory_not_empty`, 422 `sftp_bad_path` (в том числе имя файла с сервера,
-  которое нельзя дать файлу на этом компьютере, например `a:b.txt` на Windows), 502
-  `sftp_failed` (текст воркера в `detail`), `sftp_unavailable` (на сервере нет SFTP: в
-  его `sshd_config` нужна строка `Subsystem sftp ...`; или сборка воркера старая и не знает
-  действий `sftp_*`, тогда воркер нужно обновить), `sftp_transfer_corrupted`, 504
-  `sftp_timeout`, у передачи папки ещё 422 `sftp_folder_too_large`; для этого компьютера
-  `sftp_local_not_found` (404), `sftp_local_permission_denied` (403), `sftp_local_exists` и
-  `sftp_local_not_a_directory` (409), `sftp_local_error` (422). Сессия, занятая командой
-  пользователя дольше `SSH_SERVICE_WAIT`: 409 `ssh_session_busy`. Настройки `SFTP_*`
-  описаны в `.env.example`.
+  `sftp_directory_not_empty`, 422 `sftp_bad_path` (including a server file name that cannot
+  be given to a file on this computer, for example `a:b.txt` on Windows), 502 `sftp_failed`
+  (the worker text in `detail`), `sftp_unavailable` (the server has no SFTP: its
+  `sshd_config` needs a `Subsystem sftp ...` line; or the worker build is old and does not
+  know the `sftp_*` actions, then update the worker), `sftp_transfer_corrupted`, 504
+  `sftp_timeout`, for a folder transfer also 422 `sftp_folder_too_large`; for this computer
+  `sftp_local_not_found` (404), `sftp_local_permission_denied` (403), `sftp_local_exists` and
+  `sftp_local_not_a_directory` (409), `sftp_local_error` (422). A session busy with a user
+  command for longer than `SSH_SERVICE_WAIT`: 409 `ssh_session_busy`. The `SFTP_*` settings
+  are described in `.env.example`.
 
 ### WebSocket /ws
 
-Поток данных для UI: `ws://127.0.0.1:8000/ws` (без префикса `/api`). В обе стороны
-ходит JSON в текстовых фреймах, каждое сообщение в конверте `{"type", "ts", "data"}`,
-`ts` в миллисекундах Unix.
+The data stream for the UI: `ws://127.0.0.1:8000/ws` (no `/api` prefix). JSON in text frames
+both ways, every message in the envelope `{"type", "ts", "data"}`, `ts` in Unix
+milliseconds.
 
-| type | Кто и когда шлёт | data |
+| type | Who sends it and when | data |
 |---|---|---|
-| `hello` | сервер, сразу после подключения | `{app, version, protocol, streams}` |
-| `metrics` | сервер, каждые 500 мс | метрики серверов, пример ниже |
-| `ssh.session` | сервер, при открытии и закрытии SSH-сессии | `{action: opened\|closed, session_id, host, port, username, connection_id, reason?}` |
-| `worker.status` | сервер, когда меняется состояние воркера | `{status, ...}`: `connected`, `connection_lost`, `worker_exited`, `worker_started` |
-| `sftp.transfer` | сервер, пока идёт передача файла | состояние передачи: `{id, status, bytes_done, bytes_total, percent, speed, ...}` (см. «Файлы на серверах») |
-| `plugin.status` | сервер, когда плагин включили, выключили или он упал | `{name, status, version, error}` (см. «Плагины на ходу») |
-| `ping` | UI | что угодно, вернётся в `pong` |
-| `pong` | сервер, в ответ на `ping` | `data` из `ping` |
-| `error` | сервер, если не разобрал сообщение UI | `{error, detail}`: `bad_message` или `unknown_type` |
+| `hello` | server, right after connecting | `{app, version, protocol, streams}` |
+| `metrics` | server, every 500 ms | server metrics, example below |
+| `ssh.session` | server, when an SSH session opens or closes | `{action: opened\|closed, session_id, host, port, username, connection_id, reason?}` |
+| `worker.status` | server, when the worker state changes | `{status, ...}`: `connected`, `connection_lost`, `worker_exited`, `worker_started` |
+| `sftp.transfer` | server, while a file transfer runs | transfer state: `{id, status, bytes_done, bytes_total, percent, speed, ...}` (see "Files on servers") |
+| `plugin.status` | server, when a plugin was enabled, disabled or failed | `{name, status, version, error}` (see "Plugins at runtime") |
+| `ping` | UI | anything, comes back in `pong` |
+| `pong` | server, in reply to `ping` | `data` from `ping` |
+| `error` | server, if it could not parse a UI message | `{error, detail}`: `bad_message` or `unknown_type` |
 
 ```json
 {"type": "metrics", "ts": 1793779200000, "data": {
@@ -661,163 +680,162 @@ POST /api/connections
 }}
 ```
 
-`ssh.session` приходит и тогда, когда сессию закрыл другой клиент или она потеряна:
-`reason` — `closed` (закрыли через API), `worker_connection_lost` (воркер упал или
-оборвалось его подключение), `lost_in_worker`, `exec_timeout` (команда не ответила и
-после лимита, см. 504 ниже), `shutdown` (бэкенд останавливается).
-UI обновляет по нему список сессий, даже если терминал сессии не открыт.
-`worker.status` показывает состояние ядра: например, после `worker_exited` бэкенд
-перезапускает воркер (`worker_started` с `restarts`), затем `connected`.
+`ssh.session` also comes when the session was closed by another client or lost: `reason` is
+`closed` (closed through the API), `worker_connection_lost` (the worker crashed or its
+connection dropped), `lost_in_worker`, `exec_timeout` (a command did not answer even after
+the limit, see 504 below), `shutdown` (the backend is stopping). The UI updates its session
+list from it, even if the session terminal is not open. `worker.status` shows the core
+state: for example, after `worker_exited` the backend restarts the worker (`worker_started`
+with `restarts`), then `connected`.
 
-#### Мониторинг (плагин `monitor`)
+#### Monitoring (plugin `monitor`)
 
-- `servers`: один элемент на сервер (`host:port`) с открытыми SSH-сессиями, сколько бы
-  сессий к нему ни было. Метрики машины от сессии не зависят, поэтому сервер
-  опрашивается один раз за период (`MONITOR_POLL_INTERVAL`, 0.5 с) действием воркера
-  `monitor_get_values` через одну из своих сессий. Разные серверы опрашиваются
-  параллельно.
-- `cpu.percent`: загрузка с прошлого замера; `memory`: байты и проценты. `avg`, `min`,
-  `max` в процентах за окно `window_s` (`MONITOR_WINDOW`, 30 с).
-- `network`: сеть сервера, сумма по всем интерфейсам, кроме `lo`. `rx` приём, `tx`
-  отправка. `total`: счётчик байт с загрузки сервера; `speed`: байт в секунду с прошлого
-  замера (`null`, пока замер один); `avg`, `min`, `max`: `speed` за окно. Мегабиты в
-  секунду: `speed * 8 / 1e6`. На сервере с Docker трафик контейнеров считается дважды
-  (мост `docker0` и `veth*`). `network: null`: у сервера только `lo` или сборка воркера
-  старше 2026-11-17.
-- `disk`: корневой раздел `/` (байты, `percent` как в `df`), одно значение для карточки
-  «Диск». Приходит с каждым замером, вместе с CPU и памятью. Со сборкой воркера старше
-  2026-11-17 берётся из `disks` и обновляется вместе с ними.
-- `disks` и `gpus` обновляются реже, раз в `MONITOR_HARDWARE_INTERVAL` (10 с): воркер их
-  не отдаёт, бэкенд выполняет на сервере `df -kP` и `nvidia-smi` через ту же свободную
-  сессию (в терминал сессии это не попадает). `disks`: реальные устройства `/dev/...`
-  (без loop-образов snap) и корень `/` (он идёт первым), одно устройство один раз;
-  `percent` как в `df`. `gpus`: только NVIDIA, значения, которые карта не сообщает,
-  приходят как `null`; `[]` значит карт нет. До первого замера оба поля `null`, время
-  замера в `hardware_updated_at`.
+- `servers`: one item per server (`host:port`) with open SSH sessions, however many sessions
+  it has. Machine metrics do not depend on the session, so a server is polled once per period
+  (`MONITOR_POLL_INTERVAL`, 0.5 s) with the worker action `monitor_get_values` through one of
+  its sessions. Different servers are polled in parallel.
+- `cpu.percent`: load since the previous sample; `memory`: bytes and percent. `avg`, `min`,
+  `max` are percentages over the `window_s` window (`MONITOR_WINDOW`, 30 s).
+- `network`: the server's network, summed over all interfaces except `lo`. `rx` is receive,
+  `tx` is transmit. `total`: byte counter since the server booted; `speed`: bytes per second
+  since the previous sample (`null` while there is only one sample); `avg`, `min`, `max`:
+  `speed` over the window. Megabits per second: `speed * 8 / 1e6`. On a server with Docker,
+  container traffic is counted twice (the `docker0` bridge and `veth*`). `network: null`: the
+  server has only `lo`, or the worker build is older than 2026-11-17.
+- `disk`: the root partition `/` (bytes, `percent` as in `df`), one value for the "Disk" card.
+  It comes with every sample, together with CPU and memory. With a worker build older than
+  2026-11-17 it is taken from `disks` and updated together with them.
+- `disks` and `gpus` are updated less often, every `MONITOR_HARDWARE_INTERVAL` (10 s): the
+  worker does not provide them, so the backend runs `df -kP` and `nvidia-smi` on the server
+  through the same free session (this does not show up in the session terminal). `disks`:
+  real `/dev/...` devices (without snap loop images) and the root `/` (it comes first), each
+  device once; `percent` as in `df`. `gpus`: NVIDIA only, values the card does not report come
+  as `null`; `[]` means no cards. Before the first sample both fields are `null`, the sample
+  time is in `hardware_updated_at`.
 - `status`:
-  - `waiting`: замеров ещё нет;
-  - `warming_up`: память уже есть, CPU появится со второго замера. Первый замер в
-    сессии воркер считает от загрузки сервера, он отбрасывается;
-  - `ok`: свежие данные;
-  - `stale`: свежих данных нет дольше `MONITOR_STALE_AFTER` (3 с), значения последние
-    известные;
-  - `error`: последний опрос не удался, текст в `error` (например, на сервере нет
-    `/proc`: метрики работают только на Linux).
-- Опрос не ждёт команды пользователя: воркер выполняет запросы одной сессии по очереди,
-  поэтому сервер опрашивается через свободную сессию. Если все сессии сервера заняты
-  командами, в сообщении `busy: true`, а через 3 с статус становится `stale`. Откройте
-  к серверу ещё одну сессию, чтобы метрики шли и во время долгих команд.
-- Серверы опрашиваются, только пока метрики кому-то нужны: к `/ws` подключён UI или в
-  последние `MONITOR_DEMAND_TIMEOUT` (10) секунд был `GET /api/monitor/metrics`.
-- `WS_FAKE_METRICS=true` (по умолчанию `false`) отправляет в `/ws` тестовые метрики в
-  том же формате (`source: "fake"`, один сервер `demo.synex.local:22`), чтобы делать UI
-  без SSH-сервера. Настоящие метрики тогда доступны только через REST.
-- У каждого клиента своя очередь на 64 сообщения. Если UI не успевает читать, теряются
-  самые старые сообщения, а память не растёт.
-- При остановке backend закрывает соединение с кодом 1012: UI стоит переподключиться.
+  - `waiting`: no samples yet;
+  - `warming_up`: memory is already there, CPU appears from the second sample. The worker
+    counts the first sample of a session from the server boot, so it is dropped;
+  - `ok`: fresh data;
+  - `stale`: no fresh data for longer than `MONITOR_STALE_AFTER` (3 s), the values are the
+    last known ones;
+  - `error`: the last poll failed, the text is in `error` (for example, the server has no
+    `/proc`: metrics work on Linux only).
+- Polling does not wait for user commands: the worker handles the requests of one session one
+  by one, so a server is polled through a free session. If all sessions of the server are
+  busy with commands, the message has `busy: true`, and after 3 s the status becomes `stale`.
+  Open one more session to the server so that metrics keep flowing during long commands.
+- Servers are polled only while someone needs the metrics: a UI is connected to `/ws`, or
+  `GET /api/monitor/metrics` was called in the last `MONITOR_DEMAND_TIMEOUT` (10) seconds.
+- `WS_FAKE_METRICS=true` (default `false`) sends test metrics in the same format to `/ws`
+  (`source: "fake"`, one server `demo.synex.local:22`), so the UI can be built without an SSH
+  server. Real metrics are then available through REST only.
+- Every client has its own queue of 64 messages. If the UI cannot keep up, the oldest
+  messages are dropped, and memory does not grow.
+- On shutdown the backend closes the connection with code 1012: the UI should reconnect.
 
-Быстрая проверка: открыть http://127.0.0.1:8000/api/health и в консоли браузера выполнить
+Quick check: open http://127.0.0.1:8000/api/health and run in the browser console
 
 ```js
 const ws = new WebSocket("ws://127.0.0.1:8000/ws");
 ws.onmessage = (e) => console.log(JSON.parse(e.data));
 ```
 
-### Ошибки
+### Errors
 
-Все ошибки приходят как `{"error": "<код>", "detail": "<текст>"}` (у некоторых есть
-поля с подробностями, например `host_key`), ошибки валидации как 422:
+All errors come as `{"error": "<code>", "detail": "<text>"}` (some have extra fields with
+details, for example `host_key`); validation errors as 422:
 
-| HTTP | error | Когда |
+| HTTP | error | When |
 |---|---|---|
-| 404 | `key_not_found` | Нет ключа с таким id |
-| 404 | `connection_not_found` | Нет сохранённого подключения с таким id |
-| 409 | `connection_exists` | Подключение с таким именем уже есть |
-| 422 | `invalid_connection` | Способ входа подключения не согласован |
-| 422 | `connection_secret_required` | Пароль подключения не сохранён: передайте его в `/connect` |
-| 500 | `connections_corrupted` | `connections.json` повреждён |
-| 404 | `ssh_session_not_found` | Нет сессии с таким `session_id` |
-| 409 | `ssh_not_connected` | Нет открытой сессии, или воркер её уже не знает |
-| 403 | `forbidden_origin` / `forbidden_host` | Запрос со страницы не из `ALLOWED_ORIGINS` или с чужим `Host` |
-| 409 | `key_exists` | Имя занято или этот ключ уже сохранён |
-| 409 | `ssh_session_busy` | Команда плагина не дождалась, пока сессия освободится (`SSH_SERVICE_WAIT`) |
-| 429 | `ssh_too_many_sessions` | Открыто `SSH_MAX_SESSIONS` сессий |
-| 422 | `invalid_key` / — | Ключ не читается, нужна парольная фраза, неверные поля |
-| 500 | `keystore_corrupted` | `keys.json` повреждён или зашифрован другим мастер-ключом |
-| 502 | `ssh_connect_failed` | Воркер не смог подключиться (хост, ключ, пароль, фраза) |
-| 409 | `ssh_host_key_unknown` | Ключ сервера ещё не подтверждён: отпечаток в `host_key` (см. «Проверка ключа сервера») |
-| 409 | `ssh_host_key_mismatch` | Ключ сервера сменился: `host_key.fingerprint` и `expected_fingerprint`, подключения нет |
-| 409 | `ssh_host_key_revoked` | Ключ сервера отозван (`@revoked`) в `known_hosts` OpenSSH на этом компьютере, подключения нет |
-| 409 | `ssh_known_host_conflict` | Для сервера сохранён другой отпечаток: заменить только с `replace: true` |
-| 404 | `ssh_known_host_not_found` | Для сервера нет сохранённого ключа |
-| 500 | `known_hosts_corrupted` | `known_hosts.json` повреждён |
-| 504 | `ssh_connect_timeout` | Сервер не ответил за `SSH_CONNECT_TIMEOUT` (20 с): адрес, порт, файрвол |
-| 502 | `worker_command_failed` | Воркер вернул ошибку |
-| 503 | `plugin_unavailable` | Плагин включён, но не загрузился (причина в `/api/plugins`) |
-| 404 | `plugin_disabled` | Плагин выключен: его эндпоинты закрыты до `POST /api/plugins/{name}/enable` |
-| 404 | `plugin_not_found` | Такого плагина нет или он не импортируется |
-| 409 | `plugin_in_use` | Выключить нельзя: от плагина зависят включённые (`?cascade=true` выключит и их) |
-| 503 | `worker_unavailable` | Воркер не запущен или IPC недоступен |
-| 503 | `keystore_unavailable` | Нет доступа к Credential Manager / неверный `KEYSTORE_MASTER_KEY` |
-| 504 | `ssh_exec_timeout` | Воркер не вернул результат команды |
-| 504 | `worker_timeout` | Воркер не ответил на другой запрос |
-| 403/404/502/503/504 | `docker_*` | Ошибки Docker на сервере (см. «Docker на серверах») |
-| 404/409/502/504 | `git_*` | Ошибки git на сервере (см. «Git на серверах») |
-| 403/404/409/422/5xx | `sftp_*` | Ошибки файлов на сервере и на этом компьютере (см. «Файлы на серверах») |
+| 404 | `key_not_found` | No key with this id |
+| 404 | `connection_not_found` | No saved connection with this id |
+| 409 | `connection_exists` | A connection with this name already exists |
+| 422 | `invalid_connection` | The connection's login method is inconsistent |
+| 422 | `connection_secret_required` | The connection password is not saved: pass it to `/connect` |
+| 500 | `connections_corrupted` | `connections.json` is damaged |
+| 404 | `ssh_session_not_found` | No session with this `session_id` |
+| 409 | `ssh_not_connected` | No open session, or the worker no longer knows it |
+| 403 | `forbidden_origin` / `forbidden_host` | A request from a page not in `ALLOWED_ORIGINS` or with a foreign `Host` |
+| 409 | `key_exists` | The name is taken or this key is already saved |
+| 409 | `ssh_session_busy` | A plugin command did not get the session in time (`SSH_SERVICE_WAIT`) |
+| 429 | `ssh_too_many_sessions` | `SSH_MAX_SESSIONS` sessions are open |
+| 422 | `invalid_key` / — | The key cannot be read, a passphrase is needed, wrong fields |
+| 500 | `keystore_corrupted` | `keys.json` is damaged or encrypted with another master key |
+| 502 | `ssh_connect_failed` | The worker could not connect (host, key, password, passphrase) |
+| 409 | `ssh_host_key_unknown` | The server key is not confirmed yet: the fingerprint is in `host_key` (see "Server key verification") |
+| 409 | `ssh_host_key_mismatch` | The server key has changed: `host_key.fingerprint` and `expected_fingerprint`, no connection |
+| 409 | `ssh_host_key_revoked` | The server key is revoked (`@revoked`) in the OpenSSH `known_hosts` on this computer, no connection |
+| 409 | `ssh_known_host_conflict` | Another fingerprint is saved for the server: replace only with `replace: true` |
+| 404 | `ssh_known_host_not_found` | No saved key for the server |
+| 500 | `known_hosts_corrupted` | `known_hosts.json` is damaged |
+| 504 | `ssh_connect_timeout` | The server did not answer within `SSH_CONNECT_TIMEOUT` (20 s): address, port, firewall |
+| 502 | `worker_command_failed` | The worker returned an error |
+| 503 | `plugin_unavailable` | The plugin is enabled but did not load (the reason is in `/api/plugins`) |
+| 404 | `plugin_disabled` | The plugin is disabled: its endpoints are closed until `POST /api/plugins/{name}/enable` |
+| 404 | `plugin_not_found` | No such plugin, or it cannot be imported |
+| 409 | `plugin_in_use` | Cannot disable: enabled plugins depend on it (`?cascade=true` disables them too) |
+| 503 | `worker_unavailable` | The worker is not running or IPC is unavailable |
+| 503 | `keystore_unavailable` | No access to the Credential Manager / wrong `KEYSTORE_MASTER_KEY` |
+| 504 | `ssh_exec_timeout` | The worker did not return the command result |
+| 504 | `worker_timeout` | The worker did not answer another request |
+| 403/404/502/503/504 | `docker_*` | Docker errors on the server (see "Docker on servers") |
+| 404/409/502/504 | `git_*` | Git errors on the server (see "Git on servers") |
+| 403/404/409/422/5xx | `sftp_*` | File errors on the server and on this computer (see "Files on servers") |
 
-## Структура
+## Structure
 
 ```
 app/
-  main.py              точка входа (uvicorn)
-  core/                платформа: config, app factory, ошибки, шина событий, логи,
-                       files (атомарная запись файлов с секретами)
+  main.py              entry point (uvicorn)
+  core/                platform: config, app factory, errors, event bus, logging,
+                       files (atomic writes of files with secrets)
     target/release/    synex_worker.exe (Windows), synex_worker (Linux x86_64)
-  worker/              Rust-ядро: client.py (IPC-протокол), manager.py (процесс),
-                       executable.py (поиск бинарника для ОС и процессора),
-                       unix_socket.py (путь и папка сокета на Linux/macOS),
-                       process.py (процесс воркера на Linux/macOS)
-  keystore/            хранилище ключей: store.py, ssh_keys.py, master_key.py
-  api/                 корневой роутер /api, /api/health, зависимости
-  ws/                  WebSocket /ws: hub.py (протокол, рассылка), metrics.py (формат
-                       метрик и тестовый источник)
-  plugins/             менеджер плагинов (manager), выбор пользователя между
-                       запусками (choices)
-    ssh/               /api/ssh/*: manager (менеджер сессий), session (сессия и её
-                       подключение к воркеру), buffer (буфер вывода), ws (терминал),
-                       wrapper (cwd, таймаут), known_hosts (доверенные ключи серверов),
-                       openssh_hosts (ключи из known_hosts OpenSSH), routes, schemas,
+  worker/              Rust core: client.py (IPC protocol), manager.py (process),
+                       executable.py (finding the binary for the OS and CPU),
+                       unix_socket.py (socket path and folder on Linux/macOS),
+                       process.py (worker process on Linux/macOS)
+  keystore/            key vault: store.py, ssh_keys.py, master_key.py
+  api/                 root router /api, /api/health, dependencies
+  ws/                  WebSocket /ws: hub.py (protocol, broadcast), metrics.py (metrics
+                       format and the test source)
+  plugins/             plugin manager (manager), the user's choice between runs (choices)
+    ssh/               /api/ssh/*: manager (session manager), session (a session and its
+                       worker connection), buffer (output buffer), ws (terminal),
+                       wrapper (cwd, timeout), known_hosts (trusted server keys),
+                       openssh_hosts (keys from the OpenSSH known_hosts), routes, schemas,
                        errors
-    monitor/           /api/monitor/*: service (опрос и публикация), aggregator
-                       (окно, статусы), values (ответ воркера), hardware (диски, GPU)
+    monitor/           /api/monitor/*: service (polling and publishing), aggregator
+                       (window, statuses), values (worker response), hardware (disks, GPU)
     keys/              /api/keys/*
     connections/       /api/connections/*: store (connections.json), routes, schemas
-    docker/            /api/docker/*: commands (команды docker и разбор вывода),
-                       service (выполнение в сессии, ошибки), logs (живой лог по
+    docker/            /api/docker/*: commands (docker commands and output parsing),
+                       service (running in a session, errors), logs (live log over
                        WebSocket), routes, schemas
-    git/               /api/git/*: commands (команды git и разбор вывода), service,
+    git/               /api/git/*: commands (git commands and output parsing), service,
                        routes, schemas
-    sftp/              /api/sftp/*: remote (файлы сервера через SFTP воркера), transfers
-                       (передачи, прогресс, сверка), folders (папка целиком), tree (обход
-                       папки), local (файлы этого компьютера), paths, routes, schemas
-tests/                 pytest; fake_worker.py имитирует synex_worker
-  integration/         полный цикл UI → FastAPI → воркер → SSH-сервер
+    sftp/              /api/sftp/*: remote (server files through the worker's SFTP),
+                       transfers (transfers, progress, verification), folders (a whole
+                       folder), tree (walking a folder), local (files of this computer),
+                       paths, routes, schemas
+tests/                 pytest; fake_worker.py imitates synex_worker
+  integration/         the full cycle UI → FastAPI → worker → SSH server
 ```
 
-Новый функционал добавляется плагином: `app/plugins/<name>/plugin.py` с подклассом
-`BasePlugin` и `router`. По умолчанию (`PLUGINS_ENABLED=*`) включены все установленные
-плагины; список через запятую включает только перечисленные, остальные видны в
-`/api/plugins` со статусом `disabled`.
+New functionality is added as a plugin: `app/plugins/<name>/plugin.py` with a `BasePlugin`
+subclass and a `router`. By default (`PLUGINS_ENABLED=*`) all installed plugins are enabled;
+a comma-separated list enables only the listed ones, the rest show up in `/api/plugins` with
+the status `disabled`.
 
-* `requires = ("ssh",)`: плагины, без которых этот не работает. Они включаются сами
-  (даже если их нет в `PLUGINS_ENABLED`) и загружаются раньше.
-* Плагин пропускается с предупреждением в логе, если он не установлен, не
-  импортируется или его зависимость недоступна; остальные работают.
-* Если `on_load` плагина упал, он и зависящие от него плагины не загружаются, а
-  backend продолжает работать без них. Их эндпоинты (и WebSocket) отвечают 503
+* `requires = ("ssh",)`: plugins this one cannot work without. They are enabled
+  automatically (even if they are not in `PLUGINS_ENABLED`) and loaded first.
+* A plugin is skipped with a warning in the log if it is not installed, cannot be imported or
+  a dependency is unavailable; the others keep working.
+* If a plugin's `on_load` fails, it and the plugins depending on it are not loaded, and the
+  backend keeps running without them. Their endpoints (and WebSockets) answer 503
   `plugin_unavailable`.
 
-`GET /api/plugins` показывает UI, что работает:
+`GET /api/plugins` shows the UI what works:
 
 ```json
 [
@@ -830,15 +848,14 @@ tests/                 pytest; fake_worker.py имитирует synex_worker
 ]
 ```
 
-`status`: `loaded` работает; `failed` включён, но `on_load` упал или не загрузилась
-зависимость; `skipped` не установлен, не импортируется или нет зависимости;
-`disabled` установлен, но выключен (не в `PLUGINS_ENABLED` или через `/disable`, в том
-числе в прошлый запуск);
-`registered` ещё не загружен (приложение стартует).
+`status`: `loaded` works; `failed` is enabled, but `on_load` failed or a dependency did not
+load; `skipped` is not installed, cannot be imported or lacks a dependency; `disabled` is
+installed but turned off (not in `PLUGINS_ENABLED` or via `/disable`, including in a previous
+run); `registered` is not loaded yet (the app is starting).
 
-### Плагины на ходу (шина данных)
+### Plugins at runtime (data bus)
 
-Модули включаются и выключаются на работающем backend, без перезапуска:
+Modules are enabled and disabled on a running backend, without a restart:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/plugins/docker/disable
@@ -846,175 +863,181 @@ curl -X POST http://127.0.0.1:8000/api/plugins/docker/enable
 curl -X POST "http://127.0.0.1:8000/api/plugins/ssh/disable?cascade=true"
 ```
 
-Ответ: `{"changed": ["docker"], "plugins": [...]}` (`changed`: что включилось или
-выключилось сейчас, `plugins`: как в `GET /api/plugins`).
+Response: `{"changed": ["docker"], "plugins": [...]}` (`changed`: what was enabled or
+disabled just now, `plugins`: as in `GET /api/plugins`).
 
-- Включение вызывает `on_load` плагина и его зависимостей и открывает его эндпоинты.
-  Подхватывается и пакет, который появился в `app/plugins/` после старта backend.
-  Если `on_load` упал, ответ 503 `plugin_unavailable` с причиной, остальные работают.
-- Выключение вызывает `on_unload`: плагин останавливает свою работу (`ssh` закрывает
-  все сессии, `sftp` отменяет передачи, `docker` закрывает живые логи, `monitor`
-  перестаёт опрашивать серверы). Его эндпоинты (HTTP и WebSocket) после этого отвечают
-  404 `plugin_disabled` и пропадают из `/api/docs`.
-- Если от плагина зависят включённые (от `ssh` зависят все модули серверов), ответ 409
-  `plugin_in_use`; `?cascade=true` выключает сначала их, потом его. Включение плагина
-  включает и то, от чего он зависит.
-- Каждая смена состояния уходит в шину событием `plugin.status`, хаб пересылает его в
+- Enabling calls `on_load` of the plugin and its dependencies and opens its endpoints. A
+  package that appeared in `app/plugins/` after the backend started is picked up too. If
+  `on_load` fails, the answer is 503 `plugin_unavailable` with the reason, the rest keep
+  working.
+- Disabling calls `on_unload`: the plugin stops its work (`ssh` closes all sessions, `sftp`
+  cancels transfers, `docker` closes live logs, `monitor` stops polling servers). Its
+  endpoints (HTTP and WebSocket) then answer 404 `plugin_disabled` and disappear from
+  `/api/docs`.
+- If enabled plugins depend on it (all server modules depend on `ssh`), the answer is 409
+  `plugin_in_use`; `?cascade=true` disables them first, then it. Enabling a plugin also
+  enables what it depends on.
+- Every state change goes to the bus as a `plugin.status` event, and the hub forwards it to
   `/ws`: `{"name": "docker", "status": "disabled", "version": "0.2.0", "error": null}`.
-  События, которые плагин объявил в `BasePlugin.events` (`ssh.session`,
-  `sftp.transfer`), идут в `/ws`, пока плагин включён.
-- `on_load` и `on_unload` плагина должны выдерживать повторный вызов: плагин можно
-  выключать и включать сколько угодно раз.
+  Events a plugin declared in `BasePlugin.events` (`ssh.session`, `sftp.transfer`) go to
+  `/ws` while the plugin is enabled.
+- A plugin's `on_load` and `on_unload` must survive repeated calls: a plugin can be disabled
+  and enabled any number of times.
 
-Набор плагинов переживает перезапуск backend. Что пользователь включил и выключил на
-ходу, записывается в `plugins.json` рядом с `keys.json` (`PLUGINS_STATE_PATH`) и при
-следующем запуске накладывается на `PLUGINS_ENABLED`:
+The set of plugins survives a backend restart. What the user enabled and disabled at runtime
+is written to `plugins.json` next to `keys.json` (`PLUGINS_STATE_PATH`) and applied on top of
+`PLUGINS_ENABLED` at the next start:
 
 ```json
 {"version": 1, "plugins": {"docker": false, "extra": true}}
 ```
 
-- В файле только отличия от настроек: `false` у плагина, который есть в
-  `PLUGINS_ENABLED`, но выключен пользователем; `true` у плагина, которого там нет, но
-  пользователь его включил. Вернул как в настройках: запись пропадает. Поэтому
-  изменение `PLUGINS_ENABLED` действует на всё, что пользователь сам не переключал.
-- Плагин, который нужен включённому, включается как зависимость, даже если раньше его
-  выключали. Плагин, который пользователь включил, а он не запустился, после перезапуска
-  пробует запуститься снова (и снова показывает причину в `/api/plugins`).
-- Файла нет или он испорчен: работает набор из `PLUGINS_ENABLED`, о причине строка в
-  логе. Не получилось записать файл: выбор действует до перезапуска.
-- `PLUGINS_REMEMBER=false` выключает запоминание: после перезапуска включено ровно то,
-  что в `PLUGINS_ENABLED`. Вернуть набор из настроек можно и удалив `plugins.json`.
+- The file holds only the differences from the settings: `false` for a plugin that is in
+  `PLUGINS_ENABLED` but disabled by the user; `true` for a plugin that is not there but the
+  user enabled it. Switched back to the setting: the entry disappears. So a change of
+  `PLUGINS_ENABLED` applies to everything the user has not switched themselves.
+- A plugin needed by an enabled one is enabled as a dependency, even if it was disabled
+  before. A plugin the user enabled that failed to start tries to start again after a restart
+  (and again shows the reason in `/api/plugins`).
+- No file or a damaged file: the set from `PLUGINS_ENABLED` works, with a log line about the
+  reason. The file could not be written: the choice lasts until a restart.
+- `PLUGINS_REMEMBER=false` turns remembering off: after a restart exactly what is in
+  `PLUGINS_ENABLED` is enabled. You can also return to the set from the settings by deleting
+  `plugins.json`.
 
-## Тесты
+## Tests
 
 ```powershell
 uv run pytest
 ```
 
-Тесты используют временное хранилище и свой мастер-ключ: настоящий `keys.json` и
-Credential Manager они не трогают. От `backend/.env` они тоже не зависят: набор плагинов
-и источник метрик тесты задают сами.
+Tests use a temporary vault and their own master key: they do not touch the real `keys.json`
+or the Credential Manager. They do not depend on `backend/.env` either: tests set the plugin
+set and the metrics source themselves.
 
-Тесты идут на Windows, Linux и macOS. Команды SSH фейковый воркер на Linux и macOS
-выполняет настоящим `sh -c`, а на Windows — эмулятором shell (`tests/fake_shell.py`):
-виртуальная файловая система с `/tmp` и `/home/synex` и ровно те команды, что нужны
-тестам. Программы сервера вроде `docker` и `git` тесты подставляют в эмулятор сами
-(`FakeShell.programs`). Что эмулятор отвечает так же, как настоящий sh, проверяет
-`tests/test_fake_shell.py`. Эмулятор можно включить и на Linux/macOS:
+Tests run on Windows, Linux and macOS. On Linux and macOS the fake worker runs SSH commands
+with a real `sh -c`, and on Windows with a shell emulator (`tests/fake_shell.py`): a virtual
+file system with `/tmp` and `/home/synex` and exactly the commands the tests need. Server
+programs such as `docker` and `git` are plugged into the emulator by the tests
+(`FakeShell.programs`). `tests/test_fake_shell.py` checks that the emulator answers the same
+way as a real sh. The emulator can be enabled on Linux/macOS too:
 
 ```bash
 SYNEX_TEST_SHELL=emulated uv run pytest
 ```
 
-Пропускаются только тесты, которым нужна конкретная ОС: обёртка команды в настоящих
-sh/bash/dash/zsh и права файлов (Linux/macOS), Unix socket и процесс воркера
-(Linux/macOS), таймаут через coreutils `timeout` (его нет на macOS).
+Only tests that need a specific OS are skipped: the command wrapper in real
+sh/bash/dash/zsh and file permissions (Linux/macOS), the Unix socket and the worker process
+(Linux/macOS), the timeout through coreutils `timeout` (macOS does not have it).
 
-GitHub Actions (`.github/workflows/backend.yml`) на каждый push в `main` и pull request
-с изменениями в `backend/` запускает `ruff check`, `ruff format --check` и pytest на
-Windows, Linux и macOS, а на Linux ещё раз с `SYNEX_TEST_SHELL=emulated`. Перед push
-то же самое локально:
+GitHub Actions (`.github/workflows/backend.yml`) runs `ruff check`, `ruff format --check` and
+pytest on Windows, Linux and macOS on every push to `main` and every pull request with
+changes in `backend/`, and once more on Linux with `SYNEX_TEST_SHELL=emulated`. The same
+locally before a push:
 
 ```bash
 uv run ruff check . && uv run ruff format --check . && uv run pytest
 ```
 
-`tests/test_real_worker.py` запускает настоящий воркер: `synex_worker.exe` на Windows,
-сборку `synex_worker` под Linux/macOS (ищется так же, как при запуске бэкенда) или
-команду из `SYNEX_TEST_WORKER` (например, скрипт, который запускает exe через wine).
-Проверки с реальным SSH-сервером включаются переменными окружения:
+`tests/test_real_worker.py` starts the real worker: `synex_worker.exe` on Windows, the
+`synex_worker` build on Linux/macOS (found the same way as when the backend starts) or the
+command from `SYNEX_TEST_WORKER` (for example, a script that runs the exe through wine).
+Checks against a real SSH server are enabled with environment variables:
 
 ```powershell
 $env:SYNEX_TEST_SSH_HOST="1.2.3.4"; $env:SYNEX_TEST_SSH_USER="root"
 $env:SYNEX_TEST_SSH_KEY="C:/Users/me/.ssh/id_ed25519"
-$env:SYNEX_TEST_SSH_PASSWORD="..."   # необязательно: проверить вход по паролю
+$env:SYNEX_TEST_SSH_PASSWORD="..."   # optional: check password login
 uv run pytest tests/test_real_worker.py -v
 ```
 
-### Интеграционные тесты: полный цикл
+### Integration tests: the full cycle
 
-`tests/integration/` проверяет цепочку **UI → FastAPI → synex_worker → SSH-сервер →
-ответ в UI** целиком: бэкенд запущен на uvicorn с настоящим воркером, а клиент ведёт
-себя как UI — REST и оба WebSocket (`/ws` и терминал сессии) с заголовком `Origin`
-страницы UI. Что проверяется:
+`tests/integration/` checks the whole chain **UI → FastAPI → synex_worker → SSH server →
+answer in the UI**: the backend runs on uvicorn with the real worker, and the client behaves
+like the UI: REST and both WebSockets (`/ws` and the session terminal) with the UI page's
+`Origin` header. What is checked:
 
-- терминал: команда через WebSocket, вывод, stderr, код возврата, cwd, таймаут на
-  сервере, закрытие сессии доходит до терминала и до `/ws`;
-- метрики сервера в `/ws`: один сервер на все его сессии, пропадает с последней; сеть и
-  раздел `/` от воркера, счётчик принятых байт не убывает;
-- две сессии выполняют команды параллельно;
-- вход по ключу с парольной фразой, по ключу из хранилища, по паролю; ошибки входа и
-  подключения доходят до UI как 502, молчащий сервер — как 504 `ssh_connect_timeout`;
-- команда, которая читает ввод (`cat`, `read`), не ждёт до таймаута;
-- удалённая папка сессии: команда не выполняется в домашней папке;
-- переподключение терминала с `since`: UI получает пропущенный вывод по порядку;
-- падение воркера: терминал и `/ws` узнают о потере сессии, бэкенд перезапускает
-  воркер, новая сессия работает;
-- ключ сервера (TOFU): первое подключение отвечает 409 с отпечатком, который воркер
-  посчитал так же, как `ssh-keygen -lf` по ключу sshd; после подтверждения сессия
-  открывается; чужой отпечаток даёт 409 `ssh_host_key_mismatch` без повтора, замена
-  только с `replace`. Остальные тесты подтверждают ключ своего sshd заранее (фикстура
-  `ui`), у внешнего сервера отпечаток показывает первое подключение;
-- сервер, записанный в `known_hosts` OpenSSH, подключается без подтверждения, а другой
-  ключ того же типа в этом файле даёт 409 `ssh_host_key_mismatch`;
-- все плагины загружаются (`PLUGINS_ENABLED=*`); сохранённое подключение открывает
-  сессию, а `connection_id` доходит до `/ws`;
-- критерий вехи B4: SSH, SFTP, мониторинг и Docker выключаются и включаются на
-  работающем backend, UI видит это в `/ws`, API выключенного модуля отвечает 404, после
-  включения всё снова работает (выключение `ssh` закрывает сессии, новая открывается);
-- сценарий MVP целиком (`test_mvp_scenario.py`): «подключился — передал файл — смотрит
-  метрики — перезапустил контейнер» с проверкой критериев устава: SSH-подключение не
-  дольше 3 с, файл 100 МБ без ошибок, метрики не реже 1 раза в секунду и не старше
-  500 мс, перезапуск, остановка, запуск и логи трёх контейнеров. С `-s` тест печатает
-  сводку с замерами;
-- git на сервере: репозиторий отстаёт от origin, `status`, `fetch` и деплой (`pull` и
-  команда в папке репозитория), терминал сессии служебных команд не видит;
-- docker на сервере: контейнер из образа, собранного из пустого архива (без скачивания),
-  список, логи, ошибка запуска и удаление. Нужен работающий Docker, иначе тест
-  пропускается;
-- критерий MVP по Docker: три запущенных контейнера (образ собирается из `sh` и `sleep`
-  этой машины, без сети): логи каждого, живой лог по WebSocket без повторов и с
-  переподключением, `restart`, `stop`, `start`, `stats`;
-- файлы на сервере (SFTP воркера): папки, имена с пробелами, кавычками и кириллицей,
-  загрузка и скачивание телом запроса, копирование и удаление папок, список на полторы
-  тысячи файлов с русскими именами;
-- критерий MVP по SFTP: файл 100 МБ уходит на сервер и возвращается, SHA-256 совпадает,
-  прогресс идёт в `/ws`, а команда терминала проходит во время передачи. Размер задаёт
-  `SYNEX_TEST_SFTP_MB`; тест печатает время и скорость (`-s`). На локальном `sshd`:
-  около 1с в каждую сторону;
-- папка целиком: больше ста файлов, вложенные и пустая папки, имена с пробелами,
-  кавычками и кириллицей уходят на сервер и возвращаются без отличий; объединение с
-  существующей папкой; ссылка на сервере пропускается; отмена посреди большого файла не
-  оставляет ни папки, ни временных файлов на сервере и на этом компьютере.
+- terminal: a command over WebSocket, output, stderr, exit code, cwd, the timeout on the
+  server, closing a session reaches the terminal and `/ws`;
+- server metrics in `/ws`: one server for all its sessions, it disappears with the last one;
+  network and the `/` partition from the worker, the received bytes counter does not
+  decrease;
+- two sessions run commands in parallel;
+- login with an encrypted key, with a key from the vault, with a password; login and
+  connection errors reach the UI as 502, a silent server as 504 `ssh_connect_timeout`;
+- a command that reads input (`cat`, `read`) does not wait until the timeout;
+- a deleted session folder: the command is not run in the home folder;
+- reconnecting the terminal with `since`: the UI gets the missed output in order;
+- a worker crash: the terminal and `/ws` learn about the lost session, the backend restarts
+  the worker, a new session works;
+- the server key (TOFU): the first connection answers 409 with a fingerprint the worker
+  computed the same way as `ssh-keygen -lf` from the sshd key; after confirmation the session
+  opens; a foreign fingerprint gives 409 `ssh_host_key_mismatch` without a retry, replacing
+  only with `replace`. The other tests confirm their sshd key in advance (the `ui` fixture),
+  for an external server the first connection shows the fingerprint;
+- a server recorded in the OpenSSH `known_hosts` connects without confirmation, and another
+  key of the same type in that file gives 409 `ssh_host_key_mismatch`;
+- all plugins load (`PLUGINS_ENABLED=*`); a saved connection opens a session, and
+  `connection_id` reaches `/ws`;
+- milestone B4: SSH, SFTP, monitoring and Docker are disabled and enabled on a running
+  backend, the UI sees it in `/ws`, the API of a disabled module answers 404, after enabling
+  everything works again (disabling `ssh` closes the sessions, a new one opens);
+- the whole MVP scenario (`test_mvp_scenario.py`): "connect, transfer a file, watch the
+  metrics, restart a container", checked against the project charter criteria: an SSH
+  connection within 3 s, a 100 MB file without errors, metrics at least once a second and no
+  older than 500 ms, restart, stop, start and logs of three containers. With `-s` the test
+  prints a summary with the measurements;
+- git on the server: a repository behind origin, `status`, `fetch` and a deploy (`pull` and a
+  command in the repository folder), the session terminal does not see the service commands;
+- docker on the server: a container from an image built from an empty archive (no download),
+  the list, logs, a start error and removal. Needs a running Docker, otherwise the test is
+  skipped;
+- the MVP criterion for Docker: three running containers (the image is built from `sh` and
+  `sleep` of this machine, without network): logs of each, a live log over WebSocket without
+  repeats and with a reconnect, `restart`, `stop`, `start`, `stats`;
+- files on the server (the worker's SFTP): folders, names with spaces, quotes and Cyrillic,
+  upload and download in a request body, copying and deleting folders, a listing of fifteen
+  hundred files with Russian names;
+- the MVP criterion for SFTP: a 100 MB file goes to the server and comes back, SHA-256
+  matches, progress goes to `/ws`, and a terminal command passes during the transfer. The size
+  is set by `SYNEX_TEST_SFTP_MB`; the test prints the time and speed (`-s`). On a local `sshd`
+  it takes about 1 s each way;
+- a whole folder: more than a hundred files, nested and empty folders, names with spaces,
+  quotes and Cyrillic go to the server and come back unchanged; merging with an existing
+  folder; a link on the server is skipped; a cancel in the middle of a big file leaves
+  neither the folder nor temporary files on the server and on this computer.
 
-Нужны воркер (как для `test_real_worker.py`) и SSH-сервер. Если `SYNEX_TEST_SSH_*`
-не заданы, на Linux и macOS тесты сами поднимают `sshd` на `127.0.0.1` со случайным
-портом и своими ключами (вход под текущим пользователем, система не меняется). Без
-воркера или SSH-сервера тесты пропускаются.
+They need a worker (as for `test_real_worker.py`) and an SSH server. If `SYNEX_TEST_SSH_*` is
+not set, on Linux and macOS the tests start their own `sshd` on `127.0.0.1` with a random
+port and their own keys (login as the current user, the system is not changed). Without a
+worker or an SSH server the tests are skipped.
 
 ```bash
-uv run pytest -m integration            # только интеграционные
-uv run pytest -m "not integration"      # всё, кроме них
-SYNEX_TEST_WORKER=./run_worker.sh uv run pytest -m integration   # exe через wine
+uv run pytest -m integration            # integration tests only
+uv run pytest -m "not integration"      # everything else
+SYNEX_TEST_WORKER=./run_worker.sh uv run pytest -m integration   # exe through wine
 ```
 
-В GitHub Actions их запускает отдельный джоб `integration`, дважды: с Linux-воркером из
-репозитория и с воркером, собранным из `core/` (`cargo build --release`), против `sshd`
-на раннере. Поэтому workflow запускается и при изменениях в `core/`: правка Rust-кода
-сразу проверяется вместе с бэкендом. Обычные джобы `test` идут с `-m "not integration"`.
+In GitHub Actions they run in a separate `integration` job, twice: with the Linux worker from
+the repository and with a worker built from `core/` (`cargo build --release`), against `sshd`
+on the runner. That is why the workflow also runs on changes in `core/`: a change to the Rust
+code is checked together with the backend right away. The regular `test` jobs run with
+`-m "not integration"`.
 
-`test_real_worker_raw_exit_codes` проверяет коды возврата самого воркера (исправлены в
-сборке 2026-11-14); со старой сборкой, где они всегда 0, тест `xfail`. `/api/ssh/exec`
-при `track_cwd=true` и так берёт код возврата из shell.
+`test_real_worker_raw_exit_codes` checks the exit codes of the worker itself (fixed in the
+2026-11-14 build); with an older build, where they are always 0, the test is `xfail`.
+`/api/ssh/exec` with `track_cwd=true` gets the exit code from the shell anyway.
 
-Воркер с 2026-11-14 подключается только с подтверждённым ключом сервера: тесты с
-`SYNEX_TEST_SSH_*` делают как UI — первое подключение узнаёт отпечаток
-(`host_key_unknown`), второе идёт с ним. Проверку в воркере тесты не выключают.
+Since 2026-11-14 the worker connects only with a confirmed server key: tests with
+`SYNEX_TEST_SSH_*` do what the UI does: the first connection learns the fingerprint
+(`host_key_unknown`), the second one uses it. The tests never turn the check off in the
+worker.
 
-`tests/fake_worker.py` повторяет поведение воркера сборок 2026-11-03 … 2026-11-17:
-сессия = `id` запроса, сессии принадлежат подключению, запросы подключения по очереди,
-`exit_code` всегда 0, проверка ключа сервера (`host_key_mode`), SFTP двух сборок
-(`sftp_build`), сеть и раздел `/` в метриках (`monitor_build`). `tests/ssh_helpers.py` собирает плагин ssh поверх него и запускает uvicorn
-для тестов WebSocket. `tests/worker_host.py` — отдельный процесс-«бэкенд» для тестов,
-где его убивают через `kill -9`.
+`tests/fake_worker.py` reproduces the behaviour of worker builds 2026-11-03 … 2026-11-17: a
+session = the request `id`, sessions belong to a connection, the requests of a connection
+run one by one, `exit_code` is always 0, server key verification (`host_key_mode`), SFTP of
+two builds (`sftp_build`), network and the `/` partition in metrics (`monitor_build`).
+`tests/ssh_helpers.py` builds the ssh plugin on top of it and runs uvicorn for the WebSocket
+tests. `tests/worker_host.py` is a separate "backend" process for the tests where it gets
+killed with `kill -9`.

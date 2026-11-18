@@ -1,26 +1,28 @@
-# Как работаем с репозиторием
+# How we work with the repository
 
-## Ветки и pull request
+**English** | [Русский](CONTRIBUTING.ru.md)
 
-- `main` — всегда рабочая версия. Напрямую в неё не пушим.
-- Своя задача — своя ветка: `<область>/<задача>`, например `core/worker`, `frontend/ui`, `backend/api`.
-- Готово — открываем pull request в `main`. Если есть кому посмотреть, просим одного ревьюера; не успеваем — мержим сами, но только с зелёными проверками.
-- Перед PR подтягиваем свежий `main`: `git pull --rebase origin main`.
+## Branches and pull requests
+
+- `main` is always a working version. Nobody pushes to it directly.
+- Your own task, your own branch: `<area>/<task>`, for example `core/worker`, `frontend/ui`, `backend/api`.
+- Done: open a pull request into `main`. If someone can review it, ask one reviewer; if there is no time, merge it yourself, but only with green checks.
+- Before a PR, pull the fresh `main`: `git pull --rebase origin main`.
 
 ```bash
-git switch -c <область>/<задача>          # новая ветка
-git add <файлы>
-git commit -m "<короткий комментарий>"
-git push -u origin <область>/<задача>     # дальше — PR на GitHub
+git switch -c <area>/<task>               # new branch
+git add <files>
+git commit -m "<short message>"
+git push -u origin <area>/<task>          # then open a PR on GitHub
 ```
 
-## Коммиты
+## Commits
 
-- Короткое сообщение в повелительном наклонении: «Добавить клиент IPC», «Исправить загрузку worker».
-- Один коммит — одно логическое изменение. История коммитов входит в оценку.
+- A short message in the imperative mood: "Add IPC client", "Fix worker startup".
+- One commit, one logical change. The commit history is part of the grade.
 
-## Что нельзя коммитить
+## What must not be committed
 
-- `.env`, ключи и токены — храним только в `.env`.
-- Данные проекта — они у каждого локально.
-- Файлы больше 10 МБ, кэш, журналы, виртуальные окружения — их отсекает `.gitignore`, но перед коммитом смотрим `git status`.
+- `.env`, keys and tokens: they live only in `.env`.
+- Project data: everyone keeps it locally.
+- Files over 10 MB, caches, logs, virtual environments: `.gitignore` filters them out, but check `git status` before committing.
