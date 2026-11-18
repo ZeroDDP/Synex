@@ -21,6 +21,8 @@
 * О каждой смене состояния в шину уходит событие plugin.status (хаб пересылает его в
   /ws). События, которые плагин объявил в BasePlugin.events, хаб пересылает в /ws,
   пока плагин включён.
+* Что пользователь включил и выключил на ходу, запоминается (choices.py) и при следующем
+  запуске накладывается на PLUGINS_ENABLED: набор плагинов переживает перезапуск.
 """
 
 from __future__ import annotations
@@ -42,6 +44,7 @@ from app.core.errors import AppError
 from app.core.event_bus import event_bus
 from app.core.locks import LoopLock
 from app.plugins.base import BasePlugin
+from app.plugins.choices import PluginChoices
 
 logger = structlog.get_logger()
 
@@ -101,9 +104,14 @@ class PluginManager:
         self,
         package: str = PLUGINS_PACKAGE,
         forwarder: Any = None,
+        choices: PluginChoices | None = None,
     ) -> None:
-        """forwarder: кто пересылает события шины в /ws (по умолчанию ws_hub)."""
+        """forwarder: кто пересылает события шины в /ws (по умолчанию ws_hub). choices:
+        где запоминается, что пользователь включил и выключил на ходу (без него набор
+        плагинов после перезапуска берётся только из настроек)."""
         self.package = package
+        self._choices = choices
+        self._configured: set[str] = set()  # плагины из PLUGINS_ENABLED (и * раскрыта)
         self.plugins: dict[str, BasePlugin] = {}  # подключённые, в порядке загрузки
         self._states: dict[str, PluginState] = {}
         self._forwarder = forwarder
@@ -157,7 +165,8 @@ class PluginManager:
         if ALL_PLUGINS in names:
             index = names.index(ALL_PLUGINS)
             names = [*names[:index], *self.installed(), *names[index + 1 :]]
-        queue = list(dict.fromkeys(names))
+        self._configured = set(names)
+        queue = self._with_choices(list(dict.fromkeys(names)))
         found: dict[str, BasePlugin] = {}
         index = 0
         while index < len(queue):
@@ -187,6 +196,28 @@ class PluginManager:
             self.plugins[name] = plugin
             self._states[name] = PluginState(name, PluginStatus.REGISTERED, plugin)
             logger.debug("Plugin registered", plugin=name, version=plugin.version)
+
+    def _with_choices(self, names: list[str]) -> list[str]:
+        """Набор из настроек с тем, что пользователь переключил на ходу в прошлые
+        запуски: выключенное убирается, включённое добавляется. Плагин, который нужен
+        включённому, всё равно включится как зависимость."""
+        if self._choices is None:
+            return names
+        choices = self._choices.read()
+        off = sorted(name for name in names if choices.get(name) is False)
+        on = sorted(name for name, enabled in choices.items() if enabled and name not in names)
+        if off or on:
+            logger.info("Plugins switched by the user earlier", enabled=on, disabled=off)
+        return [name for name in names if name not in off] + on
+
+    def _remember(self, names: list[str], enabled: bool) -> None:
+        """Запомнить, что пользователь включил или выключил плагины names. Запись нужна
+        только там, где выбор расходится с PLUGINS_ENABLED."""
+        if self._choices is None or not names:
+            return
+        self._choices.remember(
+            {name: None if (name in self._configured) == enabled else enabled for name in names}
+        )
 
     def attach(self, app: FastAPI, prefix: str) -> None:
         """Приложение, к которому enable подключает роуты плагинов, не подключённых при
@@ -356,16 +387,23 @@ class PluginManager:
         async with self._lock:
             order = self._closure(name)
             enabled = []
-            for item in order:
-                state = self._states[item]
-                if state.status == PluginStatus.LOADED:
-                    continue
-                self._mount(item)
-                state.status = PluginStatus.REGISTERED
-                self._schema_changed()
-                if not await self._load(item):
-                    raise PluginUnavailableError(f"Plugin '{item}' did not start: {state.error}")
-                enabled.append(item)
+            asked = []  # и тот, что не запустился: пользователь включил и его
+            try:
+                for item in order:
+                    state = self._states[item]
+                    if state.status == PluginStatus.LOADED:
+                        continue
+                    self._mount(item)
+                    state.status = PluginStatus.REGISTERED
+                    self._schema_changed()
+                    asked.append(item)
+                    if not await self._load(item):
+                        raise PluginUnavailableError(
+                            f"Plugin '{item}' did not start: {state.error}"
+                        )
+                    enabled.append(item)
+            finally:
+                self._remember(asked, True)
             return enabled
 
     async def disable(self, name: str, *, cascade: bool = False) -> list[str]:
@@ -397,6 +435,7 @@ class PluginManager:
                     await self._announce(item_state)
                 self._schema_changed()
                 disabled.append(item)
+            self._remember(disabled, False)
             return disabled
 
     def _closure(self, name: str) -> list[str]:

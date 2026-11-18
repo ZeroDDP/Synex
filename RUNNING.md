@@ -90,7 +90,8 @@ Backend проверяется и без UI:
 - http://127.0.0.1:8000/api/plugins: какие плагины загружены. Плагин выключается и
   включается без перезапуска backend: `POST /api/plugins/docker/disable` и
   `POST /api/plugins/docker/enable` (из Swagger или
-  `curl -X POST http://127.0.0.1:8000/api/plugins/docker/disable`);
+  `curl -X POST http://127.0.0.1:8000/api/plugins/docker/disable`). Выбор запоминается:
+  после перезапуска backend выключенный плагин остаётся выключенным;
 - с `DEBUG=true` в `backend/.env` на http://127.0.0.1:8000/api/docs есть Swagger: там
   можно сохранить подключение (`POST /api/connections`), открыть SSH-сессию
   (`POST /api/connections/{id}/connect`; первый раз ответ 409 с отпечатком ключа
@@ -161,10 +162,11 @@ npm run build
 | Backend: `Invalid settings in backend/.env` | В `.env` неверное значение; в сообщении названа настройка. Исправьте или очистите её |
 | В логе backend `forbidden_origin` | UI открыт не с http://localhost:5173 (или http://127.0.0.1:5173). Откройте этот адрес или добавьте свой в `ALLOWED_ORIGINS` |
 | В `/api/plugins` нет `connections`, `docker`, `git`, `sftp` | В `backend/.env` старый `PLUGINS_ENABLED`: поставьте `*` |
+| Плагин есть в `PLUGINS_ENABLED`, но в `/api/plugins` он `disabled` | Его выключили через `POST /api/plugins/<имя>/disable` в один из прошлых запусков. Включите его (`/enable`) или удалите `plugins.json` (где он лежит, см. строку про `plugin_disabled`) |
 | Подключение отвечает 409 `ssh_host_key_unknown` | Так и должно быть при первом подключении к серверу: воркер подключается только к серверу с подтверждённым ключом. Серверы, к которым вы уже подключались через `ssh` (их ключ есть в `~/.ssh/known_hosts`), подключаются без подтверждения. Сверьте отпечаток из ответа (на сервере: `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`) и подтвердите его: `POST /api/ssh/known-hosts`, затем подключитесь снова |
 | Подключение отвечает 409 `ssh_host_key_mismatch` | Ключ сервера сменился: сервер переустановили или это подмена. Не подключайтесь, пока не выясните причину. Если смена ожидаемая, подтвердите новый ключ: `POST /api/ssh/known-hosts` с `replace: true` |
 | Подключение отвечает 409 `ssh_host_key_revoked` | Ключ сервера помечен как отозванный (`@revoked`) в `known_hosts` OpenSSH на этом компьютере (файл и строка названы в `detail`). Не подключайтесь: выясните, почему ключ отозван |
-| Модуль отвечает 404 `plugin_disabled` | Его выключили на ходу: `POST /api/plugins/<имя>/enable` (или перезапустите backend) |
+| Модуль отвечает 404 `plugin_disabled` | Его выключили на ходу, и backend это помнит после перезапуска: `POST /api/plugins/<имя>/enable`. Вернуть набор из `PLUGINS_ENABLED` целиком: удалите `%LOCALAPPDATA%\Synex\plugins.json` (Linux: `~/.local/share/synex/plugins.json`, macOS: `~/Library/Application Support/Synex/plugins.json`) и перезапустите backend |
 | Файлы: 502 `sftp_unavailable` и в тексте `synex_worker build has no SFTP` | Старая сборка воркера без SFTP. Обновите репозиторий (`git pull`) или соберите воркер: `cd core && cargo build --release`, затем перезапустите backend |
 | Файлы: 502 `sftp_unavailable` и в тексте `Subsystem sftp` | На сервере выключен SFTP: добавьте в `/etc/ssh/sshd_config` строку `Subsystem sftp internal-sftp` и перезапустите sshd |
 | Linux: `GLIBC_2.38 not found` | Готовый воркер не подходит: соберите его (`cd core && cargo build --release`) |

@@ -18,6 +18,7 @@ from app.core.security import (
     allowed_origins,
     warn_if_exposed,
 )
+from app.plugins.choices import PluginChoices
 from app.plugins.manager import PLUGIN_STATUS_EVENT, PluginManager
 from app.worker import WORKER_STATUS_EVENT, worker_manager
 from app.ws import METRICS_EVENT, FakeMetricsPublisher, ws_hub
@@ -88,7 +89,9 @@ def create_app() -> FastAPI:
     register_error_handlers(app)
 
     api_router = build_api_router()
-    plugins = PluginManager()
+    # Что пользователь включил и выключил на ходу, действует и после перезапуска
+    choices = PluginChoices(settings.plugins_state_path) if settings.PLUGINS_REMEMBER else None
+    plugins = PluginManager(choices=choices)
     plugins.discover(api_router)
     app.include_router(api_router)
     app.include_router(ws_router)

@@ -48,7 +48,8 @@ def build_api_router() -> APIRouter:
             "status: `loaded` работает; `failed` включён, но on_load упал или не загрузилась "
             "зависимость (его эндпоинты отвечают 503 `plugin_unavailable`); `skipped` не "
             "установлен, не импортируется или нет зависимости; `disabled` установлен, но "
-            "выключен (не в PLUGINS_ENABLED или через /disable), его эндпоинты отвечают 404 "
+            "выключен (не в PLUGINS_ENABLED или через /disable, в том числе в прошлый "
+            "запуск), его эндпоинты отвечают 404 "
             "`plugin_disabled`; `registered` ещё не загружен. Причина в `error`. Смена "
             "состояния приходит в /ws событием `plugin.status`."
         ),
@@ -66,7 +67,8 @@ def build_api_router() -> APIRouter:
             "Подгружает и пакет, которого не было при старте. Роуты плагина появляются в "
             "API, его события начинают приходить в `/ws`. 404 `plugin_not_found`: пакета "
             "нет или он не импортируется; 503 `plugin_unavailable`: плагин не запустился "
-            "(причина в `detail`)."
+            "(причина в `detail`). Выбор запоминается: после перезапуска backend плагин "
+            "снова включён (`PLUGINS_REMEMBER`)."
         ),
     )
     async def enable_plugin(name: PluginName, request: Request) -> PluginChange:
@@ -83,7 +85,8 @@ def build_api_router() -> APIRouter:
             "on_unload плагина; дальше его эндпоинты отвечают 404 `plugin_disabled` и "
             "пропадают из OpenAPI. Если от плагина зависят включённые, 409 "
             "`plugin_in_use`; с `cascade=true` они выключаются тоже. Выключение ssh "
-            "закрывает все SSH-сессии."
+            "закрывает все SSH-сессии. Выбор запоминается: после перезапуска backend "
+            "плагин остаётся выключенным (`PLUGINS_REMEMBER`)."
         ),
     )
     async def disable_plugin(

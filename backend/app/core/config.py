@@ -96,6 +96,12 @@ class Settings(BaseSettings):
     # Плагины через запятую; * значит все установленные (app/plugins/<name>/plugin.py).
     # Нужные плагинам зависимости включаются сами.
     PLUGINS_ENABLED: str = "*"
+    # Помнить, что пользователь включил и выключил на ходу (POST /api/plugins/{name}/enable
+    # и /disable): после перезапуска его выбор накладывается на PLUGINS_ENABLED. false:
+    # после перезапуска включено ровно то, что в PLUGINS_ENABLED.
+    PLUGINS_REMEMBER: bool = True
+    # Где хранится этот выбор. По умолчанию plugins.json рядом с keys.json.
+    PLUGINS_STATE_PATH: Path | None = None
 
     # Мониторинг серверов (плагин monitor). Как часто опрашивать сервер и как часто
     # отправлять метрики в /ws, сек.
@@ -178,6 +184,14 @@ class Settings(BaseSettings):
         if self.KNOWN_HOSTS_PATH.is_absolute():
             return self.KNOWN_HOSTS_PATH
         return BASE_DIR / self.KNOWN_HOSTS_PATH
+
+    @property
+    def plugins_state_path(self) -> Path:
+        if self.PLUGINS_STATE_PATH is None:
+            return user_data_dir() / "plugins.json"
+        if self.PLUGINS_STATE_PATH.is_absolute():
+            return self.PLUGINS_STATE_PATH
+        return BASE_DIR / self.PLUGINS_STATE_PATH
 
     @property
     def ipc_socket_path(self) -> str:
