@@ -1,69 +1,247 @@
 <!-- Оптимизировать svg иконки -->
 
 <script>
-  import { servers } from './stores.js';
+  import { onMount } from 'svelte';
+  import { BACKEND_URL } from './api/config.js';
 
-  // проп закрытия экрана
-  export let onClose;
+  export let onClose = () => {};
+  /** @type {(session: { session_id: string }) => void} */
+  export let onConnected = () => {};
 
-  // локальное состояние экрана
-  // Выбранный сервер слева (по умолчанию — первый из стора)
-  let selectedId = '';
-
-  // Поля формы
   let host = '';
   let port = '22';
   let username = '';
   let passphrase = '';
   let sshKey = '';
-
-  // Режим авторизации: на макете активен SSH Key
-  let authMode = 'key'; // 'password' | 'key'
-
-  // Save server to list
-  let saveToList = true;
-
-  // bool для отображения ошибки Test connection
-  let showError = false;
-
-  // Строка поиска (Saved servers)
+  let authMode = 'key';
   let search = '';
+  let activeSessions = [];
+  let sessionsError = '';
+  let requestError = '';
+  let requestMessage = '';
+  let pendingHostKey = null;
+  let pendingAttempt = null;
+  let working = false;
 
-  // Список слева (Поиск Saved servers)
-  $: filtered = $servers.filter(
-    (s) => s.name.toLowerCase().includes(search.toLowerCase()) ||
-           s.host.includes(search)
+  $: filtered = activeSessions.filter((session) =>
+    `${session.username}@${session.host}:${session.port}`.toLowerCase().includes(search.toLowerCase())
   );
 
-  // Заполнение формы при нажатии на сервер в списке
-  function selectServer(s) {
-    selectedId = s.id;
-    host = s.host;
-    username = 'admin';
-    showError = false;
+  function selectSession(session) {
+    onConnected(session);
+    onClose();
   }
 
-  // Очистка формы при нажатии на add
   function startNew() {
-    selectedId = '';
     host = '';
     port = '22';
     username = '';
     passphrase = '';
     sshKey = '';
-    showError = false;
+    requestError = '';
+    requestMessage = '';
+    pendingHostKey = null;
+    pendingAttempt = null;
   }
 
-  // Заглушка для демонстрации ошибки
-  function testConnection() {
-    showError = true;
+  function errorMessage(error) {
+    return error instanceof Error ? error.message : 'Unexpected backend error.';
   }
 
-  // Заглушка подключения от кн. connect
-  function connect() {
-    // TODO: интеграция с бэкендом
-    console.log('connect', { host, port, username, authMode, saveToList });
+  class BackendRequestError extends Error {
+    constructor(message, status, data) {
+      super(message);
+      this.name = 'BackendRequestError';
+      this.status = status;
+      this.data = data;
+    }
   }
+
+  async function backendRequest(path, options = {}) {
+    let response;
+    try {
+      response = await fetch(`${BACKEND_URL}${path}`, options);
+    } catch (error) {
+      throw new Error(`Could not reach backend at ${BACKEND_URL}: ${errorMessage(error)}`);
+    }
+
+    const data = await response.json().catch(() => null);
+    if (!response.ok) {
+      const detail = typeof data?.detail === 'string'
+        ? data.detail
+        : Array.isArray(data?.detail)
+          ? data.detail.map((item) => item.msg).join('; ')
+          : `Backend returned HTTP ${response.status}.`;
+      throw new BackendRequestError(detail, response.status, data);
+    }
+    return data;
+  }
+
+  async function loadSessions() {
+    sessionsError = '';
+    try {
+      const sessions = await backendRequest('/api/ssh/sessions');
+      if (!Array.isArray(sessions) || sessions.some((session) => typeof session?.session_id !== 'string')) {
+        throw new Error('Backend returned an invalid SSH session list.');
+      }
+      activeSessions = sessions;
+    } catch (error) {
+      sessionsError = errorMessage(error);
+    }
+  }
+
+  function connectionPayload() {
+    const numericPort = Number(port);
+    if (!host.trim() || !username.trim()) {
+      throw new Error('Host and username are required.');
+    }
+    if (!Number.isInteger(numericPort) || numericPort < 1 || numericPort > 65535) {
+      throw new Error('Port must be a number between 1 and 65535.');
+    }
+
+    const payload = { host: host.trim(), port: numericPort, username: username.trim() };
+    if (authMode === 'password') {
+      if (!passphrase) throw new Error('Password is required.');
+      payload.password = passphrase;
+    } else {
+      if (!sshKey.trim()) throw new Error('Enter the absolute path to the SSH private key.');
+      payload.key_path = sshKey.trim();
+      if (passphrase) payload.passphrase = passphrase;
+    }
+    return payload;
+  }
+
+  async function openSession(payload) {
+    const session = await backendRequest('/api/ssh/connect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (typeof session?.session_id !== 'string') {
+      throw new Error('Backend connected but returned no SSH session ID.');
+    }
+    return session;
+  }
+
+  async function performConnectionAttempt(attempt) {
+    const session = await openSession(attempt.payload);
+    if (attempt.action === 'test') {
+      try {
+        await backendRequest(`/api/ssh/sessions/${encodeURIComponent(session.session_id)}`, {
+          method: 'DELETE'
+        });
+      } catch (error) {
+        await loadSessions();
+        throw new Error(
+          `Connected, but could not close test session ${session.session_id}: ${errorMessage(error)}`
+        );
+      }
+      requestMessage = 'SSH connection succeeded and the test session was closed.';
+      await loadSessions();
+      return;
+    }
+
+    await loadSessions();
+    onConnected(session);
+    onClose();
+  }
+
+  function showHostKeyPrompt(error, attempt) {
+    const data = error instanceof BackendRequestError ? error.data : null;
+    const key = data?.host_key;
+    if (
+      !(error instanceof BackendRequestError) ||
+      error.status !== 409 ||
+      data?.error !== 'ssh_host_key_unknown' ||
+      !attempt ||
+      !key ||
+      typeof key.host !== 'string' ||
+      key.host.toLowerCase() !== attempt.payload.host.toLowerCase() ||
+      key.port !== attempt.payload.port ||
+      typeof key.fingerprint !== 'string' ||
+      !/^SHA256:[A-Za-z0-9+/]{43}$/.test(key.fingerprint)
+    ) {
+      return false;
+    }
+
+    pendingHostKey = {
+      host: key.host,
+      port: key.port,
+      fingerprint: key.fingerprint,
+      keyType: typeof key.key_type === 'string' ? key.key_type : ''
+    };
+    pendingAttempt = attempt;
+    requestError = '';
+    requestMessage = '';
+    return true;
+  }
+
+  async function runConnection(action) {
+    working = true;
+    requestError = '';
+    requestMessage = '';
+    pendingHostKey = null;
+    pendingAttempt = null;
+    let attempt = null;
+    try {
+      attempt = { action, payload: connectionPayload() };
+      await performConnectionAttempt(attempt);
+    } catch (error) {
+      if (!showHostKeyPrompt(error, attempt)) requestError = errorMessage(error);
+    } finally {
+      working = false;
+    }
+  }
+
+  async function acceptHostKey() {
+    if (working || !pendingHostKey || !pendingAttempt) return;
+    const hostKey = pendingHostKey;
+    const attempt = pendingAttempt;
+    working = true;
+    requestError = '';
+    requestMessage = '';
+    try {
+      await backendRequest('/api/ssh/known-hosts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          host: hostKey.host,
+          port: hostKey.port,
+          fingerprint: hostKey.fingerprint,
+          key_type: hostKey.keyType || null
+        })
+      });
+      pendingHostKey = null;
+      pendingAttempt = null;
+      await performConnectionAttempt(attempt);
+    } catch (error) {
+      if (!showHostKeyPrompt(error, attempt)) {
+        pendingHostKey = null;
+        pendingAttempt = null;
+        requestError = errorMessage(error);
+      }
+    } finally {
+      working = false;
+    }
+  }
+
+  function rejectHostKey() {
+    pendingHostKey = null;
+    pendingAttempt = null;
+    requestMessage = 'Host key was not accepted. No connection was made.';
+  }
+
+  async function connect() {
+    await runConnection('connect');
+  }
+
+  async function testConnection() {
+    await runConnection('test');
+  }
+
+  onMount(() => {
+    void loadSessions();
+  });
 </script>
 
 <div class="screen">
@@ -71,35 +249,41 @@
 
   <section class="panel saved">
     <header class="saved__head">
-      <span class="saved__title">SAVED SERVERS</span>
+      <span class="saved__title">ACTIVE SSH SESSIONS</span>
       <button type="button" class="saved__add" on:click={startNew}>+ Add</button>
     </header>
 
     <input
       class="search"
       type="text"
-      placeholder="Saved servers"
+      placeholder="Active sessions"
       bind:value={search}
     />
 
+    {#if sessionsError}
+      <div class="sessions-error" role="alert">{sessionsError}</div>
+    {/if}
+
     <ul class="saved__list">
-      {#each filtered as s (s.id)}
+      {#each filtered as session (session.session_id)}
         <li>
           <button
             type="button"
             class="srv"
-            class:srv--active={s.id === selectedId}
-            on:click={() => selectServer(s)}
+            on:click={() => selectSession(session)}
           >
-            <span class="dot" data-status={s.status} aria-hidden="true"></span>
+            <span class="dot" data-status="online" aria-hidden="true"></span>
             <span class="srv__body">
-              <span class="srv__name">{s.name}</span>
-              <span class="srv__sub">admin@{s.host}</span>
+              <span class="srv__name">{session.username}@{session.host}</span>
+              <span class="srv__sub">Port {session.port}</span>
             </span>
           </button>
         </li>
       {/each}
     </ul>
+    {#if !sessionsError && filtered.length === 0}
+      <p class="sessions-empty">No active SSH sessions.</p>
+    {/if}
   </section>
 
    <!-- правая панель -->
@@ -107,7 +291,39 @@
     <h2 class="form__title">New connection</h2>
     <p class="form__sub">Connect over SSH to a remote server</p>
 
-    {#if showError}
+    {#if pendingHostKey}
+      <div class="host-key-prompt" role="alert">
+        <strong>Unknown SSH host key</strong>
+        <p>
+          Verify this fingerprint with the server administrator or another trusted source before
+          accepting. Synex will remember it for this host and port.
+        </p>
+        <dl class="host-key-details">
+          <div>
+            <dt>Server</dt>
+            <dd>{pendingHostKey.host}:{pendingHostKey.port}</dd>
+          </div>
+          {#if pendingHostKey.keyType}
+            <div>
+              <dt>Key type</dt>
+              <dd>{pendingHostKey.keyType}</dd>
+            </div>
+          {/if}
+          <div>
+            <dt>Fingerprint</dt>
+            <dd><code>{pendingHostKey.fingerprint}</code></dd>
+          </div>
+        </dl>
+        <div class="host-key-actions">
+          <button type="button" class="btn btn--primary" on:click={acceptHostKey} disabled={working}>
+            {working ? 'Connecting…' : 'Accept'}
+          </button>
+          <button type="button" class="btn btn--ghost" on:click={rejectHostKey} disabled={working}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    {:else if requestError}
       <div class="banner" role="alert">
 
         <svg width="34" height="30" viewBox="0 0 65 57" fill="none" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
@@ -125,8 +341,11 @@
         </svg>
 
         <!-- Текст ошибки -->
-        <span class="banner__text">Couldn't connected. Host didn't resposed</span>
+        <span class="banner__text">{requestError}</span>
       </div>
+    {/if}
+    {#if requestMessage}
+      <div class="success-message" role="status">{requestMessage}</div>
     {/if}
 
     <div class="row row--split">
@@ -136,7 +355,7 @@
       </label>
       <label class="field field--port">
         <span class="field__label">Port</span>
-        <input class="input" type="number" bind:value={port} />
+        <input class="input" type="number" min="1" max="65535" bind:value={port} />
       </label>
     </div>
 
@@ -182,28 +401,22 @@
       </label>
     {:else}
       <label class="field">
-        <span class="field__label">Passphrase(optional)</span>
+        <span class="field__label">Passphrase (optional)</span>
         <input class="input" type="password" bind:value={passphrase} />
       </label>
       <label class="field">
-        <span class="field__label">SSH Key</span>
-        <input class="input" type="text" bind:value={sshKey} />
+        <span class="field__label">SSH private key path</span>
+        <input class="input" type="text" bind:value={sshKey} placeholder="Absolute path on the backend host" />
       </label>
     {/if}
 
-    <label class="check">
-      <input type="checkbox" bind:checked={saveToList} />
-      <span class="check__box" aria-hidden="true">
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 15" width="12" height="9" fill="none">
-        <path d="M1 7.566l6.527 5.472L18.556 1" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-        </svg>
-      </span>
-      <span class="check__label">Save server to list</span>
-    </label>
-
     <div class="actions">
-      <button type="button" class="btn btn--primary" on:click={connect}>Connect</button>
-      <button type="button" class="btn btn--outline" on:click={testConnection}>Test connection</button>
+      <button type="button" class="btn btn--primary" on:click={connect} disabled={working}>
+        {working ? 'Connecting…' : 'Connect'}
+      </button>
+      <button type="button" class="btn btn--outline" on:click={testConnection} disabled={working}>
+        Test connection
+      </button>
       <button type="button" class="btn btn--ghost" on:click={onClose}>Cancel</button>
     </div>
   </section>
@@ -273,6 +486,17 @@
     gap: var(--synex-space-4);
   }
 
+  .sessions-error,
+  .sessions-empty {
+    margin: var(--synex-space-3) 0;
+    color: var(--synex-text-muted);
+    font-size: var(--font-size-12);
+  }
+
+  .sessions-error {
+    color: var(--synex-danger-fg);
+  }
+
   .srv {
     width: 100%;
     height: 80px;
@@ -288,11 +512,6 @@
     font-family: var(--font-host);
   }
   .srv:hover { background: var(--synex-bg-hover); }
-  .srv--active {
-    background: var(--synex-bg-active);
-    border-color: var(--synex-accent);
-  }
-
   .dot {
     flex: 0 0 auto;
     width: 8px; height: 8px;
@@ -300,8 +519,6 @@
     background: var(--synex-offline);
   }
   .dot[data-status='online']   { background: var(--synex-ok); }
-  .dot[data-status='warning']  { background: var(--synex-warning); }
-  .dot[data-status='critical'] { background: var(--synex-danger-fg); }
 
   .srv__body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
   .srv__name { font-size: var(--font-size-16); font-weight: 400; justify-content: center; }
@@ -314,7 +531,7 @@
 
   .banner {
     display: flex;
-    align-items: center;
+    align-items: flex-start;
     gap: var(--synex-space-3);
     padding: var(--synex-space-3) var(--synex-space-4);
     margin-bottom: var(--synex-space-4);
@@ -323,8 +540,75 @@
     background: var(--synex-danger-bg);
     color: var(--synex-danger-fg);
   }
-  .banner__icon { flex: 0 0 auto; }
-  .banner__text { font-size: 12px; }
+
+  .banner svg {
+    flex: 0 0 auto;
+  }
+
+  .banner__text {
+    min-width: 0;
+    font-size: 12px;
+    overflow-wrap: anywhere;
+  }
+
+  .host-key-prompt {
+    min-width: 0;
+    padding: var(--synex-space-3) var(--synex-space-4);
+    margin-bottom: var(--synex-space-4);
+    border: 1px solid var(--synex-warning);
+    border-radius: var(--synex-radius-sm);
+    background: var(--synex-bg-surface);
+    color: var(--synex-text-primary);
+  }
+
+  .host-key-prompt > strong {
+    color: var(--synex-warning);
+  }
+
+  .host-key-prompt p {
+    margin: var(--synex-space-2) 0;
+    color: var(--synex-text-secondary);
+    font-size: var(--font-size-12);
+  }
+
+  .host-key-details {
+    display: grid;
+    gap: var(--synex-space-2);
+    margin: var(--synex-space-3) 0;
+    font-size: var(--font-size-12);
+  }
+
+  .host-key-details > div {
+    min-width: 0;
+  }
+
+  .host-key-details dt {
+    color: var(--synex-text-muted);
+  }
+
+  .host-key-details dd {
+    min-width: 0;
+    margin: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .host-key-details code {
+    font-family: var(--font-mono);
+    overflow-wrap: anywhere;
+  }
+
+  .host-key-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--synex-space-2);
+  }
+
+  .success-message {
+    overflow-wrap: anywhere;
+    margin-bottom: var(--synex-space-4);
+    color: var(--synex-ok);
+    font-size: var(--font-size-12);
+  }
 
   .row { display: flex; flex-direction: column; gap: var(--synex-space-2); }
   .row--split { flex-direction: row; gap: var(--synex-space-4); }
@@ -367,55 +651,6 @@
   .tab--active svg path {
     stroke:#FF7B00;
   }
-
-  .check { display: flex; align-items: center; gap: var(--synex-space-2); margin-bottom: var(--synex-space-4); cursor: pointer; }
-  .check input { position: absolute; opacity: 0; width: 0; height: 0; }
-input[type="checkbox"] {
-  position: absolute;
-  opacity: 0;
-  width: 0;
-  height: 0;
-}
-
-
-/* Checkbox Save server to list */
-input[type="checkbox"] {
-  position: absolute;
-  opacity: 0;
-}
-.check__box {
-  width: var(--synex-space-4-5);
-  height: var(--synex-space-4-5);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--synex-border-strong);
-  border-radius: 4px;
-}
-.check__box svg {
-  display: none;
-  stroke: white;
-}
-input:checked + .check__box {
-  background: var(--synex-brand-primary, #FF7B00);
-  border-color: transparent;
-}
-input:checked + .check__box svg {
-  display: block;
-}
-
-
-
-
-  .check input:checked + .check__box {
-    background: var(--synex-accent);
-    border-color: var(--synex-accent);
-    color: var(--synex-accent-on);
-  }
-.check__label {
-  font-size: 12px;
-  color: var(--synex-text-secondary);
-}
 
 .actions {
   display: flex;
