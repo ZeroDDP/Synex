@@ -1,36 +1,66 @@
 <script>
-  import { metrics, servers, chart } from '../stores.js';
+  import { chart, metrics, selectedServerId, servers } from '../stores.js';
 
   const RADIUS = 27;
   const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
+  const chartRanges = [
+    { id: '1m', label: '1 min' },
+    { id: '5m', label: '5 min' },
+    { id: '1h', label: '1 hr' }
+  ];
+  let selectedRange = '5m';
+  $: rangePoints = selectedRange === '1m' ? 120 : selectedRange === '1h' ? 7200 : 600;
+  $: rangeStartLabel = selectedRange === '1m' ? '-1 min' : selectedRange === '1h' ? '-1 hr' : '-5 min';
+  $: rangeMiddleLabel = selectedRange === '1m' ? '-30 sec' : selectedRange === '1h' ? '-30 min' : '-2:30 min';
 
+  /** @param {{ value: number|null, max: number }} card */
   function fraction(card) {
+    if (card.value === null || card.value === undefined) return 0;
     return Math.max(0, Math.min(1, card.value / card.max));
   }
 
+  /** @param {{ value: number|null, max: number }} card */
   function offset(card) {
     return CIRCUMFERENCE * (1 - fraction(card));
   }
 
+  /** @param {{ value: number|null, crit: number, warn: number }} card */
   function level(card) {
+    if (card.value === null || card.value === undefined) return 'ok';
     if (card.value >= card.crit) return 'critical';
     if (card.value >= card.warn) return 'warning';
     return 'ok';
   }
 
-  function points(series) {
-    const n = series.length;
-    return series
+  /** @param {(number|null)[]} series @param {number} sampleCount */
+  function points(series, sampleCount) {
+    const visibleSeries = series.slice(-sampleCount);
+    const offset = sampleCount - visibleSeries.length;
+    return visibleSeries
       .map((v, i) => {
-        const x = (i / (n - 1)) * 600;
+        if (v === null || v === undefined) return null;
+        const x = ((offset + i + 1) / sampleCount) * 600;
         const y = 200 - (v / 100) * 200;
         return x + ',' + y;
       })
+      .filter(Boolean)
       .join(' ');
   }
 
-  function lastTop(series) {
-    return 100 - series[series.length - 1];
+  /** @param {(number|null)[]} series @param {number} sampleCount */
+  function lastTop(series, sampleCount) {
+    const lastValue = series
+      .slice(-sampleCount)
+      .reverse()
+      .find((value) => value !== null && value !== undefined);
+    return lastValue === undefined ? 100 : 100 - lastValue;
+  }
+
+  /** @param {string} serverId */
+  function selectServer(serverId) {
+    if ($selectedServerId === serverId) return;
+    selectedServerId.set(serverId);
+    chart.set({ cpu: [], ram: [], network: [] });
   }
 
   const yLabels = [100, 90, 70, 50, 0];
@@ -65,9 +95,10 @@
         <div class="metric-text">
           <span class="metric-label">{card.label}</span>
           <span class="metric-value">
-            {card.value}<span class="metric-unit">{card.unit}</span>
+            {card.value === null || card.value === undefined ? '—' : Math.round(card.value)}
+            <span class="metric-unit">{card.value === null || card.value === undefined ? '' : card.unit}</span>
           </span>
-          <span class="metric-info">{card.info}</span>
+          <span class="metric-info" title={card.infoTitle}>{card.info}</span>
         </div>
       </li>
     {/each}
@@ -79,12 +110,20 @@
       <ul class="chart-legend">
         <li class="legend-item"><span class="legend-dash legend-dash-cpu"></span>CPU</li>
         <li class="legend-item"><span class="legend-dash legend-dash-ram"></span>RAM</li>
-        <li class="legend-item"><span class="legend-dash legend-dash-gpu"></span>GPU</li>
+        <li class="legend-item" title="Network is scaled relative to 1000 MB/s">
+          <span class="legend-dash legend-dash-network"></span>NET
+        </li>
       </ul>
       <div class="chart-ranges">
-        <button type="button" class="range-btn">1 min</button>
-        <button type="button" class="range-btn range-btn--active">5 min</button>
-        <button type="button" class="range-btn">1 hr</button>
+        {#each chartRanges as range (range.id)}
+          <button
+            type="button"
+            class="range-btn"
+            class:range-btn--active={selectedRange === range.id}
+            aria-pressed={selectedRange === range.id}
+            on:click={() => (selectedRange = range.id)}
+          >{range.label}</button>
+        {/each}
       </div>
     </header>
 
@@ -99,19 +138,23 @@
         <div class="chart-line chart-line-crit"></div>
         <div class="chart-line chart-line-warn"></div>
         <svg class="chart-svg" viewBox="0 0 600 200" preserveAspectRatio="none" aria-hidden="true">
-          <polyline class="series-gpu" points={points($chart.gpu)} />
-          <polyline class="series-ram" points={points($chart.ram)} />
-          <polyline class="series-cpu" points={points($chart.cpu)} />
+          <polyline class="series-network" points={points($chart.network, rangePoints)} />
+          <polyline class="series-ram" points={points($chart.ram, rangePoints)} />
+          <polyline class="series-cpu" points={points($chart.cpu, rangePoints)} />
         </svg>
-        <span class="chart-dot dot-gpu" style="top: {lastTop($chart.gpu)}%"></span>
-        <span class="chart-dot dot-ram" style="top: {lastTop($chart.ram)}%"></span>
-        <span class="chart-dot dot-cpu" style="top: {lastTop($chart.cpu)}%"></span>
+        <span
+          class="chart-dot dot-network"
+          style="top: {lastTop($chart.network, rangePoints)}%"
+          title="Network utilization relative to 1000 MB/s"
+        ></span>
+        <span class="chart-dot dot-ram" style="top: {lastTop($chart.ram, rangePoints)}%"></span>
+        <span class="chart-dot dot-cpu" style="top: {lastTop($chart.cpu, rangePoints)}%"></span>
       </div>
     </div>
 
     <footer class="chart-x">
-      <span>-5 min</span>
-      <span>-2:30 min</span>
+      <span>{rangeStartLabel}</span>
+      <span>{rangeMiddleLabel}</span>
       <span>now</span>
     </footer>
   </section>
@@ -120,17 +163,27 @@
     <h2 class="panel-title">SERVER STATUS</h2>
     <ul class="status-list">
       {#each $servers as server (server.id)}
-        <li class="status-row">
-          <div class="status-id">
-            <span class="status-name">{server.name}</span>
-            <span class="status-host">{server.host}</span>
-          </div>
-          <span class="status-state" data-status={server.status}>
-            <span class="status-dot"></span>
-            {server.status}
-          </span>
+        <li class:status-row--active={$selectedServerId === server.id}>
+          <button
+            type="button"
+            class="status-row"
+            aria-pressed={$selectedServerId === server.id}
+            on:click={() => selectServer(server.id)}
+          >
+            <span class="status-id">
+              <span class="status-name">{server.name}</span>
+              <span class="status-host">{server.host}</span>
+            </span>
+            <span class="status-state" data-status={server.status}>
+              <span class="status-dot"></span>
+              {server.status}
+            </span>
+          </button>
         </li>
       {/each}
+      {#if $servers.length === 0}
+        <li class="status-empty">No active servers.</li>
+      {/if}
     </ul>
   </section>
 </div>
@@ -288,7 +341,7 @@
     background: #4f8ff7;
   }
 
-  .legend-dash-gpu {
+  .legend-dash-network {
     background: #cdd3dc;
   }
 
@@ -374,7 +427,7 @@
 
   .series-cpu,
   .series-ram,
-  .series-gpu {
+  .series-network {
     fill: none;
     stroke-width: 2;
     vector-effect: non-scaling-stroke;
@@ -388,7 +441,7 @@
     stroke: #005EFF;
   }
 
-  .series-gpu {
+  .series-network {
     stroke: #cdd3dc;
   }
 
@@ -409,7 +462,7 @@
     background: #005EFF;
   }
 
-  .dot-gpu {
+  .dot-network {
     background: #cdd3dc;
   }
 
@@ -430,10 +483,44 @@
     gap: var(--synex-space-2);
   }
 
+  .status-list > li {
+    border-left: 3px solid transparent;
+    border-radius: var(--synex-radius-sm);
+  }
+
+  .status-list > li.status-row--active {
+    border-left-color: var(--synex-accent);
+    background: var(--synex-bg-active);
+  }
+
   .status-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    width: 100%;
+    padding: var(--synex-space-3) var(--synex-space-4);
+    border: 0;
+    border-radius: inherit;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .status-row:hover {
+    background: var(--synex-bg-hover);
+  }
+
+  .status-row:focus-visible {
+    outline: 2px solid var(--synex-accent);
+    outline-offset: -2px;
+  }
+
+  .status-empty {
+    padding: var(--synex-space-3) var(--synex-space-4);
+    color: var(--synex-text-muted);
+    font-size: var(--font-size-12);
   }
 
   .status-id {

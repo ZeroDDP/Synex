@@ -2,12 +2,14 @@
   import SshConnect from '../SshConnect.svelte';
   import { servers } from '../stores.js';
 
+  export let onConnected = () => {};
+
   let showConnect = false;
 </script>
 
 <div class="page-servers">
   {#if showConnect}
-    <SshConnect onClose={() => (showConnect = false)} />
+    <SshConnect onClose={() => (showConnect = false)} {onConnected} />
   {:else}
     <section class="panel">
       <header class="panel-head">
