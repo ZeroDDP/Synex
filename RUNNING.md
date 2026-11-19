@@ -1,31 +1,33 @@
-# Запуск Synex
+# Running Synex
 
-Как поставить и запустить приложение на своей машине: backend и UI вместе. Подробности
-по backend: [backend/README.md](backend/README.md).
+**English** | [Русский](RUNNING.ru.md)
 
-## Из чего состоит
+How to install and run the app on your machine: backend and UI together. Backend
+details: [backend/README.md](backend/README.md).
 
-| Часть | Папка | Адрес | Что делает |
+## What it consists of
+
+| Part | Folder | Address | What it does |
 |---|---|---|---|
-| backend | `backend/` | http://127.0.0.1:8000 | FastAPI: API, WebSocket `/ws`, плагины (SSH, ключи, подключения, мониторинг, файлы SFTP, Docker, Git) |
-| воркер | `core/` | — | Rust-программа `synex_worker`: SSH, SFTP и метрики серверов. Backend запускает её сам |
-| UI | `frontend/` | http://localhost:5173 | Svelte + Vite. Ходит в backend по WebSocket `/ws` и HTTP |
+| backend | `backend/` | http://127.0.0.1:8000 | FastAPI: API, WebSocket `/ws`, plugins (SSH, keys, connections, monitoring, SFTP files, Docker, Git) |
+| worker | `core/` | — | Rust program `synex_worker`: SSH, SFTP and server metrics. The backend starts it on its own |
+| UI | `frontend/` | http://localhost:5173 | Svelte + Vite. Talks to the backend over WebSocket `/ws` and HTTP |
 
-Готовый воркер лежит в репозитории для Windows x64 и Linux x86_64. На macOS, ARM и
-старом Linux его нужно собрать (см. «Воркер на macOS, ARM и старом Linux»).
+A prebuilt worker for Windows x64 and Linux x86_64 is in the repository. On macOS, ARM
+and older Linux you have to build it (see "Worker on macOS, ARM and older Linux").
 
-## Что установить
+## What to install
 
-| Программа | Зачем | Проверка |
+| Program | Needed for | Check |
 |---|---|---|
-| Python 3.12 и [uv](https://docs.astral.sh/uv/getting-started/installation/) | backend | `uv --version` |
-| [Node.js](https://nodejs.org/) 22 LTS (или 20.19+) с npm | UI | `node --version` |
-| Git | код | `git --version` |
-| [Rust](https://rustup.rs/) (cargo) | только если готовый воркер не подходит | `cargo --version` |
+| Python 3.12 and [uv](https://docs.astral.sh/uv/getting-started/installation/) | backend | `uv --version` |
+| [Node.js](https://nodejs.org/) 22 LTS (or 20.19+) with npm | UI | `node --version` |
+| Git | code | `git --version` |
+| [Rust](https://rustup.rs/) (cargo) | only if the prebuilt worker does not fit | `cargo --version` |
 
-Python 3.12 uv поставит сам при первом `uv sync`, если его нет.
+If Python 3.12 is missing, uv installs it on the first `uv sync`.
 
-## Первый запуск (один раз)
+## First run (once)
 
 Windows, PowerShell:
 
@@ -40,7 +42,7 @@ npm ci
 cd ..
 ```
 
-Linux и macOS:
+Linux and macOS:
 
 ```bash
 git clone https://github.com/ZeroDDP/Synex.git
@@ -49,99 +51,100 @@ cd backend && uv sync && cp .env.example .env && cd ..
 cd frontend && npm ci && cd ..
 ```
 
-`uv sync` ставит зависимости backend в `backend/.venv`, `npm ci` ставит зависимости UI
-в `frontend/node_modules` строго по `package-lock.json`. Обе папки в git не попадают.
+`uv sync` installs the backend dependencies into `backend/.venv`, `npm ci` installs the UI
+dependencies into `frontend/node_modules` exactly as pinned in `package-lock.json`. Neither
+folder goes into git.
 
-## Запуск
+## Running
 
-Нужны два терминала, оба из корня репозитория.
+You need two terminals, both started from the repository root.
 
-Терминал 1, backend:
+Terminal 1, backend:
 
 ```bash
 cd backend
 uv run python -m app.main
 ```
 
-Backend готов, когда в логе появилось `Application startup complete` и
-`Uvicorn running on http://127.0.0.1:8000`. Проверка: откройте
-http://127.0.0.1:8000/api/health, там `"status": "ok"` и `"connected": true` у воркера.
+The backend is ready when the log shows `Application startup complete` and
+`Uvicorn running on http://127.0.0.1:8000`. Check: open
+http://127.0.0.1:8000/api/health, it shows `"status": "ok"` and `"connected": true` for the worker.
 
-Терминал 2, UI:
+Terminal 2, UI:
 
 ```bash
 cd frontend
 npm run dev
 ```
 
-Откройте http://localhost:5173. Dev-сервер должен работать именно на порту 5173:
-backend пускает страницы UI только с http://localhost:5173 и http://127.0.0.1:5173.
+Open http://localhost:5173. The dev server must run on port 5173 exactly: the backend
+accepts UI pages only from http://localhost:5173 and http://127.0.0.1:5173.
 
-Остановка: Ctrl+C в обоих терминалах. Backend при остановке закрывает SSH-сессии и
-останавливает воркер.
+To stop: Ctrl+C in both terminals. On shutdown the backend closes the SSH sessions and
+stops the worker.
 
-## Что уже работает
+## What already works
 
-UI подключается к потоку `/ws` и показывает на Dashboard метрики серверов с открытой
-SSH-сессией. Остальные экраны пока на тестовых данных.
-Backend проверяется и без UI:
+The UI connects to the `/ws` stream and shows metrics on the Dashboard for servers with an
+open SSH session. The other screens still use test data.
+You can check the backend without the UI:
 
-- http://127.0.0.1:8000/api/health: состояние backend и воркера;
-- http://127.0.0.1:8000/api/plugins: какие плагины загружены. Плагин выключается и
-  включается без перезапуска backend: `POST /api/plugins/docker/disable` и
-  `POST /api/plugins/docker/enable` (из Swagger или
-  `curl -X POST http://127.0.0.1:8000/api/plugins/docker/disable`). Выбор запоминается:
-  после перезапуска backend выключенный плагин остаётся выключенным;
-- с `DEBUG=true` в `backend/.env` на http://127.0.0.1:8000/api/docs есть Swagger: там
-  можно сохранить подключение (`POST /api/connections`), открыть SSH-сессию
-  (`POST /api/connections/{id}/connect`; первый раз ответ 409 с отпечатком ключа
-  сервера: подтвердите его через `POST /api/ssh/known-hosts` и подключитесь снова),
-  выполнить команду
-  (`POST /api/ssh/sessions/{id}/exec`), посмотреть файлы сервера
-  (`GET /api/sftp/sessions/{id}/list`) и контейнеры
+- http://127.0.0.1:8000/api/health: state of the backend and the worker;
+- http://127.0.0.1:8000/api/plugins: which plugins are loaded. A plugin can be disabled and
+  enabled without restarting the backend: `POST /api/plugins/docker/disable` and
+  `POST /api/plugins/docker/enable` (from Swagger or
+  `curl -X POST http://127.0.0.1:8000/api/plugins/docker/disable`). The choice is remembered:
+  a disabled plugin stays disabled after a backend restart;
+- with `DEBUG=true` in `backend/.env`, Swagger is at http://127.0.0.1:8000/api/docs. There you
+  can save a connection (`POST /api/connections`), open an SSH session
+  (`POST /api/connections/{id}/connect`; the first time the answer is 409 with the server key
+  fingerprint: confirm it with `POST /api/ssh/known-hosts` and connect again), run a command
+  (`POST /api/ssh/sessions/{id}/exec`), browse the server's files
+  (`GET /api/sftp/sessions/{id}/list`) and containers
   (`GET /api/docker/sessions/{id}/containers`);
-- поток для UI: в консоли браузера на странице http://127.0.0.1:8000/api/health
+- the UI stream: in the browser console on the page http://127.0.0.1:8000/api/health
 
   ```js
   const ws = new WebSocket("ws://127.0.0.1:8000/ws");
   ws.onmessage = (e) => console.log(JSON.parse(e.data));
   ```
 
-  Метрики (`metrics`) идут каждые 500 мс; серверы в них появляются, когда к ним
-  открыта SSH-сессия. Без SSH-сервера: `WS_FAKE_METRICS=true` в `backend/.env`,
-  тогда в потоке есть тестовый сервер `demo.synex.local`.
+  Metrics (`metrics`) arrive every 500 ms; a server appears in them once an SSH session to
+  it is open. Without an SSH server: `WS_FAKE_METRICS=true` in `backend/.env`, then the
+  stream contains the test server `demo.synex.local`.
 
-## Настройки
+## Settings
 
-`backend/.env` (образец и описание всех настроек: `backend/.env.example`). Пустое
-значение означает значение по умолчанию. Главное:
+`backend/.env` (the template with every setting described: `backend/.env.example`). An empty
+value means the default. The main ones:
 
-| Настройка | По умолчанию | Что делает |
+| Setting | Default | What it does |
 |---|---|---|
-| `PORT` | `8000` | Порт backend |
-| `PLUGINS_ENABLED` | `*` | Плагины; `*` значит все. Если в старом `.env` осталось `ssh,keys,monitor`, замените на `*` |
-| `UI_DEV_SERVER` | `true` | Пускать UI с http://localhost:5173 и http://127.0.0.1:5173 |
-| `ALLOWED_ORIGINS` | пусто | Другие адреса, с которых UI ходит в backend |
-| `WS_FAKE_METRICS` | `false` | Тестовые метрики без SSH-сервера |
-| `DEBUG` | `false` | Подробные логи и Swagger на http://127.0.0.1:8000/api/docs |
-| `KEYSTORE_MASTER_KEY` | пусто | Только где нет системного хранилища паролей (headless Linux, CI) |
+| `PORT` | `8000` | Backend port |
+| `PLUGINS_ENABLED` | `*` | Plugins; `*` means all. If an old `.env` still has `ssh,keys,monitor`, replace it with `*` |
+| `UI_DEV_SERVER` | `true` | Accept the UI from http://localhost:5173 and http://127.0.0.1:5173 |
+| `ALLOWED_ORIGINS` | empty | Other addresses the UI may call the backend from |
+| `WS_FAKE_METRICS` | `false` | Test metrics without an SSH server |
+| `DEBUG` | `false` | Verbose logs and Swagger at http://127.0.0.1:8000/api/docs |
+| `KEYSTORE_MASTER_KEY` | empty | Only where there is no system password store (headless Linux, CI) |
 
-После изменения `.env` перезапустите backend.
+Restart the backend after changing `.env`.
 
-## Воркер на macOS, ARM и старом Linux
+## Worker on macOS, ARM and older Linux
 
-Готовый `synex_worker` в репозитории собран для Windows x64 и Linux x86_64 с glibc 2.38
-и новее (Ubuntu 24.04, Debian 13, Fedora 39). В остальных случаях соберите его сами:
+The prebuilt `synex_worker` in the repository is built for Windows x64 and for Linux x86_64
+with glibc 2.38 or newer (Ubuntu 24.04, Debian 13, Fedora 39). In any other case, build it
+yourself:
 
 ```bash
 cd core
 cargo build --release
 ```
 
-Backend сам находит `core/target/release/synex_worker` и берёт самую свежую сборку.
-Какой файл запущен, видно в логе backend (`Rust worker started`, `path`).
+The backend finds `core/target/release/synex_worker` on its own and picks the newest build.
+Which file was started is shown in the backend log (`Rust worker started`, `path`).
 
-## Проверки перед коммитом
+## Checks before a commit
 
 ```bash
 cd backend
@@ -150,26 +153,26 @@ cd ../frontend
 npm run build
 ```
 
-Интеграционные тесты backend (Linux и macOS, нужен OpenSSH-сервер `sshd`):
-`uv run pytest -m integration`. Проверки backend в GitHub Actions идут сами на каждый PR.
+Backend integration tests (Linux and macOS, need the OpenSSH server `sshd`):
+`uv run pytest -m integration`. GitHub Actions runs the backend checks on every PR by itself.
 
-## Если что-то не работает
+## Troubleshooting
 
-| Что видно | Причина и что делать |
+| What you see | Cause and what to do |
 |---|---|
-| http://127.0.0.1:8000/api/health не открывается | Backend не запущен или упал при старте: смотрите его терминал |
-| `npm run dev` запустился на 5174 или другом порту | Порт 5173 занят другим dev-сервером. Закройте его: backend пускает UI только с 5173 (или добавьте адрес в `ALLOWED_ORIGINS`) |
-| Backend: `Invalid settings in backend/.env` | В `.env` неверное значение; в сообщении названа настройка. Исправьте или очистите её |
-| В логе backend `forbidden_origin` | UI открыт не с http://localhost:5173 (или http://127.0.0.1:5173). Откройте этот адрес или добавьте свой в `ALLOWED_ORIGINS` |
-| В `/api/plugins` нет `connections`, `docker`, `git`, `sftp` | В `backend/.env` старый `PLUGINS_ENABLED`: поставьте `*` |
-| Плагин есть в `PLUGINS_ENABLED`, но в `/api/plugins` он `disabled` | Его выключили через `POST /api/plugins/<имя>/disable` в один из прошлых запусков. Включите его (`/enable`) или удалите `plugins.json` (где он лежит, см. строку про `plugin_disabled`) |
-| Подключение отвечает 409 `ssh_host_key_unknown` | Так и должно быть при первом подключении к серверу: воркер подключается только к серверу с подтверждённым ключом. Серверы, к которым вы уже подключались через `ssh` (их ключ есть в `~/.ssh/known_hosts`), подключаются без подтверждения. Сверьте отпечаток из ответа (на сервере: `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`) и подтвердите его: `POST /api/ssh/known-hosts`, затем подключитесь снова |
-| Подключение отвечает 409 `ssh_host_key_mismatch` | Ключ сервера сменился: сервер переустановили или это подмена. Не подключайтесь, пока не выясните причину. Если смена ожидаемая, подтвердите новый ключ: `POST /api/ssh/known-hosts` с `replace: true` |
-| Подключение отвечает 409 `ssh_host_key_revoked` | Ключ сервера помечен как отозванный (`@revoked`) в `known_hosts` OpenSSH на этом компьютере (файл и строка названы в `detail`). Не подключайтесь: выясните, почему ключ отозван |
-| Модуль отвечает 404 `plugin_disabled` | Его выключили на ходу, и backend это помнит после перезапуска: `POST /api/plugins/<имя>/enable`. Вернуть набор из `PLUGINS_ENABLED` целиком: удалите `%LOCALAPPDATA%\Synex\plugins.json` (Linux: `~/.local/share/synex/plugins.json`, macOS: `~/Library/Application Support/Synex/plugins.json`) и перезапустите backend |
-| Файлы: 502 `sftp_unavailable` и в тексте `synex_worker build has no SFTP` | Старая сборка воркера без SFTP. Обновите репозиторий (`git pull`) или соберите воркер: `cd core && cargo build --release`, затем перезапустите backend |
-| Файлы: 502 `sftp_unavailable` и в тексте `Subsystem sftp` | На сервере выключен SFTP: добавьте в `/etc/ssh/sshd_config` строку `Subsystem sftp internal-sftp` и перезапустите sshd |
-| Linux: `GLIBC_2.38 not found` | Готовый воркер не подходит: соберите его (`cd core && cargo build --release`) |
-| macOS: воркер сразу завершается с кодом -9 | Карантин macOS: `xattr -d com.apple.quarantine <путь к synex_worker>` или соберите воркер сами |
-| `keystore_unavailable` | Нет системного хранилища паролей: задайте `KEYSTORE_MASTER_KEY` (как сгенерировать, написано в `backend/.env.example`) |
-| Windows: backend не подключается к воркеру после запуска через `uvicorn --reload` | Запускайте только `uv run python -m app.main`: с `--reload` и `--workers` Named Pipe к воркеру не работает |
+| http://127.0.0.1:8000/api/health does not open | The backend is not running or crashed on startup: look at its terminal |
+| `npm run dev` started on 5174 or another port | Port 5173 is taken by another dev server. Close it: the backend accepts the UI only from 5173 (or add the address to `ALLOWED_ORIGINS`) |
+| Backend: `Invalid settings in backend/.env` | A wrong value in `.env`; the message names the setting. Fix or clear it |
+| `forbidden_origin` in the backend log | The UI is not opened from http://localhost:5173 (or http://127.0.0.1:5173). Open that address or add yours to `ALLOWED_ORIGINS` |
+| `/api/plugins` has no `connections`, `docker`, `git`, `sftp` | An old `PLUGINS_ENABLED` in `backend/.env`: set it to `*` |
+| A plugin is in `PLUGINS_ENABLED`, but `/api/plugins` shows it as `disabled` | It was disabled with `POST /api/plugins/<name>/disable` in an earlier run. Enable it (`/enable`) or delete `plugins.json` (where it is: see the `plugin_disabled` row) |
+| Connecting answers 409 `ssh_host_key_unknown` | Expected on the first connection to a server: the worker connects only to servers with a confirmed key. Servers you have already connected to with `ssh` (their key is in `~/.ssh/known_hosts`) connect without confirmation. Compare the fingerprint from the response (on the server: `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`) and confirm it: `POST /api/ssh/known-hosts`, then connect again |
+| Connecting answers 409 `ssh_host_key_mismatch` | The server key has changed: the server was reinstalled or this is an attack. Do not connect until you know why. If the change is expected, confirm the new key: `POST /api/ssh/known-hosts` with `replace: true` |
+| Connecting answers 409 `ssh_host_key_revoked` | The server key is marked as revoked (`@revoked`) in the OpenSSH `known_hosts` on this computer (the file and line are named in `detail`). Do not connect: find out why the key was revoked |
+| A module answers 404 `plugin_disabled` | It was disabled at runtime, and the backend remembers that after a restart: `POST /api/plugins/<name>/enable`. To return to exactly `PLUGINS_ENABLED`: delete `%LOCALAPPDATA%\Synex\plugins.json` (Linux: `~/.local/share/synex/plugins.json`, macOS: `~/Library/Application Support/Synex/plugins.json`) and restart the backend |
+| Files: 502 `sftp_unavailable` with `synex_worker build has no SFTP` in the text | An old worker build without SFTP. Update the repository (`git pull`) or build the worker: `cd core && cargo build --release`, then restart the backend |
+| Files: 502 `sftp_unavailable` with `Subsystem sftp` in the text | SFTP is off on the server: add `Subsystem sftp internal-sftp` to `/etc/ssh/sshd_config` and restart sshd |
+| Linux: `GLIBC_2.38 not found` | The prebuilt worker does not fit: build it (`cd core && cargo build --release`) |
+| macOS: the worker exits right away with code -9 | macOS quarantine: `xattr -d com.apple.quarantine <path to synex_worker>`, or build the worker yourself |
+| `keystore_unavailable` | No system password store: set `KEYSTORE_MASTER_KEY` (how to generate it is written in `backend/.env.example`) |
+| Windows: the backend does not connect to the worker when started with `uvicorn --reload` | Start it only with `uv run python -m app.main`: with `--reload` and `--workers` the Named Pipe to the worker does not work |
