@@ -164,6 +164,11 @@ servers through `fetch` and WebSocket.
 | DELETE | `/api/sftp/transfers/{id}` | Cancel a transfer or remove a finished one from the list |
 | GET | `/api/sftp/local/list` | A folder of this computer (second pane): `?path=` |
 | GET | `/api/monitor/metrics` | Server metrics right now (same as `metrics` in `/ws`) |
+| GET | `/api/alerts` | Alerts of all servers: `?status=active\|resolved\|all&server=host:port` |
+| GET | `/api/alerts/{id}` | One alert |
+| POST | `/api/alerts/{id}/ack` | Mark an alert as seen; `POST /api/alerts/ack-all` for all active ones |
+| DELETE | `/api/alerts/{id}` | Remove a resolved alert from the history; `DELETE /api/alerts` clears the history |
+| GET / PUT / DELETE | `/api/alerts/rules` | Alert rules (thresholds): read, replace, reset to defaults |
 | GET | `/api/health` | State of the backend and the worker, loaded plugins |
 | GET | `/api/plugins` | Plugins: version, description, dependencies, `status` and failure reason (see below) |
 | POST | `/api/plugins/{name}/enable` | Enable a plugin without a restart (with its dependencies); the choice is remembered |
@@ -652,6 +657,7 @@ milliseconds.
 | `worker.status` | server, when the worker state changes | `{status, ...}`: `connected`, `connection_lost`, `worker_exited`, `worker_started` |
 | `sftp.transfer` | server, while a file transfer runs | transfer state: `{id, status, bytes_done, bytes_total, percent, speed, ...}` (see "Files on servers") |
 | `plugin.status` | server, when a plugin was enabled, disabled or failed | `{name, status, version, error}` (see "Plugins at runtime") |
+| `alert` | server, when an alert fires, changes, resolves or is acknowledged | `{action: fired\|updated\|resolved\|acknowledged, alert}` (see "Alerts") |
 | `ping` | UI | anything, comes back in `pong` |
 | `pong` | server, in reply to `ping` | `data` from `ping` |
 | `error` | server, if it could not parse a UI message | `{error, detail}`: `bad_message` or `unknown_type` |
@@ -734,6 +740,43 @@ with `restarts`), then `connected`.
   messages are dropped, and memory does not grow.
 - On shutdown the backend closes the connection with code 1012: the UI should reconnect.
 
+#### Alerts (plugin `alerts`)
+
+Alerts of all servers with open SSH sessions, from the same metrics the UI sees. The
+rules are shared by all servers:
+
+| metric | default | what is checked |
+|---|---|---|
+| `cpu` | warning 90 %, critical 95 %, 60 s | CPU load |
+| `memory` | warning 90 %, critical 95 %, 60 s | memory usage |
+| `disk` | warning 90 %, critical 95 %, at once | every partition from `disks` separately (`target` is the mount) |
+| `gpu_temperature` | warning 80 °C, critical 90 °C, 60 s | every NVIDIA card (`target` is its index) |
+| `server` | 30 s | the server does not respond: the poll fails, or there is no fresh data although its sessions are free |
+
+- A value must stay above the threshold for `duration_s` seconds: a short CPU spike gives no
+  alert. An alert goes out when the value falls 5 points below the warning threshold (so a
+  value around the threshold does not blink); critical turns into warning 5 points below
+  the critical threshold. While a server does not respond, its other metrics are not
+  checked (the values are old).
+- `GET /api/alerts`: `{counts: {active, critical, warning, unacknowledged, resolved},
+  alerts: [...]}`, active first (critical above), then resolved, newest first. An alert:
+  `{id, server, host, port, metric, target, severity, status, value, peak, threshold,
+  message, started_at, updated_at, resolved_at, resolved_reason, acknowledged}`;
+  `resolved_reason`: `back_to_normal`, `server_disconnected` (the last session to it was
+  closed), `rule_changed` (its rule was turned off).
+- `/ws` gets `alert` `{action, alert}` when an alert fires, changes its level, resolves or is
+  acknowledged. The UI keeps the list from `GET /api/alerts` and updates it from these
+  events.
+- `POST /api/alerts/{id}/ack` marks an alert as seen (for the badge); when its level changes,
+  it becomes unacknowledged again. Resolved alerts are kept in memory (`ALERTS_HISTORY`,
+  200) until a restart.
+- `PUT /api/alerts/rules` `{"rules": [{"metric": "cpu", "warning": 80, "critical": 95,
+  "duration_s": 30, "enabled": true}]}` replaces the rules (a metric that is not listed keeps
+  its default) and saves them to `alerts.json` next to `keys.json` (`ALERTS_PATH`);
+  `DELETE /api/alerts/rules` returns the defaults.
+- The monitor polls servers only while someone watches the metrics. So that alerts work with
+  the Dashboard closed, the plugin keeps the polling on (`ALERTS_KEEP_POLLING=true`).
+
 Quick check: open http://127.0.0.1:8000/api/health and run in the browser console
 
 ```js
@@ -781,6 +824,7 @@ details, for example `host_key`); validation errors as 422:
 | 504 | `worker_timeout` | The worker did not answer another request |
 | 403/404/502/503/504 | `docker_*` | Docker errors on the server (see "Docker on servers") |
 | 404/409/502/504 | `git_*` | Git errors on the server (see "Git on servers") |
+| 404/409/500 | `alert_*` | `alert_not_found`, `alert_active` (an active alert cannot be removed), `alert_rules_corrupted` (`alerts.json` is damaged) |
 | 403/404/409/422/5xx | `sftp_*` | File errors on the server and on this computer (see "Files on servers") |
 
 ## Structure
@@ -807,6 +851,8 @@ app/
                        errors
     monitor/           /api/monitor/*: service (polling and publishing), aggregator
                        (window, statuses), values (worker response), hardware (disks, GPU)
+    alerts/            /api/alerts/*: rules (thresholds, alerts.json), engine (when an
+                       alert fires and resolves), service (history, /ws events), routes
     keys/              /api/keys/*
     connections/       /api/connections/*: store (connections.json), routes, schemas
     docker/            /api/docker/*: commands (docker commands and output parsing),

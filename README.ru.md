@@ -84,6 +84,7 @@ flowchart LR
 | `keys` | 0.1.0 | — | `/api/keys` — зашифрованное хранилище SSH-ключей |
 | `connections` | 0.1.0 | `ssh` | `/api/connections` — сохранённые серверы |
 | `monitor` | 0.2.0 | `ssh` | `/api/monitor` и поток `metrics` в `/ws` |
+| `alerts` | 0.1.0 | `monitor` | `/api/alerts` — алерты всех серверов по порогам метрик, события `alert` в `/ws` |
 | `docker` | 0.2.0 | `ssh` | `/api/docker` — контейнеры, логи, WebSocket live-лога |
 | `git` | 0.1.0 | `ssh` | `/api/git` — status, log, fetch, pull, deploy |
 | `sftp` | 0.1.0 | `ssh` | `/api/sftp` — файлы и папки, передачи с прогрессом в `/ws` |
