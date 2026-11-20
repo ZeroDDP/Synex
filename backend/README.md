@@ -559,26 +559,36 @@ session and do not show up in its terminal.
 {"server": "10.0.0.5:22", "session_id": "...", "more": true,
  "before": "s=...;i=1a2", "cursor": "s=...;i=1b7",
  "entries": [{"cursor": "s=...;i=1b7", "time": 1795150389396, "priority": 3, "level": "err",
-              "unit": "nginx.service", "identifier": "nginx", "pid": 812,
-              "hostname": "web-1", "boot_id": "...", "message": "upstream timed out"}]}
+              "severity": "error", "unit": "nginx.service", "identifier": "nginx",
+              "pid": 812, "hostname": "web-1", "boot_id": "...",
+              "message": "upstream timed out"}]}
 ```
 
-  Filters: `unit` (several allowed, a pattern too: `nginx*`), `priority` (`emerg` ... `debug`:
-  this level and more important), `grep` (text, not a regex; Latin letters are matched
-  case-insensitively), `since` and `until` (Unix time in ms or what journalctl understands:
-  `2026-11-20 10:00:00`, `today`, `-1h`), `boot=true` (since the last boot). An older page:
-  `?before=<before of the previous page>`. `more: true`: there may be older entries. A filter
-  journalctl does not accept is 422 `logs_bad_filter` with its text in `detail`.
+  `severity` is the level tab of the UI: `error` (emerg ... err), `warn` (warning), `info`
+  (notice, info), `debug`.
+
+  Filters: `unit` (several allowed, a pattern too: `nginx*`), `severity` (only one tab, as
+  the ALL / INFO / WARN / ERROR buttons of the Logs screen), `priority` (`emerg` ...
+  `debug`: this level and more important; not together with `severity`), `grep` (text, not a
+  regex; Latin letters are matched case-insensitively), `since` and `until` (Unix time in ms
+  or what journalctl understands: `2026-11-20 10:00:00`, `today`, `-1h`), `boot=true` (since
+  the last boot). An older page: `?before=<before of the previous page>`. `more: true`:
+  there may be older entries. A filter journalctl does not accept is 422 `logs_bad_filter`
+  with its text in `detail`.
 - `GET .../files?dir=/var/log`: files of the folder and its subfolders (one level): `{path,
   name, readable, size, modified, rotated}`; compressed (`.gz`, `.xz`) and binary (`wtmp`,
   `btmp`, `lastlog`, journal files) are not listed. `rotated`: an old copy after logrotate
   (`syslog.1`). Files the SSH user cannot read are listed with `readable: false`.
-- `GET .../file?path=/var/log/syslog&lines=200`: the last lines `{lines, size, offset, inode,
-  truncated}`; with `grep`, the last lines containing the text. `truncated: true`: fewer lines
-  than asked, because only the last `LOGS_CHUNK_BYTES` (1 MiB) of the file are read.
-- Live logs: WebSocket `.../journal/ws` (journal filters, `lines`, `after`) and `.../file/ws`
-  (`path`, `lines`, `grep`, `offset`, `inode`). First the last `lines` lines, then new ones as
-  they appear. Messages use the same envelope `{type, ts, data}` as `/ws`:
+- `GET .../file?path=/var/log/syslog&lines=200`: the last lines `{lines, size, offset,
+  inode, truncated}`, a line is `{text, severity}`: the level is taken from a level word at
+  the start of the line (`ERROR`, `[warn]`, `level=info`), `info` without one. With `grep`,
+  the last lines containing the text; with `severity`, only lines of that tab.
+  `truncated: true`: fewer lines than asked, because only the last `LOGS_CHUNK_BYTES` (1
+  MiB) of the file are read.
+- Live logs: WebSocket `.../journal/ws` (journal filters, `lines`, `after`) and
+  `.../file/ws` (`path`, `lines`, `grep`, `severity`, `offset`, `inode`). First the last
+  `lines` lines, then new ones as they appear. Messages use the same envelope
+  `{type, ts, data}` as `/ws`:
 
   | type | data |
   |---|---|
@@ -912,10 +922,12 @@ rules are shared by all servers:
   checked (the values are old).
 - `GET /api/alerts`: `{counts: {active, critical, warning, unacknowledged, resolved},
   alerts: [...]}`, active first (critical above), then resolved, newest first. An alert:
-  `{id, server, host, port, metric, target, severity, status, value, peak, threshold,
-  message, started_at, updated_at, resolved_at, resolved_reason, acknowledged}`;
-  `resolved_reason`: `back_to_normal`, `server_disconnected` (the last session to it was
-  closed), `rule_changed` (its rule was turned off).
+  `{id, server, host, port, metric, target, severity, status, value, peak, threshold, title,
+  message, started_at, updated_at, resolved_at, resolved_reason, acknowledged}`; `title` is
+  the card heading (`CPU load above 95%`, `Disk /data above 90%`,
+  `Server does not respond`), `message` the details under it; `resolved_reason`:
+  `back_to_normal`, `server_disconnected` (the last session to it was closed),
+  `rule_changed` (its rule was turned off).
 - `/ws` gets `alert` `{action, alert}` when an alert fires, changes its level, resolves or is
   acknowledged. The UI keeps the list from `GET /api/alerts` and updates it from these
   events.
