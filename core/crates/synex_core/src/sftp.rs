@@ -5,7 +5,8 @@ use russh_sftp::client::error::Error as SftpClientError;
 use russh_sftp::protocol::{FileAttributes, StatusCode};
 use serde::Serialize;
 use std::path::Path;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio_util::sync::CancellationToken;
 
 pub struct Sftp<'a> {
     session: &'a mut SshSession,
@@ -76,6 +77,37 @@ async fn close_sftp(sftp: SftpSession) -> Result<()> {
             format!("Failed to close SFTP session: {}", err),
         )
     })
+}
+
+// Чем закончилась копия данных: дошла до конца или пришла отмена.
+enum CopyOutcome {
+    Finished,
+    Cancelled,
+}
+
+// Копируем потоком, но готовы бросить, если пришла отмена. Файлы закрывает вызывающий код:
+// отменённая передача оставляет частичный файл на диске/сервере, его не удаляем.
+async fn copy_cancellable<R, W>(
+    reader: &mut R,
+    writer: &mut W,
+    cancel: &CancellationToken,
+) -> Result<CopyOutcome>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Ok(CopyOutcome::Cancelled),
+        res = tokio::io::copy(reader, writer) => {
+            res.map(|_| CopyOutcome::Finished).map_err(|err| {
+                SynexError::Sftp(
+                    SftpErrorKind::Failed,
+                    format!("Failed to transfer file: {}", err),
+                )
+            })
+        }
+    }
 }
 
 fn entry_info(name: String, attrs: &FileAttributes, link_target: Option<String>) -> DirEntryInfo {
@@ -205,6 +237,25 @@ impl<'a> Sftp<'a> {
     }
 
     pub async fn upload_file(&mut self, local_path: &str, remote_path: &str) -> Result<()> {
+        // Обычный вызов — это отменяемый с токеном, который никто не отменит.
+        let cancel = CancellationToken::new();
+        self.upload_file_cancellable(local_path, remote_path, &cancel)
+            .await
+    }
+
+    // Загрузка с возможностью отмены. При отмене копирование останавливается сразу,
+    // файлы закрываются, частичнюю загрузку на сервере не удаляем.
+    pub async fn upload_file_cancellable(
+        &mut self,
+        local_path: &str,
+        remote_path: &str,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        // Отмену могли прислать пока запрос ждал сессию: тогда ничего не запускаем.
+        if cancel.is_cancelled() {
+            return Err(SynexError::Cancelled);
+        }
+
         // Сначала открываем локальный файл, затем канал SFTP.
         let mut local_file = tokio::fs::File::open(local_path)
             .await
@@ -235,23 +286,15 @@ impl<'a> Sftp<'a> {
                 .await
                 .map_err(|err| sftp_error("Failed to create remote file", err))?;
 
-            tokio::io::copy(&mut local_file, &mut remote_file)
-                .await
-                .map_err(|err| {
-                    SynexError::Sftp(
-                        SftpErrorKind::Failed,
-                        format!("Failed to upload file: {}", err),
-                    )
-                })?;
+            let outcome = copy_cancellable(&mut local_file, &mut remote_file, cancel).await?;
 
-            remote_file.shutdown().await.map_err(|err| {
-                SynexError::Sftp(
-                    SftpErrorKind::Failed,
-                    format!("Failed to close remote file: {}", err),
-                )
-            })?;
+            // Закрываем удалённый файл в любом случае: и при успехе, и при отмене.
+            let _ = remote_file.shutdown().await;
 
-            Ok::<(), SynexError>(())
+            match outcome {
+                CopyOutcome::Finished => Ok::<(), SynexError>(()),
+                CopyOutcome::Cancelled => Err(SynexError::Cancelled),
+            }
         }
         .await;
 
@@ -264,6 +307,25 @@ impl<'a> Sftp<'a> {
     }
 
     pub async fn download_file(&mut self, remote_path: &str, local_path: &str) -> Result<()> {
+        // Обычный вызов — это отменяемый с токеном, который никто не отменит.
+        let cancel = CancellationToken::new();
+        self.download_file_cancellable(remote_path, local_path, &cancel)
+            .await
+    }
+
+    // Скачивание с возможностью отмены. При отмене частичный локальный файл
+    // остаётся на диске: backend может сам решить, удалять его или докачать позже.
+    pub async fn download_file_cancellable(
+        &mut self,
+        remote_path: &str,
+        local_path: &str,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        // Отмену могли прислать пока запрос ждал сессию: тогда ничего не запускаем.
+        if cancel.is_cancelled() {
+            return Err(SynexError::Cancelled);
+        }
+
         let sftp = self.open_sftp().await?;
 
         let transfer_result = async {
@@ -295,20 +357,14 @@ impl<'a> Sftp<'a> {
                 SynexError::Internal(format!("Failed to create local file: {}", err))
             })?;
 
-            tokio::io::copy(&mut remote_file, &mut local_file)
-                .await
-                .map_err(|err| {
-                    SynexError::Sftp(
-                        SftpErrorKind::Failed,
-                        format!("Failed to download file: {}", err),
-                    )
-                })?;
+            let outcome = copy_cancellable(&mut remote_file, &mut local_file, cancel).await?;
 
-            local_file.flush().await.map_err(|err| {
-                SynexError::Internal(format!("Failed to flush local file: {}", err))
-            })?;
+            let _ = local_file.flush().await;
 
-            Ok::<(), SynexError>(())
+            match outcome {
+                CopyOutcome::Finished => Ok::<(), SynexError>(()),
+                CopyOutcome::Cancelled => Err(SynexError::Cancelled),
+            }
         }
         .await;
 

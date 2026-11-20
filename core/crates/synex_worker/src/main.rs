@@ -1,17 +1,38 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::env;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
-use std::{env, result};
-use synex_core::errors::SynexError;
-use synex_core::mon::SshMonitoring;
+use synex_core::errors::{Result as SynexResult, SynexError};
 use synex_core::sftp::Sftp;
 use synex_core::ssh::SshSession;
 // use tokio::fs::OpenOptions;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use tracing::{self, error, info};
+
+// Общий тип для пишущей половины соединения. Обёрнут в Arc<Mutex<..>>, чтобы основной
+// цикл чтения IPC и спавленные задачи для долгих действий могли писать ответы независимо.
+type SharedWriter<T> = Arc<Mutex<WriteHalf<T>>>;
+
+// Токены отмены по идентификатору сессии: сессия обрабатывает одно действие за раз
+// (защищена своим Arc<Mutex<SshSession>>), поэтому на сессию всегда есть не больше одного активного токена.
+type CancelTokens = Arc<Mutex<HashMap<String, CancellationToken>>>;
+
+// Действие над сессией, упакованное в задачу: сам код получает уже залоченную сессию.
+type SessionAction<'a> = Pin<Box<dyn Future<Output = SynexResult<ResponsePayload>> + Send + 'a>>;
+
+fn ok_payload(stdout: String) -> ResponsePayload {
+    ResponsePayload {
+        stdout,
+        stderr: String::new(),
+        exit_code: 0,
+    }
+}
 // use uuid::Uuid;
 // use serde::Serialize;
 // use tokio::net::TcpListener;
@@ -31,6 +52,8 @@ struct RequestPayload {
     remote_path: Option<String>,
     local_path: Option<String>,
     destination_path: Option<String>,
+    // Для действия "cancel": id сессии, чью текущую операцию надо остановить.
+    target_id: Option<String>,
 }
 
 #[derive(Serialize, Debug)]
@@ -150,22 +173,30 @@ async fn main() {
     }
 }
 
-async fn handle_client<T>(mut stream: T)
+async fn handle_client<T>(stream: T)
 where
     T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let sessions: Arc<Mutex<HashMap<String, Arc<Mutex<SshSession>>>>> =
         Arc::new(Mutex::new(HashMap::<String, Arc<Mutex<SshSession>>>::new()));
+    let cancel_tokens: CancelTokens = Arc::new(Mutex::new(HashMap::new()));
+
+    // Чтение остаётся в этом цикле, запись расшарена на Arc<Mutex<..>>: долгие действия
+    // (ssh_exec, SFTP-передачи) выполняются в своих задачах, не блокируя чтение следующего кадра
+    // (в том числе действия cancel).
+    let (mut reader, writer) = tokio::io::split(stream);
+    let writer: SharedWriter<T> = Arc::new(Mutex::new(writer));
+
     let mut len_buf = [0u8; 4];
 
     loop {
-        if stream.read_exact(&mut len_buf).await.is_err() {
+        if reader.read_exact(&mut len_buf).await.is_err() {
             break;
         }
         let payload_len = u32::from_be_bytes(len_buf) as usize;
         if payload_len > MAX_FRAME_LEN {
             send_error(
-                &mut stream,
+                &writer,
                 "",
                 &format!("frame too large: {} bytes", payload_len),
             )
@@ -174,19 +205,14 @@ where
         }
 
         let mut payload_buf = vec![0u8; payload_len];
-        if stream.read_exact(&mut payload_buf).await.is_err() {
+        if reader.read_exact(&mut payload_buf).await.is_err() {
             break;
         }
 
         let req = match rmp_serde::from_slice::<Request>(&payload_buf) {
             Ok(r) => r,
             Err(e) => {
-                send_error(
-                    &mut stream,
-                    "bad_msgpack",
-                    &format!("Failed to unpack: {}", e),
-                )
-                .await;
+                send_error(&writer, "bad_msgpack", &format!("Failed to unpack: {}", e)).await;
                 continue;
             }
         };
@@ -202,7 +228,7 @@ where
                     None => {
                         error!("Session dont founded by key: {}", &req.id);
                         send_error(
-                            &mut stream,
+                            &writer,
                             &req.id,
                             "Session dont founded by key. Create session first!",
                         )
@@ -211,37 +237,75 @@ where
                     }
                 };
 
-                // 2. Теперь лочим саму сессию
-                let mut sess = session_arc.lock().await;
                 let command: String = match req.payload.command {
                     Some(cmd) => cmd,
                     None => {
-                        eprintln!("❌ Отсутствует command в payload");
-                        send_error(&mut stream, &req.id, "Missing 'command' in payload").await;
+                        send_error(&writer, &req.id, "Missing 'command' in payload").await;
                         continue;
                     }
                 };
 
-                info!("Выполняется команда: {}", command);
-                match sess.execute_command(&command).await {
-                    Ok(output) => {
-                        info!("Команда выполнена. Exit code: {}", output.exit_code);
-                        let resp = Response {
-                            id: req.id.clone(),
-                            status: "ok".to_string(),
-                            payload: ResponsePayload {
-                                stdout: output.stdout,
-                                stderr: output.stderr,
-                                exit_code: output.exit_code,
-                            },
-                        };
-                        send_response(&mut stream, resp).await;
+                // Токен регистрируем до запуска задачи: если cancel придёт пока мы ждём
+                // очереди на сессию, операция сразу увидит отмену и не станет выполняться.
+                let token = CancellationToken::new();
+                cancel_tokens
+                    .lock()
+                    .await
+                    .insert(req.id.clone(), token.clone());
+
+                let writer = writer.clone();
+                let cancel_tokens = cancel_tokens.clone();
+                let req_id = req.id.clone();
+
+                // Спавленная задача: основной цикл тут же возвращается читать следующий кадр.
+                tokio::spawn(async move {
+                    info!("Выполняется команда: {}", command);
+                    let result = {
+                        let mut sess = session_arc.lock().await;
+                        sess.execute_command_cancellable(&command, &token).await
+                    };
+                    cancel_tokens.lock().await.remove(&req_id);
+
+                    match result {
+                        Ok(output) => {
+                            info!("Команда выполнена. Exit code: {}", output.exit_code);
+                            send_response(
+                                &writer,
+                                Response {
+                                    id: req_id,
+                                    status: "ok".to_string(),
+                                    payload: ResponsePayload {
+                                        stdout: output.stdout,
+                                        stderr: output.stderr,
+                                        exit_code: output.exit_code,
+                                    },
+                                },
+                            )
+                            .await;
+                        }
+                        Err(SynexError::Cancelled) => {
+                            info!("Команда отменена: {}", req_id);
+                            send_response(
+                                &writer,
+                                Response {
+                                    id: req_id,
+                                    status: "cancelled".to_string(),
+                                    payload: ResponsePayload {
+                                        stdout: String::new(),
+                                        stderr: String::new(),
+                                        // 128 + SIGTERM(15): процесс остановлен по запросу cancel
+                                        exit_code: 143,
+                                    },
+                                },
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            error!("❌ Ошибка выполнения команды: {}", e);
+                            send_error(&writer, &req_id, &e.to_string()).await;
+                        }
                     }
-                    Err(e) => {
-                        error!("❌ Ошибка выполнения команды: {}", e);
-                        send_error(&mut stream, &req.id, &e.to_string()).await;
-                    }
-                }
+                });
             }
             "ssh_connect" => {
                 info!("Обработка ssh_connect");
@@ -249,7 +313,7 @@ where
                     Some(conn) => conn,
                     None => {
                         eprintln!("Missing 'connection' in payload");
-                        send_error(&mut stream, &req.id, "Missing 'connection' in payload").await;
+                        send_error(&writer, &req.id, "Missing 'connection' in payload").await;
                         continue;
                     }
                 };
@@ -295,7 +359,7 @@ where
                             },
                         };
                         info!("Отправляю ответ об успешном подключении...");
-                        send_response(&mut stream, resp).await;
+                        send_response(&writer, resp).await;
                         info!("Ответ отправлен");
                     }
                     Err(e) => {
@@ -324,7 +388,7 @@ where
                             _ => {}
                         }
                         send_response(
-                            &mut stream,
+                            &writer,
                             ConnectResponse {
                                 id: req.id.clone(),
                                 status: "error".to_string(),
@@ -345,7 +409,7 @@ where
                     None => {
                         error!("Session dont founded by key: {}", &req.id);
                         send_error(
-                            &mut stream,
+                            &writer,
                             &req.id,
                             "Session dont founded by key. Create session first!",
                         )
@@ -354,12 +418,11 @@ where
                     }
                 };
 
-                let mut sess = session_arc.lock().await;
-
-                let command = "head -n 1 /proc/stat; grep -E 'MemTotal|MemAvailable' /proc/meminfo; cat /proc/net/dev; df -P -k /";
                 info!("Выполняется команда мониторинга");
-                match sess.execute_command(command).await {
-                    Ok(output) => {
+                spawn_session_action(writer.clone(), session_arc, req.id.clone(), |sess| {
+                    Box::pin(async move {
+                        let command = "head -n 1 /proc/stat; grep -E 'MemTotal|MemAvailable' /proc/meminfo; cat /proc/net/dev; df -P -k /";
+                        let output = sess.execute_command(command).await?;
                         // Разбираем поля сессии по отдельности, иначе два &mut через DerefMut конфликтуют
                         let state = &mut *sess;
                         let stdout_json = parse_metrics_to_json(
@@ -367,44 +430,42 @@ where
                             &mut state.prev_cpu,
                             &mut state.prev_net,
                         );
-                        let resp = Response {
-                            id: req.id,
-                            status: "ok".to_string(),
-                            payload: ResponsePayload {
-                                stdout: stdout_json,
-                                stderr: output.stderr,
-                                exit_code: output.exit_code,
-                            },
-                        };
-                        send_response(&mut stream, resp).await;
-                    }
-                    Err(e) => {
-                        error!("❌ Ошибка выполнения команды: {}", e);
-                        send_error(&mut stream, &req.id, &e.to_string()).await;
-                    }
-                }
+                        Ok(ResponsePayload {
+                            stdout: stdout_json,
+                            stderr: output.stderr,
+                            exit_code: output.exit_code,
+                        })
+                    })
+                })
+                .await;
             }
             "ssh_disconnect" => {
                 info!("Обработка ssh_disconnect для id: {}", req.id);
+                // Отменяем любую операцию, ещё идущую на этой сессии, до закрытия.
+                if let Some(token) = cancel_tokens.lock().await.remove(&req.id) {
+                    token.cancel();
+                }
                 let removed = sessions.lock().await.remove(&req.id);
 
                 match removed {
                     Some(sess_arc) => {
-                        let mut sess = sess_arc.lock().await;
-                        let _ = sess.close().await; // вызываем метод из ssh.rs
-                        let resp = Response {
-                            id: req.id.clone(),
-                            status: "ok".to_string(),
-                            payload: ResponsePayload {
-                                stdout: format!("Disconnected id: {}", req.id),
-                                stderr: String::new(),
-                                exit_code: 0,
+                        let id = req.id.clone();
+                        // Задача ждёт лок сессии: пока отменённая операция завершается, закрывать рано.
+                        spawn_session_action(
+                            writer.clone(),
+                            sess_arc,
+                            req.id.clone(),
+                            move |sess| {
+                                Box::pin(async move {
+                                    let _ = sess.close().await; // метод из ssh.rs
+                                    Ok(ok_payload(format!("Disconnected id: {}", id)))
+                                })
                             },
-                        };
-                        send_response(&mut stream, resp).await;
+                        )
+                        .await;
                     }
                     None => {
-                        send_error(&mut stream, &req.id, "Session not found").await;
+                        send_error(&writer, &req.id, "Session not found").await;
                     }
                 }
             }
@@ -414,7 +475,7 @@ where
                     None => {
                         error!("Session dont founded by key: {}", &req.id);
                         send_error(
-                            &mut stream,
+                            &writer,
                             &req.id,
                             "Session dont founded by key. Create session first!",
                         )
@@ -423,36 +484,23 @@ where
                     }
                 };
 
-                let mut sess = session_arc.lock().await;
-                let mut sftp = Sftp::new(&mut *sess);
-
-                let path = match req.payload.remote_path.as_deref() {
+                let path = match req.payload.remote_path.clone() {
                     Some(path) => path,
                     None => {
-                        send_error(&mut stream, &req.id, "Missing directory path in payload").await;
+                        send_error(&writer, &req.id, "Missing directory path in payload").await;
                         continue;
                     }
                 };
-                match sftp.list_directory_entries(path).await {
-                    Ok(entries) => {
+                spawn_session_action(writer.clone(), session_arc, req.id.clone(), move |sess| {
+                    Box::pin(async move {
+                        let mut sftp = Sftp::new(sess);
+                        let entries = sftp.list_directory_entries(&path).await?;
                         let stdout =
                             serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string());
-                        send_response(
-                            &mut stream,
-                            Response {
-                                id: req.id,
-                                status: "ok".to_string(),
-                                payload: ResponsePayload {
-                                    stdout,
-                                    stderr: String::new(),
-                                    exit_code: 0,
-                                },
-                            },
-                        )
-                        .await;
-                    }
-                    Err(e) => send_error(&mut stream, &req.id, &e.to_string()).await,
-                }
+                        Ok(ok_payload(stdout))
+                    })
+                })
+                .await;
             }
             "sftp_stat" => {
                 let session_arc = match get_session(&sessions, &req.id).await {
@@ -460,7 +508,7 @@ where
                     None => {
                         error!("Session dont founded by key: {}", &req.id);
                         send_error(
-                            &mut stream,
+                            &writer,
                             &req.id,
                             "Session dont founded by key. Create session first!",
                         )
@@ -468,35 +516,23 @@ where
                         continue;
                     }
                 };
-                let mut sess = session_arc.lock().await;
-                let mut sftp = Sftp::new(&mut *sess);
-                let path = match req.payload.remote_path.as_deref() {
+                let path = match req.payload.remote_path.clone() {
                     Some(path) => path,
                     None => {
-                        send_error(&mut stream, &req.id, "Missing path in payload").await;
+                        send_error(&writer, &req.id, "Missing path in payload").await;
                         continue;
                     }
                 };
-                match sftp.stat(path).await {
-                    Ok(entry) => {
+                spawn_session_action(writer.clone(), session_arc, req.id.clone(), move |sess| {
+                    Box::pin(async move {
+                        let mut sftp = Sftp::new(sess);
+                        let entry = sftp.stat(&path).await?;
                         let stdout =
                             serde_json::to_string(&entry).unwrap_or_else(|_| "{}".to_string());
-                        send_response(
-                            &mut stream,
-                            Response {
-                                id: req.id,
-                                status: "ok".to_string(),
-                                payload: ResponsePayload {
-                                    stdout,
-                                    stderr: String::new(),
-                                    exit_code: 0,
-                                },
-                            },
-                        )
-                        .await;
-                    }
-                    Err(e) => send_error(&mut stream, &req.id, &e.to_string()).await,
-                }
+                        Ok(ok_payload(stdout))
+                    })
+                })
+                .await;
             }
             "sftp_remove_file" => {
                 let session_arc = match get_session(&sessions, &req.id).await {
@@ -504,7 +540,7 @@ where
                     None => {
                         error!("Session dont founded by key: {}", &req.id);
                         send_error(
-                            &mut stream,
+                            &writer,
                             &req.id,
                             "Session dont founded by key. Create session first!",
                         )
@@ -512,33 +548,21 @@ where
                         continue;
                     }
                 };
-                let mut sess = session_arc.lock().await;
-                let mut sftp = Sftp::new(&mut *sess);
-                let path = match req.payload.remote_path.as_deref() {
+                let path = match req.payload.remote_path.clone() {
                     Some(path) => path,
                     None => {
-                        send_error(&mut stream, &req.id, "Missing file path in payload").await;
+                        send_error(&writer, &req.id, "Missing file path in payload").await;
                         continue;
                     }
                 };
-                match sftp.remove_file(path).await {
-                    Ok(_) => {
-                        send_response(
-                            &mut stream,
-                            Response {
-                                id: req.id,
-                                status: "ok".to_string(),
-                                payload: ResponsePayload {
-                                    stdout: String::new(),
-                                    stderr: String::new(),
-                                    exit_code: 0,
-                                },
-                            },
-                        )
-                        .await;
-                    }
-                    Err(e) => send_error(&mut stream, &req.id, &e.to_string()).await,
-                }
+                spawn_session_action(writer.clone(), session_arc, req.id.clone(), move |sess| {
+                    Box::pin(async move {
+                        let mut sftp = Sftp::new(sess);
+                        sftp.remove_file(&path).await?;
+                        Ok(ok_payload(String::new()))
+                    })
+                })
+                .await;
             }
             "sftp_remove_dir" => {
                 let session_arc = match get_session(&sessions, &req.id).await {
@@ -546,7 +570,7 @@ where
                     None => {
                         error!("Session dont founded by key: {}", &req.id);
                         send_error(
-                            &mut stream,
+                            &writer,
                             &req.id,
                             "Session dont founded by key. Create session first!",
                         )
@@ -554,33 +578,21 @@ where
                         continue;
                     }
                 };
-                let mut sess = session_arc.lock().await;
-                let mut sftp = Sftp::new(&mut *sess);
-                let path = match req.payload.remote_path.as_deref() {
+                let path = match req.payload.remote_path.clone() {
                     Some(path) => path,
                     None => {
-                        send_error(&mut stream, &req.id, "Missing directory path in payload").await;
+                        send_error(&writer, &req.id, "Missing directory path in payload").await;
                         continue;
                     }
                 };
-                match sftp.remove_directory(path).await {
-                    Ok(_) => {
-                        send_response(
-                            &mut stream,
-                            Response {
-                                id: req.id,
-                                status: "ok".to_string(),
-                                payload: ResponsePayload {
-                                    stdout: String::new(),
-                                    stderr: String::new(),
-                                    exit_code: 0,
-                                },
-                            },
-                        )
-                        .await;
-                    }
-                    Err(e) => send_error(&mut stream, &req.id, &e.to_string()).await,
-                }
+                spawn_session_action(writer.clone(), session_arc, req.id.clone(), move |sess| {
+                    Box::pin(async move {
+                        let mut sftp = Sftp::new(sess);
+                        sftp.remove_directory(&path).await?;
+                        Ok(ok_payload(String::new()))
+                    })
+                })
+                .await;
             }
             "sftp_create_dir" => {
                 let session_arc = match get_session(&sessions, &req.id).await {
@@ -588,7 +600,7 @@ where
                     None => {
                         error!("Session dont founded by key: {}", &req.id);
                         send_error(
-                            &mut stream,
+                            &writer,
                             &req.id,
                             "Session dont founded by key. Create session first!",
                         )
@@ -596,33 +608,21 @@ where
                         continue;
                     }
                 };
-                let mut sess = session_arc.lock().await;
-                let mut sftp = Sftp::new(&mut *sess);
-                let path = match req.payload.remote_path.as_deref() {
+                let path = match req.payload.remote_path.clone() {
                     Some(path) => path,
                     None => {
-                        send_error(&mut stream, &req.id, "Missing directory path in payload").await;
+                        send_error(&writer, &req.id, "Missing directory path in payload").await;
                         continue;
                     }
                 };
-                match sftp.create_directory(path).await {
-                    Ok(_) => {
-                        send_response(
-                            &mut stream,
-                            Response {
-                                id: req.id,
-                                status: "ok".to_string(),
-                                payload: ResponsePayload {
-                                    stdout: String::new(),
-                                    stderr: String::new(),
-                                    exit_code: 0,
-                                },
-                            },
-                        )
-                        .await;
-                    }
-                    Err(e) => send_error(&mut stream, &req.id, &e.to_string()).await,
-                }
+                spawn_session_action(writer.clone(), session_arc, req.id.clone(), move |sess| {
+                    Box::pin(async move {
+                        let mut sftp = Sftp::new(sess);
+                        sftp.create_directory(&path).await?;
+                        Ok(ok_payload(String::new()))
+                    })
+                })
+                .await;
             }
             "sftp_upload_file" => {
                 let session_arc = match get_session(&sessions, &req.id).await {
@@ -630,7 +630,7 @@ where
                     None => {
                         error!("Session dont founded by key: {}", &req.id);
                         send_error(
-                            &mut stream,
+                            &writer,
                             &req.id,
                             "Session dont founded by key. Create session first!",
                         )
@@ -638,40 +638,74 @@ where
                         continue;
                     }
                 };
-                let mut sess = session_arc.lock().await;
-                let mut sftp = Sftp::new(&mut *sess);
-                let path = match req.payload.local_path.as_deref() {
+                let local_path = match req.payload.local_path.clone() {
                     Some(path) => path,
                     None => {
-                        send_error(&mut stream, &req.id, "Missing file path in payload").await;
+                        send_error(&writer, &req.id, "Missing file path in payload").await;
                         continue;
                     }
                 };
-                let file = match req.payload.remote_path.as_deref() {
-                    Some(file) => file,
+                let remote_path = match req.payload.remote_path.clone() {
+                    Some(path) => path,
                     None => {
-                        send_error(&mut stream, &req.id, "Missing file content in payload").await;
+                        send_error(&writer, &req.id, "Missing file content in payload").await;
                         continue;
                     }
                 };
-                match sftp.upload_file(path, file).await {
-                    Ok(_) => {
-                        send_response(
-                            &mut stream,
-                            Response {
-                                id: req.id,
-                                status: "ok".to_string(),
-                                payload: ResponsePayload {
-                                    stdout: String::new(),
-                                    stderr: String::new(),
-                                    exit_code: 0,
+
+                let token = CancellationToken::new();
+                cancel_tokens
+                    .lock()
+                    .await
+                    .insert(req.id.clone(), token.clone());
+
+                let writer = writer.clone();
+                let cancel_tokens = cancel_tokens.clone();
+                let req_id = req.id.clone();
+
+                tokio::spawn(async move {
+                    let result = {
+                        let mut sess = session_arc.lock().await;
+                        let mut sftp = Sftp::new(&mut *sess);
+                        sftp.upload_file_cancellable(&local_path, &remote_path, &token)
+                            .await
+                    };
+                    cancel_tokens.lock().await.remove(&req_id);
+
+                    match result {
+                        Ok(_) => {
+                            send_response(
+                                &writer,
+                                Response {
+                                    id: req_id,
+                                    status: "ok".to_string(),
+                                    payload: ResponsePayload {
+                                        stdout: String::new(),
+                                        stderr: String::new(),
+                                        exit_code: 0,
+                                    },
                                 },
-                            },
-                        )
-                        .await;
+                            )
+                            .await;
+                        }
+                        Err(SynexError::Cancelled) => {
+                            send_response(
+                                &writer,
+                                Response {
+                                    id: req_id,
+                                    status: "cancelled".to_string(),
+                                    payload: ResponsePayload {
+                                        stdout: String::new(),
+                                        stderr: String::new(),
+                                        exit_code: 0,
+                                    },
+                                },
+                            )
+                            .await;
+                        }
+                        Err(e) => send_error(&writer, &req_id, &e.to_string()).await,
                     }
-                    Err(e) => send_error(&mut stream, &req.id, &e.to_string()).await,
-                }
+                });
             }
             "sftp_download_file" => {
                 let session_arc = match get_session(&sessions, &req.id).await {
@@ -679,7 +713,7 @@ where
                     None => {
                         error!("Session dont founded by key: {}", &req.id);
                         send_error(
-                            &mut stream,
+                            &writer,
                             &req.id,
                             "Session dont founded by key. Create session first!",
                         )
@@ -687,44 +721,78 @@ where
                         continue;
                     }
                 };
-                let mut sess = session_arc.lock().await;
-                let mut sftp = Sftp::new(&mut *sess);
-                let path = match req.payload.remote_path.as_deref() {
+                let remote_path = match req.payload.remote_path.clone() {
                     Some(path) => path,
                     None => {
-                        send_error(&mut stream, &req.id, "Missing file path in payload").await;
+                        send_error(&writer, &req.id, "Missing file path in payload").await;
                         continue;
                     }
                 };
-                let file = match req.payload.local_path.as_deref() {
-                    Some(file) => file,
+                let local_path = match req.payload.local_path.clone() {
+                    Some(path) => path,
                     None => {
-                        send_error(&mut stream, &req.id, "Missing file content in payload").await;
+                        send_error(&writer, &req.id, "Missing file content in payload").await;
                         continue;
                     }
                 };
-                match sftp.download_file(path, file).await {
-                    Ok(_) => {
-                        send_response(
-                            &mut stream,
-                            Response {
-                                id: req.id,
-                                status: "ok".to_string(),
-                                payload: ResponsePayload {
-                                    stdout: "".to_string(),
-                                    stderr: "".to_string(),
-                                    exit_code: 0,
+
+                let token = CancellationToken::new();
+                cancel_tokens
+                    .lock()
+                    .await
+                    .insert(req.id.clone(), token.clone());
+
+                let writer = writer.clone();
+                let cancel_tokens = cancel_tokens.clone();
+                let req_id = req.id.clone();
+
+                tokio::spawn(async move {
+                    let result = {
+                        let mut sess = session_arc.lock().await;
+                        let mut sftp = Sftp::new(&mut *sess);
+                        sftp.download_file_cancellable(&remote_path, &local_path, &token)
+                            .await
+                    };
+                    cancel_tokens.lock().await.remove(&req_id);
+
+                    match result {
+                        Ok(_) => {
+                            send_response(
+                                &writer,
+                                Response {
+                                    id: req_id,
+                                    status: "ok".to_string(),
+                                    payload: ResponsePayload {
+                                        stdout: String::new(),
+                                        stderr: String::new(),
+                                        exit_code: 0,
+                                    },
                                 },
-                            },
-                        )
-                        .await;
+                            )
+                            .await;
+                        }
+                        Err(SynexError::Cancelled) => {
+                            send_response(
+                                &writer,
+                                Response {
+                                    id: req_id,
+                                    status: "cancelled".to_string(),
+                                    payload: ResponsePayload {
+                                        stdout: String::new(),
+                                        stderr: String::new(),
+                                        exit_code: 0,
+                                    },
+                                },
+                            )
+                            .await;
+                        }
+                        Err(e) => send_error(&writer, &req_id, &e.to_string()).await,
                     }
-                    Err(e) => send_error(&mut stream, &req.id, &e.to_string()).await,
-                }
+                });
             }
             "sftp_move_file" => {
                 if req.payload.remote_path.is_none() || req.payload.destination_path.is_none() {
-                    send_error(&mut stream, &req.id, "Missing source or target in payload").await;
+                    send_error(&writer, &req.id, "Missing source or target in payload").await;
                     continue;
                 }
                 let session_arc = match get_session(&sessions, &req.id).await {
@@ -732,7 +800,7 @@ where
                     None => {
                         error!("Session dont founded by key: {}", &req.id);
                         send_error(
-                            &mut stream,
+                            &writer,
                             &req.id,
                             "Session dont founded by key. Create session first!",
                         )
@@ -740,36 +808,20 @@ where
                         continue;
                     }
                 };
-                let mut sess = session_arc.lock().await;
-                let mut sftp = Sftp::new(&mut *sess);
-                match sftp
-                    .move_file(
-                        &req.payload.remote_path.unwrap_or_default(),
-                        &req.payload.destination_path.unwrap_or_default(),
-                    )
-                    .await
-                {
-                    Ok(_) => {
-                        send_response(
-                            &mut stream,
-                            Response {
-                                id: req.id,
-                                status: "ok".to_string(),
-                                payload: ResponsePayload {
-                                    stdout: String::new(),
-                                    stderr: String::new(),
-                                    exit_code: 0,
-                                },
-                            },
-                        )
-                        .await;
-                    }
-                    Err(e) => send_error(&mut stream, &req.id, &e.to_string()).await,
-                }
+                let source = req.payload.remote_path.clone().unwrap_or_default();
+                let destination = req.payload.destination_path.clone().unwrap_or_default();
+                spawn_session_action(writer.clone(), session_arc, req.id.clone(), move |sess| {
+                    Box::pin(async move {
+                        let mut sftp = Sftp::new(sess);
+                        sftp.move_file(&source, &destination).await?;
+                        Ok(ok_payload(String::new()))
+                    })
+                })
+                .await;
             }
             "sftp_move_dir" => {
                 if req.payload.remote_path.is_none() || req.payload.destination_path.is_none() {
-                    send_error(&mut stream, &req.id, "Missing source or target in payload").await;
+                    send_error(&writer, &req.id, "Missing source or target in payload").await;
                     continue;
                 }
                 let session_arc = match get_session(&sessions, &req.id).await {
@@ -777,7 +829,7 @@ where
                     None => {
                         error!("Session dont founded by key: {}", &req.id);
                         send_error(
-                            &mut stream,
+                            &writer,
                             &req.id,
                             "Session dont founded by key. Create session first!",
                         )
@@ -785,41 +837,20 @@ where
                         continue;
                     }
                 };
-                let mut sess = session_arc.lock().await;
-                let mut sftp = Sftp::new(&mut *sess);
-                match sftp
-                    .move_dir(
-                        &req.payload.remote_path.unwrap_or_default(),
-                        &req.payload.destination_path.unwrap_or_default(),
-                    )
-                    .await
-                {
-                    Ok(_) => {
-                        send_response(
-                            &mut stream,
-                            Response {
-                                id: req.id,
-                                status: "ok".to_string(),
-                                payload: ResponsePayload {
-                                    stdout: String::new(),
-                                    stderr: String::new(),
-                                    exit_code: 0,
-                                },
-                            },
-                        )
-                        .await;
-                    }
-                    Err(e) => send_error(&mut stream, &req.id, &e.to_string()).await,
-                }
+                let source = req.payload.remote_path.clone().unwrap_or_default();
+                let destination = req.payload.destination_path.clone().unwrap_or_default();
+                spawn_session_action(writer.clone(), session_arc, req.id.clone(), move |sess| {
+                    Box::pin(async move {
+                        let mut sftp = Sftp::new(sess);
+                        sftp.move_dir(&source, &destination).await?;
+                        Ok(ok_payload(String::new()))
+                    })
+                })
+                .await;
             }
             "sftp_copy_file" => {
                 if req.payload.remote_path.is_none() || req.payload.destination_path.is_none() {
-                    send_error(
-                        &mut stream,
-                        &req.id,
-                        "Missing source or destination in payload",
-                    )
-                    .await;
+                    send_error(&writer, &req.id, "Missing source or destination in payload").await;
                     continue;
                 }
                 let session_arc = match get_session(&sessions, &req.id).await {
@@ -827,7 +858,7 @@ where
                     None => {
                         error!("Session dont founded by key: {}", &req.id);
                         send_error(
-                            &mut stream,
+                            &writer,
                             &req.id,
                             "Session dont founded by key. Create session first!",
                         )
@@ -835,23 +866,38 @@ where
                         continue;
                     }
                 };
-                let mut sess = session_arc.lock().await;
-                let mut sftp = Sftp::new(&mut *sess);
-                match sftp
-                    .copy_file(
-                        &req.payload.remote_path.unwrap_or_default(),
-                        &req.payload.destination_path.unwrap_or_default(),
-                    )
-                    .await
-                {
-                    Ok(_) => {
+                let source = req.payload.remote_path.clone().unwrap_or_default();
+                let destination = req.payload.destination_path.clone().unwrap_or_default();
+                spawn_session_action(writer.clone(), session_arc, req.id.clone(), move |sess| {
+                    Box::pin(async move {
+                        let mut sftp = Sftp::new(sess);
+                        sftp.copy_file(&source, &destination).await?;
+                        Ok(ok_payload(String::new()))
+                    })
+                })
+                .await;
+            }
+            "cancel" => {
+                // Отмена текущей операции на сессии target_id (ssh_exec или SFTP-передача).
+                // Сама отменяемая операция ответит отдельно, своим исходным id, со status: "cancelled".
+                let target = match req.payload.target_id.clone() {
+                    Some(target) => target,
+                    None => {
+                        send_error(&writer, &req.id, "Missing 'target_id' in payload").await;
+                        continue;
+                    }
+                };
+                let token = cancel_tokens.lock().await.get(&target).cloned();
+                match token {
+                    Some(token) => {
+                        token.cancel();
                         send_response(
-                            &mut stream,
+                            &writer,
                             Response {
                                 id: req.id,
                                 status: "ok".to_string(),
                                 payload: ResponsePayload {
-                                    stdout: String::new(),
+                                    stdout: format!("Cancel requested for {}", target),
                                     stderr: String::new(),
                                     exit_code: 0,
                                 },
@@ -859,13 +905,20 @@ where
                         )
                         .await;
                     }
-                    Err(e) => send_error(&mut stream, &req.id, &e.to_string()).await,
+                    None => {
+                        send_error(
+                            &writer,
+                            &req.id,
+                            &format!("No cancellable operation for id: {}", target),
+                        )
+                        .await;
+                    }
                 }
             }
             _ => {
                 eprintln!("❌ Неизвестное действие: {}", &req.action);
                 send_error(
-                    &mut stream,
+                    &writer,
                     &req.id,
                     &format!("Unknown action: {}", &req.action),
                 )
@@ -876,6 +929,11 @@ where
 
         info!("Обработка клиента завершена");
     }
+
+    // При закрытии IPC-подключения отменяем все его действия и закрываем все его сессии.
+    for (_, token) in cancel_tokens.lock().await.drain() {
+        token.cancel();
+    }
     let mut store = sessions.lock().await;
     for (id, sess_arc) in store.drain() {
         info!("Авто-закрытие сессии {} после отключения Python", id);
@@ -884,7 +942,7 @@ where
     }
 }
 
-async fn send_error<T: AsyncWrite + Unpin>(stream: &mut T, id: &str, msg: &str) {
+async fn send_error<T: AsyncWrite + Unpin>(writer: &SharedWriter<T>, id: &str, msg: &str) {
     let resp = Response {
         id: id.to_string(),
         status: "error".to_string(),
@@ -894,16 +952,54 @@ async fn send_error<T: AsyncWrite + Unpin>(stream: &mut T, id: &str, msg: &str) 
             exit_code: 1,
         },
     };
-    send_response(stream, resp).await;
+    send_response(writer, resp).await;
 }
 
-async fn send_response<T: AsyncWrite + Unpin, R: Serialize>(stream: &mut T, resp: R) {
+// Пишет под общим Mutex: основной цикл и спавленные задачи могут отвечать одновременно,
+// лок не даёт их кадрам перемешаться в потоке.
+async fn send_response<T: AsyncWrite + Unpin, R: Serialize>(writer: &SharedWriter<T>, resp: R) {
     if let Ok(packed) = rmp_serde::to_vec_named(&resp) {
         let len = (packed.len() as u32).to_be_bytes();
+        let mut stream = writer.lock().await;
         let _ = stream.write_all(&len).await;
         let _ = stream.write_all(&packed).await;
         let _ = stream.flush().await;
     }
+}
+
+// Выполняет действие над сессией в отдельной задаче.
+// Важно: лок сессии берётся внутри задачи, поэтому цикл чтения IPC не ждёт, пока
+// освободится занятая сессия (например, пока идёт `sleep 100`), и `cancel` доходит.
+async fn spawn_session_action<T, F>(
+    writer: SharedWriter<T>,
+    session_arc: Arc<Mutex<SshSession>>,
+    req_id: String,
+    action: F,
+) where
+    T: AsyncWrite + Unpin + Send + 'static,
+    F: for<'a> FnOnce(&'a mut SshSession) -> SessionAction<'a> + Send + 'static,
+{
+    tokio::spawn(async move {
+        let result = {
+            let mut sess = session_arc.lock().await;
+            action(&mut sess).await
+        };
+
+        match result {
+            Ok(payload) => {
+                send_response(
+                    &writer,
+                    Response {
+                        id: req_id,
+                        status: "ok".to_string(),
+                        payload,
+                    },
+                )
+                .await;
+            }
+            Err(e) => send_error(&writer, &req_id, &e.to_string()).await,
+        }
+    });
 }
 
 // async fn send_response(stream: &mut tokio::net::TcpStream, resp: Response) {
