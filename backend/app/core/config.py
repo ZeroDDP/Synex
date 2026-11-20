@@ -68,6 +68,14 @@ class Settings(BaseSettings):
     # Сколько служебная команда плагина (docker, git) ждёт, пока сессия освободится от
     # команды пользователя, сек. Дольше: 409 ssh_session_busy.
     SSH_SERVICE_WAIT: float = Field(default=10.0, ge=0)
+    # Терминал: сколько команд помнить для каждого сервера (0: не запоминать); где
+    # хранить историю (по умолчанию terminal_history.json рядом с keys.json).
+    TERMINAL_HISTORY: int = Field(default=500, ge=0)
+    # Лимит команды из терминала UI (WebSocket), если UI не передал свой, сек. Больше
+    # SSH_EXEC_TIMEOUT: apt upgrade или сборка идут минутами, а остановить команду
+    # теперь можно Ctrl+C.
+    TERMINAL_TIMEOUT: float = Field(default=600.0, gt=0, le=3600)
+    TERMINAL_HISTORY_PATH: Path | None = None
 
     # Хранилище SSH-ключей. По умолчанию keys.json в папке данных пользователя:
     # Windows %LOCALAPPDATA%\Synex, macOS ~/Library/Application Support/Synex,
@@ -207,6 +215,14 @@ class Settings(BaseSettings):
         if self.KNOWN_HOSTS_PATH.is_absolute():
             return self.KNOWN_HOSTS_PATH
         return BASE_DIR / self.KNOWN_HOSTS_PATH
+
+    @property
+    def terminal_history_path(self) -> Path:
+        if self.TERMINAL_HISTORY_PATH is None:
+            return user_data_dir() / "terminal_history.json"
+        if self.TERMINAL_HISTORY_PATH.is_absolute():
+            return self.TERMINAL_HISTORY_PATH
+        return BASE_DIR / self.TERMINAL_HISTORY_PATH
 
     @property
     def alerts_path(self) -> Path:

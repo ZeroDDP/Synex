@@ -152,6 +152,13 @@ class SSHCommandRequest(BaseModel):
             "Нужен POSIX shell (bash/zsh/sh). false: команда уходит воркеру как есть"
         ),
     )
+    allow_interactive: bool = Field(
+        default=False,
+        description=(
+            "Отправить, даже если программе нужен терминал (vim, top, tmux): без этого "
+            "такая команда отклоняется с 422 ssh_interactive_command и подсказкой"
+        ),
+    )
 
 
 class SSHExecRequest(SSHCommandRequest):
@@ -166,7 +173,44 @@ class SSHExecResponse(BaseModel):
     exit_code: int = Field(..., description="Код возврата (0 = успех; 124/137 при таймауте)")
     cwd: str | None = Field(default=None, description="Текущая директория после команды")
     timed_out: bool = Field(default=False, description="Команду прервал таймаут на сервере")
+    interrupted: bool = Field(default=False, description="Команду прервали (Ctrl+C в UI)")
     duration_ms: int = Field(..., description="Время выполнения, мс")
+
+
+class SSHInterruptResponse(BaseModel):
+    session_id: str
+    status: Literal["interrupted", "idle", "finished", "alive"] = Field(
+        ...,
+        description=(
+            "interrupted: команда остановлена; idle: ничего не выполнялось; finished: "
+            "закончилась сама раньше сигнала; alive: не остановилась даже от KILL"
+        ),
+    )
+    signal: Literal["INT", "TERM", "KILL"] | None = Field(
+        ..., description="Каким сигналом остановлена: INT (как Ctrl+C), потом TERM, KILL"
+    )
+    command: str | None = Field(..., description="Какую команду прерывали")
+
+
+class SSHHistoryResponse(BaseModel):
+    session_id: str
+    server: str = Field(..., description="user@host:port: история общая для его сессий")
+    commands: list[str] = Field(..., description="Старые первыми")
+
+
+class SSHHistoryCleared(BaseModel):
+    server: str
+    removed: int
+
+
+class SSHCompletionResponse(BaseModel):
+    word: str = Field(..., description="Что дополняли (слово под курсором)")
+    start: int = Field(..., description="Где слово начинается в строке: его заменяет вставка")
+    kind: Literal["command", "path"]
+    candidates: list[str] = Field(..., description="Варианты; у папок / в конце")
+    insert: list[str] = Field(..., description="Те же варианты с экранированными пробелами")
+    common: str = Field(..., description="Общее начало вариантов: можно вставить сразу")
+    truncated: bool = Field(..., description="Вариантов больше 200")
 
 
 class SSHDisconnectRequest(BaseModel):
@@ -195,8 +239,8 @@ class SSHStatusResponse(BaseModel):
 class SSHOutputEntry(BaseModel):
     """Запись буфера вывода. Поля, кроме seq/ts/kind, зависят от kind:
     opened {host, port, username}; command {command, cwd, source, request_id?};
-    result {stdout, stderr, exit_code, cwd, timed_out, duration_ms, request_id?,
-    truncated?}; error {error, detail, request_id?}."""
+    result {stdout, stderr, exit_code, cwd, timed_out, interrupted, duration_ms,
+    request_id?, truncated?}; error {error, detail, request_id?}."""
 
     model_config = {"extra": "allow"}
 

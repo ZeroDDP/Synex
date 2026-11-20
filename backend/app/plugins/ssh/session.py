@@ -87,6 +87,9 @@ class SSHSession:
     created_at: datetime = field(default_factory=_now)
     last_activity_at: datetime = field(default_factory=_now)
     running: str | None = None  # команда, которая сейчас выполняется
+    # Маркер идущей команды (у каждой свой): по нему её процессы находит прерывание
+    running_marker: str | None = None
+    interrupt_requested: bool = False  # идущую команду попросили прервать
     waiting: int = 0  # команды в очереди за ней
     closed: bool = False
     close_reason: str | None = None

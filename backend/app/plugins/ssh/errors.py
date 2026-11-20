@@ -50,6 +50,23 @@ class SSHSessionBusyError(AppError):
     status_code = 409
 
 
+class SSHInteractiveCommandError(AppError):
+    """Программе нужен терминал (vim, top, tmux), а команда идёт без него: висела бы до
+    таймаута. В extra: program и hint (чем заменить). allow_interactive=true отправит
+    всё равно."""
+
+    code = "ssh_interactive_command"
+    status_code = 422
+
+
+class SSHInterruptUnavailableError(AppError):
+    """Команду нельзя прервать: воркер не даёт второе подключение к серверу (через него
+    идёт сигнал), или команда ушла без обёртки (track_cwd=false)."""
+
+    code = "ssh_interrupt_unavailable"
+    status_code = 409
+
+
 class SSHHostKeyUnknownError(AppError):
     """Ключ сервера ещё не подтверждён (TOFU): UI показывает отпечаток пользователю,
     сохраняет его (POST /api/ssh/known-hosts) и подключается снова."""

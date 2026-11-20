@@ -15,17 +15,22 @@ from app.plugins.ssh.schemas import (
     KnownHostInfo,
     KnownHostRequest,
     SSHCommandRequest,
+    SSHCompletionResponse,
     SSHConnectRequest,
     SSHConnectResponse,
     SSHDisconnectRequest,
     SSHDisconnectResponse,
     SSHExecRequest,
     SSHExecResponse,
+    SSHHistoryCleared,
+    SSHHistoryResponse,
+    SSHInterruptResponse,
     SSHOutputResponse,
     SSHSessionInfo,
     SSHStatusResponse,
 )
 from app.plugins.ssh.session import SSHSession
+from app.plugins.ssh.terminal import complete, get_history, history_key, run_user_command
 from app.plugins.ssh.ws import serve_session_socket
 
 logger = structlog.get_logger()
@@ -62,6 +67,12 @@ CONNECT_ERRORS = {
 EXEC_ERRORS = {
     404: {"description": "Сессии session_id нет"},
     409: {"description": "Нет открытой сессии, или воркер её уже не знает"},
+    422: {
+        "description": (
+            "Программе нужен терминал (vim, top, tmux): ssh_interactive_command с program "
+            "и hint; allow_interactive=true отправит всё равно"
+        )
+    },
     502: {"description": "Ошибка воркера"},
     503: {"description": "Воркер не запущен или IPC недоступен"},
     504: {"description": "Воркер не вернул результат даже после лимита команды"},
@@ -128,6 +139,82 @@ async def exec_in_session(
     """Команды одной сессии выполняются по очереди; результат попадает и в ответ,
     и в буфер вывода сессии (его видят подключённые WebSocket)."""
     return _exec_response(await _execute(manager, session_id, request))
+
+
+@router.post(
+    "/sessions/{session_id}/interrupt",
+    response_model=SSHInterruptResponse,
+    summary="Прервать команду, которая выполняется в сессии (Ctrl+C)",
+    responses={
+        **NOT_FOUND,
+        409: {"description": "Прервать нельзя: воркер не даёт второе подключение"},
+    },
+)
+async def interrupt_session(session_id: SessionId, manager: Manager) -> SSHInterruptResponse:
+    """Сначала INT, как Ctrl+C; не помогло за 2 с: TERM, потом KILL. Ответ приходит, когда
+    команда остановилась; её результат (interrupted=true, код 130 у INT) приходит как
+    обычно: ответом на /exec и записью result в буфер и WebSocket."""
+    result = await manager.interrupt(session_id)
+    return SSHInterruptResponse(
+        session_id=result.session_id,
+        status=result.status,
+        signal=result.signal,  # type: ignore[arg-type]
+        command=result.command,
+    )
+
+
+@router.get(
+    "/sessions/{session_id}/history",
+    response_model=SSHHistoryResponse,
+    summary="История команд сервера этой сессии (стрелка вверх в терминале)",
+    responses=NOT_FOUND,
+)
+async def session_history(
+    session_id: SessionId,
+    manager: Manager,
+    limit: Annotated[int | None, Query(ge=1, le=10_000)] = None,
+) -> SSHHistoryResponse:
+    session = manager.get(session_id)
+    key = history_key(session.username, session.host, session.port)
+    return SSHHistoryResponse(
+        session_id=session.id, server=key, commands=get_history().get(key, limit)
+    )
+
+
+@router.delete(
+    "/sessions/{session_id}/history",
+    response_model=SSHHistoryCleared,
+    summary="Очистить историю команд сервера этой сессии",
+    responses=NOT_FOUND,
+)
+async def clear_session_history(session_id: SessionId, manager: Manager) -> SSHHistoryCleared:
+    session = manager.get(session_id)
+    key = history_key(session.username, session.host, session.port)
+    return SSHHistoryCleared(server=key, removed=get_history().clear(key))
+
+
+@router.get(
+    "/sessions/{session_id}/complete",
+    response_model=SSHCompletionResponse,
+    summary="Дополнение по Tab: команды и пути на сервере",
+    responses={
+        **NOT_FOUND,
+        409: {"description": "Сессия занята командой (ssh_session_busy)"},
+    },
+)
+async def complete_in_session(
+    session_id: SessionId,
+    manager: Manager,
+    line: Annotated[str, Query(max_length=4096, description="Набранная строка")],
+    cursor: Annotated[
+        int | None, Query(ge=0, description="Позиция курсора; без неё конец строки")
+    ] = None,
+) -> SSHCompletionResponse:
+    """Первое слово команды дополняется командами из PATH, остальные — файлами и папками
+    от текущей папки сессии. Вставка: заменить строку с `start` до курсора на
+    `insert[i]` (или на `common`, если вариантов несколько)."""
+    completion = await complete(manager, session_id, line, cursor)
+    return SSHCompletionResponse(**completion.as_dict())
 
 
 @router.get(
@@ -320,9 +407,7 @@ async def _open(request: SSHConnectRequest, manager: SSHSessionManager, keys: Ke
 async def _execute(
     manager: SSHSessionManager, session_id: str | None, request: SSHCommandRequest
 ) -> ExecResult:
-    return await manager.execute(
-        session_id, request.command, timeout=request.timeout, track_cwd=request.track_cwd
-    )
+    return await run_user_command(manager, session_id, request, source="api")
 
 
 def _exec_response(result: ExecResult) -> SSHExecResponse:
@@ -334,6 +419,7 @@ def _exec_response(result: ExecResult) -> SSHExecResponse:
         exit_code=result.exit_code,
         cwd=result.cwd,
         timed_out=result.timed_out,
+        interrupted=result.interrupted,
         duration_ms=result.duration_ms,
     )
 

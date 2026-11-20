@@ -414,6 +414,7 @@ async def test_cwd_persists_between_commands(shell_worker, missing_socket_path, 
             "exit_code": 0,
             "cwd": home,
             "timed_out": False,
+            "interrupted": False,
         }
 
         body = {"command": "mkdir -p app && cd app"}

@@ -116,7 +116,10 @@ servers through `fetch` and WebSocket.
 | POST | `/api/ssh/sessions` | Open a session: `{host, port, username, key_id \| key_path [+ passphrase] \| password}` → 201 |
 | GET | `/api/ssh/sessions/{id}` | One session: host, `cwd`, whether it is busy, how many tabs watch it |
 | DELETE | `/api/ssh/sessions/{id}` | Close the session |
-| POST | `/api/ssh/sessions/{id}/exec` | Run a command: `{command, timeout?, track_cwd?}` |
+| POST | `/api/ssh/sessions/{id}/exec` | Run a command: `{command, timeout?, track_cwd?, allow_interactive?}` |
+| POST | `/api/ssh/sessions/{id}/interrupt` | Interrupt the running command (Ctrl+C) |
+| GET / DELETE | `/api/ssh/sessions/{id}/history` | Command history of the session's server (`?limit=`), clear it |
+| GET | `/api/ssh/sessions/{id}/complete` | Tab completion: `?line=&cursor=` |
 | GET | `/api/ssh/sessions/{id}/output` | Output buffer: `?since=N&limit=M` |
 | WS | `/api/ssh/sessions/{id}/ws` | Session terminal: `?since=N` (see below) |
 | POST | `/api/ssh/connect` | Same as `POST /sessions`, shorter response |
@@ -327,9 +330,11 @@ one session can be watched by several tabs. The envelope is the same as in `/ws`
 | `hello` | server, right after connecting | `{protocol, session, replay: {since, count, gap, first_seq, last_seq}}` |
 | `output` | server: first the buffer records after `since`, then new ones | a buffer record `{seq, ts, kind, ...}` |
 | `closed` | server, when the session was closed; then it closes the connection | `{reason}`: `closed`, `worker_connection_lost`, `lost_in_worker`, `exec_timeout`, `shutdown` |
-| `error` | server, if a message could not be parsed or a command did not start | `{error, detail, request_id?}` |
+| `error` | server, if a message could not be parsed or a command did not start | `{error, detail, request_id?}`; `ssh_interactive_command` also has `program` and `hint` |
+| `interrupt` | server, in reply to `interrupt` | `{status, signal, command}`, as `POST .../interrupt` |
 | `pong` | server, in reply to `ping` | `data` from `ping` |
-| `exec` | UI | `{command, timeout?, track_cwd?, id?}`: `id` comes back in the records as `request_id` |
+| `exec` | UI | `{command, timeout?, track_cwd?, allow_interactive?, id?}`: `id` comes back in the records as `request_id` |
+| `interrupt` | UI | interrupt the running command (Ctrl+C) |
 | `close` | UI | close the session for all tabs |
 | `ping` | UI | anything |
 
@@ -350,7 +355,8 @@ ws.onopen = () => ws.send(JSON.stringify({type: "exec", data: {command: "uptime"
 
 ### /api/ssh/exec
 
-Response: `{session_id, seq, stdout, stderr, exit_code, cwd, timed_out, duration_ms}`
+Response: `{session_id, seq, stdout, stderr, exit_code, cwd, timed_out, interrupted,
+duration_ms}`
 (`seq`: the number of the result record in the output buffer). The same for
 `/sessions/{id}/exec`.
 
@@ -381,6 +387,45 @@ Response: `{session_id, seq, stdout, stderr, exit_code, cwd, timed_out, duration
   handles the requests of a session one by one and cannot cancel a command, so all following
   commands would be stuck behind the hung one: the session is closed (`ssh.session` with
   `reason: exec_timeout`, the terminal gets `closed`), and the UI opens a new one.
+
+### Terminal: interrupt, programs that need a terminal, history, completion
+
+- **Time limit**: a command from the terminal WebSocket without its own `timeout` gets
+  `TERMINAL_TIMEOUT` (600 s) instead of `SSH_EXEC_TIMEOUT`: `apt upgrade` or a build take
+  minutes, and Ctrl+C stops a command earlier.
+- **Interrupt** (Ctrl+C): `POST .../interrupt` or `{"type": "interrupt"}` in the terminal
+  WebSocket. The worker cannot cancel a command, so the backend opens a second SSH
+  connection to the same server, finds the processes of the running command by its marker
+  and sends them INT, as Ctrl+C does; if the command is still alive 2 s later, TERM, then
+  KILL. The reply comes when the command has stopped: `{status, signal, command}`, `status`
+  `interrupted`, `idle` (nothing was running), `finished` (it ended by itself before the
+  signal) or `alive` (not even KILL helped, for example a process of another user after
+  `sudo`). The command's own result arrives as usual, with `interrupted: true`,
+  `timed_out: false` and code 130 (INT), 143 (TERM) or 137 (KILL). Without a second
+  connection (the worker does not allow one) or for a command sent with
+  `track_cwd: false`: 409 `ssh_interrupt_unavailable`.
+- **Programs that need a terminal.** Commands run without a TTY, so full-screen programs
+  cannot work: `vim` hangs until the timeout and its escape codes break the terminal in the
+  UI, `top` exits with an error. Such a command is not sent: 422 `ssh_interactive_command`
+  with `program` and `hint` (what to use instead: `top -b -n 1`, the Files tab for editors,
+  `git commit -m`). Editors, `top`/`htop`/`btop`, `watch`, `tmux`/`screen`, `mc`, `ncdu`
+  and commands that open an editor (`git commit` without `-m`, `git rebase -i`,
+  `crontab -e`, `systemctl edit`) are checked in every part of the line, also after `sudo`,
+  `env` and `VAR=value`. `allow_interactive: true` sends the command anyway. `less`, `more`
+  and `man` work without a terminal like `cat` and are not refused.
+- **History**: `GET .../history?limit=` returns the commands of the session's server
+  (`user@host:port`, shared by all its sessions, oldest first); it survives a restart in
+  `terminal_history.json` next to `keys.json` (`TERMINAL_HISTORY_PATH`). A repeated command
+  is stored once, a command starting with a space is not stored (as `HISTCONTROL=ignorespace`
+  in bash: that is how commands with passwords are typed). `TERMINAL_HISTORY` (500) commands
+  per server, `0` turns the history off. `DELETE .../history` clears it.
+- **Completion**: `GET .../complete?line=cat /var/lo&cursor=15` →
+  `{word, start, kind, candidates, insert, common, truncated}`. The first word of a command
+  is completed with commands from `PATH`, the rest with files and folders from the session's
+  current folder (folders end with `/`). Replace the line from `start` up to the cursor with
+  `insert[i]` (spaces and special characters are escaped) or with `common` when there are
+  several candidates. It is a service command (`compgen` from bash, a shell pattern without
+  bash); while a command runs in the session the answer is 409 `ssh_session_busy`.
 
 ### Key vault
 
@@ -909,6 +954,8 @@ details, for example `host_key`); validation errors as 422:
 | 403 | `forbidden_origin` / `forbidden_host` | A request from a page not in `ALLOWED_ORIGINS` or with a foreign `Host` |
 | 409 | `key_exists` | The name is taken or this key is already saved |
 | 409 | `ssh_session_busy` | A plugin command did not get the session in time (`SSH_SERVICE_WAIT`) |
+| 422 | `ssh_interactive_command` | The program needs a terminal (vim, top, tmux): `program` and `hint`; `allow_interactive: true` sends it anyway |
+| 409 | `ssh_interrupt_unavailable` | The command cannot be interrupted: the worker gives no second connection, or `track_cwd: false` |
 | 429 | `ssh_too_many_sessions` | `SSH_MAX_SESSIONS` sessions are open |
 | 422 | `invalid_key` / — | The key cannot be read, a passphrase is needed, wrong fields |
 | 500 | `keystore_corrupted` | `keys.json` is damaged or encrypted with another master key |
@@ -955,8 +1002,9 @@ app/
     ssh/               /api/ssh/*: manager (session manager), session (a session and its
                        worker connection), buffer (output buffer), ws (terminal),
                        wrapper (cwd, timeout), known_hosts (trusted server keys),
-                       openssh_hosts (keys from the OpenSSH known_hosts), routes, schemas,
-                       errors
+                       openssh_hosts (keys from the OpenSSH known_hosts), interrupt
+                       (Ctrl+C through a second connection), terminal (programs that need
+                       a terminal, history, completion), routes, schemas, errors
     monitor/           /api/monitor/*: service (polling and publishing), aggregator
                        (window, statuses), values (worker response), hardware (disks, GPU)
     logs/              /api/logs/*: journal (journalctl commands and JSON parsing), files
@@ -997,7 +1045,7 @@ the status `disabled`.
 
 ```json
 [
-  {"name": "ssh", "version": "0.5.0", "description": "SSH-сессии и терминал через Rust-воркер",
+  {"name": "ssh", "version": "0.6.0", "description": "SSH-сессии и терминал через Rust-воркер",
    "requires": [], "status": "loaded", "error": null},
   {"name": "monitor", "version": "0.2.0", "description": "Метрики серверов: CPU, память, сеть, диски, видеокарты",
    "requires": ["ssh"], "status": "loaded", "error": null},

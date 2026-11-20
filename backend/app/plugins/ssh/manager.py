@@ -27,7 +27,7 @@ import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 import structlog
 
@@ -49,11 +49,13 @@ from app.plugins.ssh.errors import (
     SSHHostKeyMismatchError,
     SSHHostKeyRevokedError,
     SSHHostKeyUnknownError,
+    SSHInterruptUnavailableError,
     SSHNotConnectedError,
     SSHSessionBusyError,
     SSHSessionNotFoundError,
     SSHTooManySessionsError,
 )
+from app.plugins.ssh.interrupt import interrupt_script, parse_outcome
 from app.plugins.ssh.known_hosts import get_known_hosts, is_fingerprint, server_name
 from app.plugins.ssh.session import (
     AuthMethod,
@@ -141,6 +143,20 @@ class ExecResult:
     cwd: str | None
     timed_out: bool
     duration_ms: int
+    interrupted: bool = False  # команду прервали (Ctrl+C в UI)
+
+
+INTERRUPT_TIMEOUT = 15  # сек на весь скрипт прерывания (INT, TERM, KILL по 2 с)
+
+
+@dataclass(frozen=True)
+class InterruptResult:
+    session_id: str
+    # interrupted: команду остановили; idle: ничего не выполнялось; finished: закончилась
+    # сама до сигнала; alive: не остановилась даже от KILL
+    status: Literal["interrupted", "idle", "finished", "alive"]
+    signal: str | None  # INT, TERM или KILL: каким сигналом остановили
+    command: str | None
 
 
 @dataclass(frozen=True)
@@ -500,7 +516,8 @@ class SSHSessionManager:
             raise SSHNotConnectedError(f"SSH session '{session.id}' is closed")
 
         limit = timeout or settings.SSH_EXEC_TIMEOUT
-        marker = session.marker
+        # Свой маркер у каждой команды: по нему прерывание найдёт именно её процессы
+        marker = new_marker()
         if track_cwd:
             remote_limit = max(1, math.ceil(limit))
             wrapped = build_command(command, session.cwd, marker, remote_limit)
@@ -511,6 +528,8 @@ class SSHSessionManager:
 
         tag = {"request_id": request_id} if request_id else {}
         session.running = command
+        session.running_marker = marker if track_cwd else None
+        session.interrupt_requested = False
         session.record("command", {"command": command, "cwd": session.cwd, "source": source, **tag})
         # Текст команды может содержать пароли и токены: только в DEBUG
         logger.debug("SSH exec", session_id=session.id, command=command, timeout=limit)
@@ -525,6 +544,9 @@ class SSHSessionManager:
             )
         finally:
             session.running = None
+            session.running_marker = None
+        interrupted = session.interrupt_requested
+        session.interrupt_requested = False
         duration_ms = round((time.monotonic() - started) * 1000)
 
         stdout = str(response.get("stdout") or "")
@@ -538,7 +560,8 @@ class SSHSessionManager:
                 exit_code = result.exit_code
             if result.cwd:
                 session.cwd = result.cwd
-            timed_out = result.timed_out
+            # KILL при прерывании обёртка не отличает от таймаута: прерывание знаем сами
+            timed_out = result.timed_out and not interrupted
         stdout = stdout.rstrip("\r\n")
         stderr = str(response.get("stderr") or "").rstrip("\r\n")
 
@@ -550,6 +573,7 @@ class SSHSessionManager:
                 "exit_code": exit_code,
                 "cwd": session.cwd,
                 "timed_out": timed_out,
+                "interrupted": interrupted,
                 "duration_ms": duration_ms,
                 **tag,
             },
@@ -565,6 +589,7 @@ class SSHSessionManager:
             cwd=session.cwd,
             timed_out=timed_out,
             duration_ms=duration_ms,
+            interrupted=interrupted,
         )
 
     async def _exec_in_worker(
@@ -841,6 +866,52 @@ class SSHSessionManager:
 
     def companions(self, session_id: str) -> list[CompanionSession]:
         return list(self._companions.get(session_id, ()))
+
+    # ----------------------------------------------------------- interrupt
+
+    async def interrupt(self, session_id: str) -> InterruptResult:
+        """Прервать команду, которая выполняется в сессии (interrupt.py): сигнал её
+        процессам идёт служебной командой во втором подключении к тому же серверу.
+        Ответ, когда команда остановилась (результат с interrupted=true приходит в
+        ответ на саму команду и в буфер сессии)."""
+        session = self.get(session_id)
+        command, marker = session.running, session.running_marker
+        if command is None:
+            return InterruptResult(session.id, "idle", None, None)
+        if marker is None:
+            raise SSHInterruptUnavailableError(
+                "The command was sent without the wrapper (track_cwd=false): it cannot be "
+                "interrupted, wait for its timeout"
+            )
+        companion = await self.open_companion(session.id, "interrupt")
+        if companion is None:
+            raise SSHInterruptUnavailableError(
+                "The worker does not allow a second connection to the server, which the "
+                "interrupt needs: wait for the command's timeout"
+            )
+        session.interrupt_requested = True
+        logger.info("Interrupting SSH command", session_id=session.id)
+        try:
+            result = await self.companion_run_service(
+                companion, interrupt_script(marker), timeout=INTERRUPT_TIMEOUT
+            )
+        except BaseException:
+            if session.running_marker == marker:
+                session.interrupt_requested = False
+            raise
+        finally:
+            await self.close_companion(companion)
+        outcome = parse_outcome(result.stdout)
+        if outcome.state == "done":
+            return InterruptResult(session.id, "interrupted", outcome.signal, command)
+        if outcome.state == "none":
+            return InterruptResult(session.id, "finished", None, command)
+        if outcome.state == "alive":
+            return InterruptResult(session.id, "alive", "KILL", command)
+        raise SSHInterruptUnavailableError(
+            "The server did not run the interrupt: "
+            f"{(result.stderr or result.stdout).strip() or 'no answer'}"
+        )
 
     def _companion_lost(self, companion: CompanionSession) -> None:
         if not companion.closed:

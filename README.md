@@ -81,7 +81,7 @@ flowchart LR
 
 | Plugin | Version | Needs | API |
 |---|---|---|---|
-| `ssh` | 0.5.0 | — | `/api/ssh` — sessions, commands, terminal WebSocket, trusted server keys |
+| `ssh` | 0.6.0 | — | `/api/ssh` — sessions, commands, terminal WebSocket with Ctrl+C, history and completion, trusted server keys |
 | `keys` | 0.1.0 | — | `/api/keys` — encrypted SSH key vault |
 | `connections` | 0.1.0 | `ssh` | `/api/connections` — saved servers |
 | `monitor` | 0.2.0 | `ssh` | `/api/monitor` and the `metrics` stream in `/ws` |
