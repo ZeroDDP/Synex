@@ -14,7 +14,8 @@
 | UI | `frontend/` | http://localhost:5173 | Svelte + Vite. Ходит в backend по WebSocket `/ws` и HTTP |
 
 Готовый воркер лежит в репозитории для Windows x64 и Linux x86_64. На macOS, ARM и
-старом Linux его нужно собрать (см. «Воркер на macOS, ARM и старом Linux»).
+старом Linux его нужно собрать (см.
+[Воркер на macOS, ARM и старом Linux](#воркер-на-macos-arm-и-старом-linux)).
 
 ## Что установить
 
@@ -29,12 +30,11 @@ Python 3.12 uv поставит сам при первом `uv sync`, если �
 
 ## Первый запуск (один раз)
 
-Windows, PowerShell:
+**PowerShell** (Windows):
 
 ```powershell
 git clone https://github.com/ZeroDDP/Synex.git
-cd Synex
-cd backend
+cd Synex\backend
 uv sync
 Copy-Item .env.example .env
 cd ..\frontend
@@ -42,13 +42,16 @@ npm ci
 cd ..
 ```
 
-Linux и macOS:
+**bash** (Linux, macOS):
 
 ```bash
 git clone https://github.com/ZeroDDP/Synex.git
-cd Synex
-cd backend && uv sync && cp .env.example .env && cd ..
-cd frontend && npm ci && cd ..
+cd Synex/backend
+uv sync
+cp .env.example .env
+cd ../frontend
+npm ci
+cd ..
 ```
 
 `uv sync` ставит зависимости backend в `backend/.venv`, `npm ci` ставит зависимости UI
@@ -60,6 +63,15 @@ cd frontend && npm ci && cd ..
 
 Терминал 1, backend:
 
+**PowerShell** (Windows):
+
+```powershell
+cd backend
+uv run python -m app.main
+```
+
+**bash** (Linux, macOS):
+
 ```bash
 cd backend
 uv run python -m app.main
@@ -70,6 +82,15 @@ Backend готов, когда в логе появилось `Application start
 http://127.0.0.1:8000/api/health, там `"status": "ok"` и `"connected": true` у воркера.
 
 Терминал 2, UI:
+
+**PowerShell** (Windows):
+
+```powershell
+cd frontend
+npm run dev
+```
+
+**bash** (Linux, macOS):
 
 ```bash
 cd frontend
@@ -91,7 +112,8 @@ Backend проверяется и без UI:
 - http://127.0.0.1:8000/api/health: состояние backend и воркера;
 - http://127.0.0.1:8000/api/plugins: какие плагины загружены. Плагин выключается и
   включается без перезапуска backend: `POST /api/plugins/docker/disable` и
-  `POST /api/plugins/docker/enable` (из Swagger или
+  `POST /api/plugins/docker/enable` (из Swagger; в PowerShell
+  `Invoke-RestMethod -Method Post http://127.0.0.1:8000/api/plugins/docker/disable`, в bash
   `curl -X POST http://127.0.0.1:8000/api/plugins/docker/disable`). Выбор запоминается:
   после перезапуска backend выключенный плагин остаётся выключенным;
 - с `DEBUG=true` в `backend/.env` на http://127.0.0.1:8000/api/docs есть Swagger: там
@@ -135,6 +157,15 @@ Backend проверяется и без UI:
 Готовый `synex_worker` в репозитории собран для Windows x64 и Linux x86_64 с glibc 2.38
 и новее (Ubuntu 24.04, Debian 13, Fedora 39). В остальных случаях соберите его сами:
 
+**PowerShell** (Windows):
+
+```powershell
+cd core
+cargo build --release
+```
+
+**bash** (Linux, macOS):
+
 ```bash
 cd core
 cargo build --release
@@ -145,6 +176,19 @@ Backend сам находит `core/target/release/synex_worker` и берёт �
 
 ## Проверки перед коммитом
 
+**PowerShell** (Windows):
+
+```powershell
+cd backend
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest
+cd ..\frontend
+npm run build
+```
+
+**bash** (Linux, macOS):
+
 ```bash
 cd backend
 uv run ruff check . && uv run ruff format --check . && uv run pytest
@@ -152,8 +196,10 @@ cd ../frontend
 npm run build
 ```
 
-Интеграционные тесты backend (Linux и macOS, нужен OpenSSH-сервер `sshd`):
-`uv run pytest -m integration`. Проверки backend в GitHub Actions идут сами на каждый PR.
+Интеграционные тесты backend: `uv run pytest -m integration` (на Linux и macOS тесты сами
+запускают локальный OpenSSH-сервер `sshd`; на Windows нужен SSH-сервер в
+`SYNEX_TEST_SSH_*`, см. [backend/README.ru.md](backend/README.ru.md#тесты)). Проверки
+backend в GitHub Actions идут сами на каждый PR.
 
 ## Если что-то не работает
 
@@ -169,9 +215,9 @@ npm run build
 | Подключение отвечает 409 `ssh_host_key_mismatch` | Ключ сервера сменился: сервер переустановили или это подмена. Не подключайтесь, пока не выясните причину. Если смена ожидаемая, подтвердите новый ключ: `POST /api/ssh/known-hosts` с `replace: true` |
 | Подключение отвечает 409 `ssh_host_key_revoked` | Ключ сервера помечен как отозванный (`@revoked`) в `known_hosts` OpenSSH на этом компьютере (файл и строка названы в `detail`). Не подключайтесь: выясните, почему ключ отозван |
 | Модуль отвечает 404 `plugin_disabled` | Его выключили на ходу, и backend это помнит после перезапуска: `POST /api/plugins/<имя>/enable`. Вернуть набор из `PLUGINS_ENABLED` целиком: удалите `%LOCALAPPDATA%\Synex\plugins.json` (Linux: `~/.local/share/synex/plugins.json`, macOS: `~/Library/Application Support/Synex/plugins.json`) и перезапустите backend |
-| Файлы: 502 `sftp_unavailable` и в тексте `synex_worker build has no SFTP` | Старая сборка воркера без SFTP. Обновите репозиторий (`git pull`) или соберите воркер: `cd core && cargo build --release`, затем перезапустите backend |
+| Файлы: 502 `sftp_unavailable` и в тексте `synex_worker build has no SFTP` | Старая сборка воркера без SFTP. Обновите репозиторий (`git pull`) или соберите воркер (`cargo build --release` в папке `core/`, см. [Воркер на macOS, ARM и старом Linux](#воркер-на-macos-arm-и-старом-linux)), затем перезапустите backend |
 | Файлы: 502 `sftp_unavailable` и в тексте `Subsystem sftp` | На сервере выключен SFTP: добавьте в `/etc/ssh/sshd_config` строку `Subsystem sftp internal-sftp` и перезапустите sshd |
-| Linux: `GLIBC_2.38 not found` | Готовый воркер не подходит: соберите его (`cd core && cargo build --release`) |
+| Linux: `GLIBC_2.38 not found` | Готовый воркер не подходит: соберите его (`cargo build --release` в папке `core/`, см. [Воркер на macOS, ARM и старом Linux](#воркер-на-macos-arm-и-старом-linux)) |
 | macOS: воркер сразу завершается с кодом -9 | Карантин macOS: `xattr -d com.apple.quarantine <путь к synex_worker>` или соберите воркер сами |
 | `keystore_unavailable` | Нет системного хранилища паролей: задайте `KEYSTORE_MASTER_KEY` (как сгенерировать, написано в `backend/.env.example`) |
 | Windows: backend не подключается к воркеру после запуска через `uvicorn --reload` | Запускайте только `uv run python -m app.main`: с `--reload` и `--workers` Named Pipe к воркеру не работает |

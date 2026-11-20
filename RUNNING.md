@@ -14,7 +14,8 @@ details: [backend/README.md](backend/README.md).
 | UI | `frontend/` | http://localhost:5173 | Svelte + Vite. Talks to the backend over WebSocket `/ws` and HTTP |
 
 A prebuilt worker for Windows x64 and Linux x86_64 is in the repository. On macOS, ARM
-and older Linux you have to build it (see "Worker on macOS, ARM and older Linux").
+and older Linux you have to build it (see
+[Worker on macOS, ARM and older Linux](#worker-on-macos-arm-and-older-linux)).
 
 ## What to install
 
@@ -29,12 +30,11 @@ If Python 3.12 is missing, uv installs it on the first `uv sync`.
 
 ## First run (once)
 
-Windows, PowerShell:
+**PowerShell** (Windows):
 
 ```powershell
 git clone https://github.com/ZeroDDP/Synex.git
-cd Synex
-cd backend
+cd Synex\backend
 uv sync
 Copy-Item .env.example .env
 cd ..\frontend
@@ -42,13 +42,16 @@ npm ci
 cd ..
 ```
 
-Linux and macOS:
+**bash** (Linux, macOS):
 
 ```bash
 git clone https://github.com/ZeroDDP/Synex.git
-cd Synex
-cd backend && uv sync && cp .env.example .env && cd ..
-cd frontend && npm ci && cd ..
+cd Synex/backend
+uv sync
+cp .env.example .env
+cd ../frontend
+npm ci
+cd ..
 ```
 
 `uv sync` installs the backend dependencies into `backend/.venv`, `npm ci` installs the UI
@@ -61,6 +64,15 @@ You need two terminals, both started from the repository root.
 
 Terminal 1, backend:
 
+**PowerShell** (Windows):
+
+```powershell
+cd backend
+uv run python -m app.main
+```
+
+**bash** (Linux, macOS):
+
 ```bash
 cd backend
 uv run python -m app.main
@@ -71,6 +83,15 @@ The backend is ready when the log shows `Application startup complete` and
 http://127.0.0.1:8000/api/health, it shows `"status": "ok"` and `"connected": true` for the worker.
 
 Terminal 2, UI:
+
+**PowerShell** (Windows):
+
+```powershell
+cd frontend
+npm run dev
+```
+
+**bash** (Linux, macOS):
 
 ```bash
 cd frontend
@@ -92,7 +113,8 @@ You can check the backend without the UI:
 - http://127.0.0.1:8000/api/health: state of the backend and the worker;
 - http://127.0.0.1:8000/api/plugins: which plugins are loaded. A plugin can be disabled and
   enabled without restarting the backend: `POST /api/plugins/docker/disable` and
-  `POST /api/plugins/docker/enable` (from Swagger or
+  `POST /api/plugins/docker/enable` (from Swagger; in PowerShell
+  `Invoke-RestMethod -Method Post http://127.0.0.1:8000/api/plugins/docker/disable`, in bash
   `curl -X POST http://127.0.0.1:8000/api/plugins/docker/disable`). The choice is remembered:
   a disabled plugin stays disabled after a backend restart;
 - with `DEBUG=true` in `backend/.env`, Swagger is at http://127.0.0.1:8000/api/docs. There you
@@ -136,6 +158,15 @@ The prebuilt `synex_worker` in the repository is built for Windows x64 and for L
 with glibc 2.38 or newer (Ubuntu 24.04, Debian 13, Fedora 39). In any other case, build it
 yourself:
 
+**PowerShell** (Windows):
+
+```powershell
+cd core
+cargo build --release
+```
+
+**bash** (Linux, macOS):
+
 ```bash
 cd core
 cargo build --release
@@ -146,6 +177,19 @@ Which file was started is shown in the backend log (`Rust worker started`, `path
 
 ## Checks before a commit
 
+**PowerShell** (Windows):
+
+```powershell
+cd backend
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest
+cd ..\frontend
+npm run build
+```
+
+**bash** (Linux, macOS):
+
 ```bash
 cd backend
 uv run ruff check . && uv run ruff format --check . && uv run pytest
@@ -153,8 +197,10 @@ cd ../frontend
 npm run build
 ```
 
-Backend integration tests (Linux and macOS, need the OpenSSH server `sshd`):
-`uv run pytest -m integration`. GitHub Actions runs the backend checks on every PR by itself.
+Backend integration tests: `uv run pytest -m integration` (on Linux and macOS the tests
+start a local OpenSSH server `sshd` themselves; on Windows they need an SSH server in
+`SYNEX_TEST_SSH_*`, see [backend/README.md](backend/README.md#tests)). GitHub Actions runs
+the backend checks on every PR by itself.
 
 ## Troubleshooting
 
@@ -170,9 +216,9 @@ Backend integration tests (Linux and macOS, need the OpenSSH server `sshd`):
 | Connecting answers 409 `ssh_host_key_mismatch` | The server key has changed: the server was reinstalled or this is an attack. Do not connect until you know why. If the change is expected, confirm the new key: `POST /api/ssh/known-hosts` with `replace: true` |
 | Connecting answers 409 `ssh_host_key_revoked` | The server key is marked as revoked (`@revoked`) in the OpenSSH `known_hosts` on this computer (the file and line are named in `detail`). Do not connect: find out why the key was revoked |
 | A module answers 404 `plugin_disabled` | It was disabled at runtime, and the backend remembers that after a restart: `POST /api/plugins/<name>/enable`. To return to exactly `PLUGINS_ENABLED`: delete `%LOCALAPPDATA%\Synex\plugins.json` (Linux: `~/.local/share/synex/plugins.json`, macOS: `~/Library/Application Support/Synex/plugins.json`) and restart the backend |
-| Files: 502 `sftp_unavailable` with `synex_worker build has no SFTP` in the text | An old worker build without SFTP. Update the repository (`git pull`) or build the worker: `cd core && cargo build --release`, then restart the backend |
+| Files: 502 `sftp_unavailable` with `synex_worker build has no SFTP` in the text | An old worker build without SFTP. Update the repository (`git pull`) or build the worker (`cargo build --release` in `core/`, see [Worker on macOS, ARM and older Linux](#worker-on-macos-arm-and-older-linux)), then restart the backend |
 | Files: 502 `sftp_unavailable` with `Subsystem sftp` in the text | SFTP is off on the server: add `Subsystem sftp internal-sftp` to `/etc/ssh/sshd_config` and restart sshd |
-| Linux: `GLIBC_2.38 not found` | The prebuilt worker does not fit: build it (`cd core && cargo build --release`) |
+| Linux: `GLIBC_2.38 not found` | The prebuilt worker does not fit: build it (`cargo build --release` in `core/`, see [Worker on macOS, ARM and older Linux](#worker-on-macos-arm-and-older-linux)) |
 | macOS: the worker exits right away with code -9 | macOS quarantine: `xattr -d com.apple.quarantine <path to synex_worker>`, or build the worker yourself |
 | `keystore_unavailable` | No system password store: set `KEYSTORE_MASTER_KEY` (how to generate it is written in `backend/.env.example`) |
 | Windows: the backend does not connect to the worker when started with `uvicorn --reload` | Start it only with `uv run python -m app.main`: with `--reload` and `--workers` the Named Pipe to the worker does not work |
