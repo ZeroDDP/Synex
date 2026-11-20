@@ -12,7 +12,7 @@ class SSHPlugin(BasePlugin):
     и упрощённый API одной сессии /api/ssh/connect, exec, disconnect, status."""
 
     name = "ssh"
-    version = "0.5.0"
+    version = "0.6.0"
     description = "SSH-сессии и терминал через Rust-воркер"
     # Открытие и закрытие сессий (в том числе потерянных при падении воркера) в /ws:
     # UI обновляет список сессий, даже если терминал сессии не открыт

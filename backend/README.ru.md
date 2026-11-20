@@ -115,7 +115,10 @@ glibc 2.38 или новее (Ubuntu 24.04, Debian 13, Fedora 39 и новее).
 | POST | `/api/ssh/sessions` | Открыть сессию: `{host, port, username, key_id \| key_path [+ passphrase] \| password}` → 201 |
 | GET | `/api/ssh/sessions/{id}` | Одна сессия: хост, `cwd`, занята ли, сколько вкладок смотрят |
 | DELETE | `/api/ssh/sessions/{id}` | Закрыть сессию |
-| POST | `/api/ssh/sessions/{id}/exec` | Выполнить команду: `{command, timeout?, track_cwd?}` |
+| POST | `/api/ssh/sessions/{id}/exec` | Выполнить команду: `{command, timeout?, track_cwd?, allow_interactive?}` |
+| POST | `/api/ssh/sessions/{id}/interrupt` | Прервать идущую команду (Ctrl+C) |
+| GET / DELETE | `/api/ssh/sessions/{id}/history` | История команд сервера сессии (`?limit=`), очистить её |
+| GET | `/api/ssh/sessions/{id}/complete` | Дополнение по Tab: `?line=&cursor=` |
 | GET | `/api/ssh/sessions/{id}/output` | Буфер вывода: `?since=N&limit=M` |
 | WS | `/api/ssh/sessions/{id}/ws` | Терминал сессии: `?since=N` (см. ниже) |
 | POST | `/api/ssh/connect` | То же, что `POST /sessions`, ответ короче |
@@ -326,9 +329,11 @@ OpenSSH backend только читает. Запись в `known_hosts.json` в
 | `hello` | сервер, сразу после подключения | `{protocol, session, replay: {since, count, gap, first_seq, last_seq}}` |
 | `output` | сервер: сначала записи буфера после `since`, потом новые | запись буфера `{seq, ts, kind, ...}` |
 | `closed` | сервер, когда сессию закрыли; затем закрывает подключение | `{reason}`: `closed`, `worker_connection_lost`, `lost_in_worker`, `exec_timeout`, `shutdown` |
-| `error` | сервер, если сообщение не разобрано или команда не запустилась | `{error, detail, request_id?}` |
+| `error` | сервер, если сообщение не разобрано или команда не запустилась | `{error, detail, request_id?}`; у `ssh_interactive_command` ещё `program` и `hint` |
+| `interrupt` | сервер, в ответ на `interrupt` | `{status, signal, command}`, как `POST .../interrupt` |
 | `pong` | сервер, в ответ на `ping` | `data` из `ping` |
-| `exec` | UI | `{command, timeout?, track_cwd?, id?}`: `id` вернётся в записях как `request_id` |
+| `exec` | UI | `{command, timeout?, track_cwd?, allow_interactive?, id?}`: `id` вернётся в записях как `request_id` |
+| `interrupt` | UI | прервать идущую команду (Ctrl+C) |
 | `close` | UI | закрыть сессию для всех вкладок |
 | `ping` | UI | что угодно |
 
@@ -349,7 +354,8 @@ ws.onopen = () => ws.send(JSON.stringify({type: "exec", data: {command: "uptime"
 
 ### /api/ssh/exec
 
-Ответ: `{session_id, seq, stdout, stderr, exit_code, cwd, timed_out, duration_ms}`
+Ответ: `{session_id, seq, stdout, stderr, exit_code, cwd, timed_out, interrupted,
+duration_ms}`
 (`seq`: номер записи с результатом в буфере вывода). То же для `/sessions/{id}/exec`.
 
 - `timeout`: лимит выполнения в секундах (по умолчанию `SSH_EXEC_TIMEOUT=30`, максимум 3600).
@@ -377,6 +383,45 @@ ws.onopen = () => ws.send(JSON.stringify({type: "exec", data: {command: "uptime"
   запросы сессии по очереди и отменять команду не умеет, поэтому все следующие команды
   встали бы за зависшей: сессия закрывается (`ssh.session` с `reason: exec_timeout`,
   терминал получает `closed`), UI открывает новую.
+
+### Терминал: прерывание, программы, которым нужен терминал, история, дополнение
+
+- **Лимит времени**: команда из WebSocket терминала без своего `timeout` получает
+  `TERMINAL_TIMEOUT` (600 с) вместо `SSH_EXEC_TIMEOUT`: `apt upgrade` или сборка идут
+  минутами, а остановить команду раньше можно Ctrl+C.
+- **Прерывание** (Ctrl+C): `POST .../interrupt` или `{"type": "interrupt"}` в WebSocket
+  терминала. Воркер не умеет отменять команду, поэтому backend открывает второе
+  SSH-подключение к тому же серверу, находит процессы идущей команды по её маркеру и шлёт
+  им INT, как Ctrl+C; если команда через 2 с жива, TERM, потом KILL. Ответ приходит, когда
+  команда остановилась: `{status, signal, command}`, `status` — `interrupted`, `idle`
+  (ничего не выполнялось), `finished` (закончилась сама раньше сигнала) или `alive` (не
+  помог даже KILL, например процесс другого пользователя после `sudo`). Результат самой
+  команды приходит как обычно, с `interrupted: true`, `timed_out: false` и кодом 130
+  (INT), 143 (TERM) или 137 (KILL). Без второго подключения (воркер его не даёт) или для
+  команды с `track_cwd: false`: 409 `ssh_interrupt_unavailable`.
+- **Программы, которым нужен терминал.** Команды идут без TTY, поэтому полноэкранные
+  программы работать не могут: `vim` висит до таймаута, и его escape-коды ломают
+  терминал в UI, `top` завершается с ошибкой. Такая команда не отправляется: 422
+  `ssh_interactive_command` с `program` и `hint` (чем заменить: `top -b -n 1`, вкладка
+  Files для редакторов, `git commit -m`). Редакторы, `top`/`htop`/`btop`, `watch`,
+  `tmux`/`screen`, `mc`, `ncdu` и команды, которые открывают редактор (`git commit` без
+  `-m`, `git rebase -i`, `crontab -e`, `systemctl edit`), проверяются в каждой части
+  строки, в том числе после `sudo`, `env` и `VAR=value`. `allow_interactive: true`
+  отправляет команду всё равно. `less`, `more` и `man` без терминала работают как `cat` и
+  не отклоняются.
+- **История**: `GET .../history?limit=` отдаёт команды сервера сессии (`user@host:port`,
+  общая для всех его сессий, старые первыми); она переживает перезапуск в
+  `terminal_history.json` рядом с `keys.json` (`TERMINAL_HISTORY_PATH`). Повтор подряд
+  хранится один раз, команда с пробелом в начале не запоминается (как
+  `HISTCONTROL=ignorespace` в bash: так вводят команды с паролями). `TERMINAL_HISTORY`
+  (500) команд на сервер, `0` выключает историю. `DELETE .../history` очищает её.
+- **Дополнение**: `GET .../complete?line=cat /var/lo&cursor=15` →
+  `{word, start, kind, candidates, insert, common, truncated}`. Первое слово команды
+  дополняется командами из `PATH`, остальные — файлами и папками от текущей папки сессии
+  (у папок `/` в конце). Замените строку от `start` до курсора на `insert[i]` (пробелы и
+  спецсимволы экранированы) или на `common`, если вариантов несколько. Это служебная
+  команда (`compgen` из bash, без bash — шаблон shell); пока в сессии идёт команда, ответ
+  409 `ssh_session_busy`.
 
 ### Хранилище ключей
 
@@ -895,6 +940,8 @@ ws.onmessage = (e) => console.log(JSON.parse(e.data));
 | 403 | `forbidden_origin` / `forbidden_host` | Запрос со страницы не из `ALLOWED_ORIGINS` или с чужим `Host` |
 | 409 | `key_exists` | Имя занято или этот ключ уже сохранён |
 | 409 | `ssh_session_busy` | Команда плагина не дождалась, пока сессия освободится (`SSH_SERVICE_WAIT`) |
+| 422 | `ssh_interactive_command` | Программе нужен терминал (vim, top, tmux): `program` и `hint`; `allow_interactive: true` отправит всё равно |
+| 409 | `ssh_interrupt_unavailable` | Команду не прервать: воркер не даёт второе подключение, или `track_cwd: false` |
 | 429 | `ssh_too_many_sessions` | Открыто `SSH_MAX_SESSIONS` сессий |
 | 422 | `invalid_key` / — | Ключ не читается, нужна парольная фраза, неверные поля |
 | 500 | `keystore_corrupted` | `keys.json` повреждён или зашифрован другим мастер-ключом |
@@ -942,8 +989,9 @@ app/
     ssh/               /api/ssh/*: manager (менеджер сессий), session (сессия и её
                        подключение к воркеру), buffer (буфер вывода), ws (терминал),
                        wrapper (cwd, таймаут), known_hosts (доверенные ключи серверов),
-                       openssh_hosts (ключи из known_hosts OpenSSH), routes, schemas,
-                       errors
+                       openssh_hosts (ключи из known_hosts OpenSSH), interrupt (Ctrl+C
+                       через второе подключение), terminal (программы, которым нужен
+                       терминал, история, дополнение), routes, schemas, errors
     monitor/           /api/monitor/*: service (опрос и публикация), aggregator
                        (окно, статусы), values (ответ воркера), hardware (диски, GPU)
     logs/              /api/logs/*: journal (команды journalctl и разбор JSON), files
@@ -983,7 +1031,7 @@ tests/                 pytest; fake_worker.py имитирует synex_worker
 
 ```json
 [
-  {"name": "ssh", "version": "0.5.0", "description": "SSH-сессии и терминал через Rust-воркер",
+  {"name": "ssh", "version": "0.6.0", "description": "SSH-сессии и терминал через Rust-воркер",
    "requires": [], "status": "loaded", "error": null},
   {"name": "monitor", "version": "0.2.0", "description": "Метрики серверов: CPU, память, сеть, диски, видеокарты",
    "requires": ["ssh"], "status": "loaded", "error": null},
