@@ -105,18 +105,44 @@ More: [backend/README.md](backend/README.md) (API, plugins, errors, tests) ·
 You need **Python 3.12 + [uv](https://docs.astral.sh/uv/)** and **Node.js 22**. The worker is
 prebuilt for Windows x64 and Linux x86_64; on macOS build it with `cargo` (see RUNNING.md).
 
-```bash
+**PowerShell** (Windows):
+
+```powershell
 git clone https://github.com/ZeroDDP/Synex.git
-cd Synex
-cd backend && uv sync && cp .env.example .env && cd ..   # PowerShell: Copy-Item .env.example .env
-cd frontend && npm ci && cd ..
+cd Synex\backend
+uv sync
+Copy-Item .env.example .env
+cd ..\frontend
+npm ci
+cd ..
 ```
 
-Run in two terminals:
+**bash** (Linux, macOS):
 
 ```bash
-cd backend && uv run python -m app.main      # API on http://127.0.0.1:8000
-cd frontend && npm run dev                   # UI on http://localhost:5173
+git clone https://github.com/ZeroDDP/Synex.git
+cd Synex/backend
+uv sync
+cp .env.example .env
+cd ../frontend
+npm ci
+cd ..
+```
+
+Run in two terminals, from the repository root:
+
+**PowerShell** (Windows):
+
+```powershell
+cd backend; uv run python -m app.main     # terminal 1: API on http://127.0.0.1:8000
+cd frontend; npm run dev                  # terminal 2: UI on http://localhost:5173
+```
+
+**bash** (Linux, macOS):
+
+```bash
+cd backend && uv run python -m app.main   # terminal 1: API on http://127.0.0.1:8000
+cd frontend && npm run dev                # terminal 2: UI on http://localhost:5173
 ```
 
 No server at hand? Set `WS_FAKE_METRICS=true` in `backend/.env` and the dashboard shows a demo server.
@@ -157,15 +183,26 @@ Synex/
 
 **Tests**
 
+**PowerShell** (Windows):
+
+```powershell
+cd backend
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest                       # unit tests, run anywhere
+uv run pytest -m integration        # full cycle: real worker + the SSH server from SYNEX_TEST_SSH_*
+cd ..\core
+cargo test
+```
+
+**bash** (Linux, macOS):
+
 ```bash
 cd backend
 uv run ruff check . && uv run ruff format --check .
 uv run pytest                       # unit tests, run anywhere
-uv run pytest -m integration        # full cycle: real worker + local sshd (Linux/macOS)
-```
-
-```bash
-cd core
+uv run pytest -m integration        # full cycle: real worker + local sshd
+cd ../core
 cargo test
 ```
 

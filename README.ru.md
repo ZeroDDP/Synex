@@ -107,18 +107,44 @@ flowchart LR
 лежит в репозитории для Windows x64 и Linux x86_64; на macOS его собирают через `cargo`
 (см. RUNNING.ru.md).
 
-```bash
+**PowerShell** (Windows):
+
+```powershell
 git clone https://github.com/ZeroDDP/Synex.git
-cd Synex
-cd backend && uv sync && cp .env.example .env && cd ..   # PowerShell: Copy-Item .env.example .env
-cd frontend && npm ci && cd ..
+cd Synex\backend
+uv sync
+Copy-Item .env.example .env
+cd ..\frontend
+npm ci
+cd ..
 ```
 
-Запуск в двух терминалах:
+**bash** (Linux, macOS):
 
 ```bash
-cd backend && uv run python -m app.main      # API на http://127.0.0.1:8000
-cd frontend && npm run dev                   # UI на http://localhost:5173
+git clone https://github.com/ZeroDDP/Synex.git
+cd Synex/backend
+uv sync
+cp .env.example .env
+cd ../frontend
+npm ci
+cd ..
+```
+
+Запуск в двух терминалах, оба из корня репозитория:
+
+**PowerShell** (Windows):
+
+```powershell
+cd backend; uv run python -m app.main     # терминал 1: API на http://127.0.0.1:8000
+cd frontend; npm run dev                  # терминал 2: UI на http://localhost:5173
+```
+
+**bash** (Linux, macOS):
+
+```bash
+cd backend && uv run python -m app.main   # терминал 1: API на http://127.0.0.1:8000
+cd frontend && npm run dev                # терминал 2: UI на http://localhost:5173
 ```
 
 Нет сервера под рукой? Поставьте `WS_FAKE_METRICS=true` в `backend/.env`, и на Dashboard
@@ -160,15 +186,26 @@ Synex/
 
 **Тесты**
 
+**PowerShell** (Windows):
+
+```powershell
+cd backend
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest                       # unit-тесты, идут где угодно
+uv run pytest -m integration        # полный цикл: настоящий воркер + SSH-сервер из SYNEX_TEST_SSH_*
+cd ..\core
+cargo test
+```
+
+**bash** (Linux, macOS):
+
 ```bash
 cd backend
 uv run ruff check . && uv run ruff format --check .
 uv run pytest                       # unit-тесты, идут где угодно
-uv run pytest -m integration        # полный цикл: настоящий воркер + локальный sshd (Linux/macOS)
-```
-
-```bash
-cd core
+uv run pytest -m integration        # полный цикл: настоящий воркер + локальный sshd
+cd ../core
 cargo test
 ```
 
