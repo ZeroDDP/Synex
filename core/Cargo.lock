@@ -1788,6 +1788,7 @@ dependencies = [
  "serde",
  "thiserror 1.0.69",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -1799,6 +1800,7 @@ dependencies = [
  "serde_json",
  "synex_core",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "uuid",

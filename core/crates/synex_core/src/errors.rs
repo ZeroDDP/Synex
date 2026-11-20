@@ -62,6 +62,10 @@ pub enum SynexError {
     // 8. Ошибка SFTP с кодом из SftpErrorKind.
     #[error("{}: {}", .0.code(), .1)]
     Sftp(SftpErrorKind, String),
+
+    // 9. Операцию остановили через действие cancel: это не сбой, а штатная отмена.
+    #[error("cancelled")]
+    Cancelled,
 }
 
 pub type Result<T> = std::result::Result<T, SynexError>;
