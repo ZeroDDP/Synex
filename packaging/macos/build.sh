@@ -11,7 +11,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
 echo "==> Worker: cargo build --release in core/ ($(uname -m))"
-(cd "$ROOT/core" && cargo build --release -p synex_worker)
+# Воркер для macOS 11 и новее на любом Mac сборки: цель отсюда берут и Rust, и C-части (cc)
+(cd "$ROOT/core" && MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}" \
+    cargo build --release -p synex_worker)
 WORKER="$ROOT/core/target/release/synex_worker"
 
 cd "$ROOT"

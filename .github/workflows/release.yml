@@ -27,7 +27,8 @@ permissions:
 
 concurrency:
   group: release-${{ github.ref }}
-  cancel-in-progress: false
+  # Новый push в PR отменяет прошлую проверку сборки; выпуск по тегу не отменяется
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
@@ -42,10 +43,12 @@ jobs:
             os: windows-latest
           - name: linux-x64
             os: ubuntu-22.04 # старая glibc: сборка запустится и на более новых системах
+          # macOS 13 и 14 GitHub снял с раннеров (macos-14 — 2 ноября 2026): macos-15 —
+          # Apple Silicon, macos-15-intel — Intel
           - name: macos-arm64
-            os: macos-14
+            os: macos-15
           - name: macos-x64
-            os: macos-13
+            os: macos-15-intel
     steps:
       - uses: actions/checkout@v5
 
