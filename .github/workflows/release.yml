@@ -1,0 +1,140 @@
+# Сборка Synex для Windows, Linux и macOS. У каждой ОС свой сборщик и свой воркер
+# (packaging/<ос>/build.*): Windows берёт готовый synex_worker.exe из репозитория, Linux и
+# macOS собирают воркер из core/ (Linux — на Ubuntu 22.04: готовый воркер из репозитория
+# собран на 24.04 и требует glibc 2.38, а так сборка запустится и на 22.04, Debian 12).
+# Каждый сборщик проверяет сборку: запускает её без окна и ждёт ответа /api/health с
+# запущенным воркером.
+#
+# Тег v* (например, v0.1.0): сборки уходят в GitHub Release этого тега. Версия в теге
+# должна совпадать с файлом VERSION. Версии 0.x публикуются как pre-release.
+# Pull request, который меняет сборку, и ручной запуск (Actions → release → Run
+# workflow): только сборки в артефактах, без выпуска.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "packaging/**"
+      - "VERSION"
+      - "backend/app/desktop.py"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+          - name: linux-x64
+            os: ubuntu-22.04 # старая glibc: сборка запустится и на более новых системах
+          - name: macos-arm64
+            os: macos-14
+          - name: macos-x64
+            os: macos-13
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Version matches the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          version="$(tr -d '[:space:]' < VERSION)"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::VERSION is $version, the tag is $GITHUB_REF_NAME"
+            exit 1
+          fi
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Rust (Linux and macOS build the worker from core/)
+        if: runner.os != 'Windows'
+        uses: dtolnay/rust-toolchain@stable
+      - if: runner.os != 'Windows'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./packaging/windows/build.ps1 --clean
+      - name: Build (Linux)
+        if: runner.os == 'Linux'
+        run: bash packaging/linux/build.sh --from-core --clean
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
+        run: bash packaging/macos/build.sh --clean
+
+      - name: Memory (without the window)
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then app=packaging/dist/Synex/Synex.exe
+          elif [ "$RUNNER_OS" = "macOS" ]; then app=packaging/dist/Synex.app/Contents/MacOS/Synex
+          else app=packaging/dist/Synex/Synex; fi
+          uv run --project backend --with psutil python packaging/measure_memory.py --app "$app" --settle 15
+          cat packaging/dist/memory-*.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synex-${{ matrix.name }}
+          path: |
+            packaging/dist/Synex-*
+            packaging/dist/SHA256SUMS.txt
+            packaging/dist/memory-*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Collect files
+        run: |
+          mkdir dist
+          find artifacts -name 'Synex-*' -type f -exec cp {} dist/ \;
+          cat artifacts/*/SHA256SUMS.txt > dist/SHA256SUMS.txt
+          for f in artifacts/*/memory-*.md; do cat "$f"; echo; done > memory.md
+          ls -la dist
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            $0 ~ "^## \\[" v "\\]" { show = 1; next }
+            show && /^## \[/ { exit }
+            show { print }
+          ' CHANGELOG.md > notes.md
+          { echo; echo "### Memory"; echo; cat memory.md; } >> notes.md
+          cat notes.md
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=""
+          case "$GITHUB_REF_NAME" in v0.*|*-*) prerelease="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --title "Synex ${GITHUB_REF_NAME#v}" --notes-file notes.md $prerelease
