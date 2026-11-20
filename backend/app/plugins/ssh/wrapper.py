@@ -9,7 +9,9 @@
 Что уходит на сервер (упрощённо, <M> это маркер со случайной частью):
 
     if timeout -k 3 1 true >/dev/null 2>&1; then          # есть ли рабочий timeout
-      ( timeout -k 3 <N> "$SHELL" -c '<inner>' &           # в фоне: нужен его PID
+      if env --default-signal=INT true >/dev/null 2>&1      # Ctrl+C: см. ниже
+      then set -- env --default-signal=INT; else set --; fi
+      ( "$@" timeout -k 3 <N> "$SHELL" -c '<inner>' &      # в фоне: нужен его PID
         pid=$!; wait $pid; rc=$?
         case $rc in 124|137) kill -KILL -$pid;; esac        # добить группу
         exit $rc ) 3>&2 2>/dev/null
@@ -31,6 +33,12 @@
   Иначе процесс, который игнорирует TERM, держал бы вывод открытым, и канал SSH не
   закрылся бы: timeout из uutils (Ubuntu 26.04 и новее) шлёт KILL только своему
   дочернему процессу, а GNU timeout не трогает группу, если команда умерла от TERM.
+* `env --default-signal=INT` перед timeout (если env это умеет: GNU coreutils 8.31+,
+  uutils): команда, запущенная в фоне (`&`), получает SIGINT игнорируемым. GNU timeout
+  ставит на INT свой обработчик, и у команды он снова обычный, а timeout из uutils
+  ждёт сигналы через sigwait и оставляет INT игнорируемым для всей команды: Ctrl+C
+  (interrupt.py) на Ubuntu 26.04 не действовал бы. `set --` и `"$@"`, а не переменная:
+  zsh не делит значение переменной на слова.
 * Маркер C печатается, только если команда дошла до конца: в нём код и новая cwd.
   Маркер E печатает внешняя оболочка всегда: он даёт код даже после `exit 3`.
 * `3>&2 2>/dev/null` и `exec 2>&3` в начале <inner>: stderr команды идёт как обычно,
@@ -93,10 +101,13 @@ def build_command(
     shell = '"${SHELL:-/bin/sh}"'
     if timeout:
         body_with_stderr = shlex.quote("exec 2>&3 3>&-\n" + body)
-        # timeout в фоне, чтобы знать его PID: это и номер его группы процессов
+        # timeout в фоне, чтобы знать его PID: это и номер его группы процессов.
+        # env --default-signal=INT: Ctrl+C работает и с timeout из uutils (см. выше)
         run = (
             f"if timeout -k {kill_after} 1 true >/dev/null 2>&1; then "
-            f"( timeout -k {kill_after} {timeout} {shell} -c {body_with_stderr} </dev/null & "
+            f"if env --default-signal=INT true >/dev/null 2>&1; "
+            f"then set -- env --default-signal=INT; else set --; fi; "
+            f'( "$@" timeout -k {kill_after} {timeout} {shell} -c {body_with_stderr} </dev/null & '
             f"{PID_VAR}=$!; wait ${PID_VAR}; {RC_VAR}=$?; "
             f"case ${RC_VAR} in 124|137) kill -KILL -${PID_VAR} 2>/dev/null;; esac; "
             f"exit ${RC_VAR} ) "
