@@ -19,7 +19,8 @@ class AlertInfo(BaseModel):
     value: float | None = Field(description="Последнее значение (у server: 1 не отвечает)")
     peak: float | None = Field(description="Худшее значение, пока алерт горел")
     threshold: float | None
-    message: str
+    title: str = Field(description='Заголовок карточки: "CPU load above 90%"')
+    message: str = Field(description="Подробности под заголовком")
     started_at: int = Field(description="Когда загорелся, мс Unix")
     updated_at: int
     resolved_at: int | None

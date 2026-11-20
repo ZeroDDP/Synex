@@ -116,6 +116,7 @@ def test_cpu_must_stay_high_for_the_rule_duration():
         97,
     )
     assert "CPU load on 10.0.0.1:22 is 97%" in alert.message
+    assert alert.title == "CPU load above 95%"
     assert alert.status == "active" and not alert.acknowledged
 
 
@@ -130,6 +131,7 @@ def test_warning_escalates_to_critical_and_back_with_hysteresis():
         "critical",
         90,
     )
+    assert worse.alert.title == "Memory usage above 90%"  # заголовок меняется с уровнем
     assert run(engine, clock, server(memory=88)) == []  # ниже 90, но не ниже 90-5
     (better,) = run(engine, clock, server(memory=84))
     assert (better.action, better.alert.severity) == ("updated", "warning")
@@ -147,6 +149,7 @@ def test_each_disk_and_gpu_has_its_own_alert():
     alerts = {c.alert.target: c.alert.severity for c in changes}
     assert alerts == {"/": "critical", "/data": "warning"}
     assert all("Disk usage of /" in c.alert.message for c in changes)
+    assert {c.alert.title for c in changes} == {"Disk / above 95%", "Disk /data above 90%"}
     # Раздел отмонтировали при живом сервере: его алерт гаснет
     (gone,) = run(engine, clock, server(disks={"/": 96}))
     assert (gone.alert.target, gone.action) == ("/data", "resolved")
@@ -160,6 +163,7 @@ def test_each_disk_and_gpu_has_its_own_alert():
         "critical",
     )
     assert "GPU temperature of GPU 0" in hot.alert.message and "°C" in hot.alert.message
+    assert hot.alert.title == "GPU 0 temperature above 90°C"
 
 
 def test_server_that_does_not_respond():
@@ -171,6 +175,7 @@ def test_server_that_does_not_respond():
     (down,) = run(engine, clock, server(status="error"), after=31)
     assert (down.alert.metric, down.alert.severity) == ("server", "critical")
     assert "does not respond" in down.alert.message
+    assert down.alert.title == "Server does not respond"
     # Пока сервер не отвечает, его старые CPU не зажигают алерт
     assert [c.alert.metric for c in run(engine, clock, server(status="stale"), after=100)] == []
     (back,) = run(engine, clock, server(cpu=10))

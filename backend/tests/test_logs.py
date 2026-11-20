@@ -44,6 +44,11 @@ def fast_logs(monkeypatch):
     logs_service._no_output_fields.clear()
 
 
+def texts(message: dict) -> list[str]:
+    """Тексты строк файла из ответа или сообщения живого лога."""
+    return [line["text"] for line in message["lines"]]
+
+
 def journal_with_entries() -> FakeJournal:
     fake = FakeJournal()
     fake.add("nginx started", unit="nginx.service")
@@ -108,6 +113,7 @@ def test_journal_entries_are_parsed_from_json_lines():
         "time": 1795000000123,
         "priority": 3,
         "level": "err",
+        "severity": "error",
         "unit": "nginx.service",
         "identifier": "nginx",
         "pid": 42,
@@ -412,13 +418,13 @@ async def test_file_tail_grep_and_errors(shell_rig: PluginRig, tmp_path: Path):
     response = await shell_rig.api.get(f"{BASE}/file", params={"path": str(log), "lines": 3})
     assert response.status_code == 200, response.text
     data = response.json()
-    assert data["lines"] == ["line 10", "Warning: disk", "last"]
+    assert texts(data) == ["line 10", "Warning: disk", "last"]
     assert data["size"] == data["offset"] == log.stat().st_size
     assert data["inode"] == str(log.stat().st_ino)
     assert data["truncated"] is False
 
     found = await shell_rig.api.get(f"{BASE}/file", params={"path": str(log), "grep": "WARN"})
-    assert found.json()["lines"] == ["Warning: disk"]
+    assert texts(found.json()) == ["Warning: disk"]
 
     missing = await shell_rig.api.get(f"{BASE}/file", params={"path": str(tmp_path / "nope")})
     assert (missing.status_code, missing.json()["error"]) == (404, "log_file_not_found")
@@ -437,7 +443,7 @@ async def test_file_tail_window(shell_rig: PluginRig, tmp_path: Path, monkeypatc
     response = await shell_rig.api.get(f"{BASE}/file", params={"path": str(log), "lines": 100})
     data = response.json()
     # В окно 4096 байт помещается 40 строк, первая из них неполная и отброшена
-    assert len(data["lines"]) == 40 and data["lines"][-1].startswith("00099")
+    assert len(data["lines"]) == 40 and texts(data)[-1].startswith("00099")
     assert data["truncated"] is True
 
 
@@ -475,16 +481,16 @@ async def test_live_file(shell_rig: PluginRig, tmp_path: Path):
             hello = await recv_json(ws)
             assert hello["data"]["source"] == "file"
             first = await next_of(ws, "lines")
-            assert first["lines"] == ["old 2"]
+            assert texts(first) == ["old 2"]
             assert first["rotated"] is False
 
             with log.open("a") as f:
                 f.write("new 1\nnew 2 hal")
             later = await next_of(ws, "lines")
-            assert later["lines"] == ["new 1"]  # недописанная строка ждёт
+            assert texts(later) == ["new 1"]  # недописанная строка ждёт
             with log.open("a") as f:
                 f.write("f done\n")
-            assert (await next_of(ws, "lines"))["lines"] == ["new 2 half done"]
+            assert texts(await next_of(ws, "lines")) == ["new 2 half done"]
 
             # logrotate: старый файл переименован, новый создан заново
             log.rename(tmp_path / "app.log.1")
@@ -493,7 +499,7 @@ async def test_live_file(shell_rig: PluginRig, tmp_path: Path):
             rotated = await next_of(ws, "lines")
             while not rotated["rotated"]:
                 rotated = await next_of(ws, "lines")
-            assert rotated["lines"] == ["after rotate"]
+            assert texts(rotated) == ["after rotate"]
             offset, inode = rotated["offset"], rotated["inode"]
 
         # Переподключение с offset и inode: только то, что дописали после
@@ -501,7 +507,7 @@ async def test_live_file(shell_rig: PluginRig, tmp_path: Path):
             f.write("while away\n")
         async with connect(f"{url}&offset={offset}&inode={inode}") as ws:
             await recv_json(ws)
-            assert (await next_of(ws, "lines"))["lines"] == ["while away"]
+            assert texts(await next_of(ws, "lines")) == ["while away"]
 
 
 @needs_sh
@@ -512,16 +518,16 @@ async def test_live_file_grep_and_missing_file(shell_rig: PluginRig, tmp_path: P
     async with serve(shell_rig.app) as base:
         async with connect(f"{base}{BASE}/file/ws?path={log}&grep=error") as ws:
             await recv_json(ws)
-            assert (await next_of(ws, "lines"))["lines"] == ["ERROR b"]
+            assert texts(await next_of(ws, "lines")) == ["ERROR b"]
             with log.open("a") as f:
                 f.write("INFO c\nerror d\n")
-            assert (await next_of(ws, "lines"))["lines"] == ["error d"]
+            assert texts(await next_of(ws, "lines")) == ["error d"]
             # Файл пропал после первого чтения: временная помеха, поток живёт
             os.remove(log)
             error = await next_of(ws, "error")
             assert (error["error"], error["fatal"]) == ("log_file_not_found", False)
             log.write_text("error again\n")
-            assert (await next_of(ws, "lines"))["lines"] == ["error again"]
+            assert texts(await next_of(ws, "lines")) == ["error again"]
 
         # Файла нет с самого начала: ошибка и закрытие
         async with connect(f"{base}{BASE}/file/ws?path={tmp_path}/none.log") as ws:
@@ -531,3 +537,63 @@ async def test_live_file_grep_and_missing_file(shell_rig: PluginRig, tmp_path: P
             with pytest.raises(ConnectionClosed) as closed:
                 await asyncio.wait_for(ws.recv(), 5)
             assert closed.value.rcvd is not None and closed.value.rcvd.code == 4404
+
+
+# ---------------------------------------------------------------- severity
+
+
+@pytest.mark.parametrize(
+    ("line", "severity"),
+    [
+        ("2026/11/20 10:00:01 [error] 812#812: upstream timed out", "error"),
+        ("Nov 20 10:00:01 web CRON[1]: (root) CMD (run-parts)", "info"),
+        ("WARN  disk almost full", "warn"),
+        ("level=warning msg=slow", "warn"),
+        ("DEBUG connecting", "debug"),
+        ("INFO: retry after error", "info"),  # первое слово уровня важнее
+        ("FATAL out of memory", "error"),
+        ("ordinary line", "info"),
+    ],
+)
+def test_severity_of_file_lines(line: str, severity: str):
+    assert logfiles.detect_severity(line) == severity
+
+
+async def test_journal_severity_tabs(rig):
+    r, _ = rig
+
+    async def messages(**params) -> list[str]:
+        response = await r.api.get(f"{BASE}/journal", params=params)
+        assert response.status_code == 200, response.text
+        return [e["message"] for e in response.json()["entries"]]
+
+    # Вкладки UI: ERROR = emerg..err, WARN = только warning, INFO = notice и info
+    assert await messages(severity="error") == ["upstream timed out"]
+    assert await messages(severity="warn") == ["Disk almost FULL"]
+    assert len(await messages(severity="info")) == 3
+    entries = (await r.api.get(f"{BASE}/journal")).json()["entries"]
+    assert [e["severity"] for e in entries] == ["info", "info", "error", "info", "warn"]
+    both = await r.api.get(f"{BASE}/journal", params={"severity": "warn", "priority": "err"})
+    assert (both.status_code, both.json()["error"]) == (422, "logs_bad_filter")
+
+
+@needs_sh
+@needs_timeout_utility
+async def test_file_severity_filter(shell_rig: PluginRig, tmp_path: Path):
+    log = tmp_path / "app.log"
+    log.write_text("INFO start\nERROR boom\nWARN slow\nERROR again\n")
+    response = await shell_rig.api.get(
+        f"{BASE}/file", params={"path": str(log), "severity": "error"}
+    )
+    assert response.json()["lines"] == [
+        {"text": "ERROR boom", "severity": "error"},
+        {"text": "ERROR again", "severity": "error"},
+    ]
+    async with serve(shell_rig.app) as base:
+        url = f"{base}{BASE}/file/ws?path={log}&severity=warn"
+        async with connect(url) as ws:
+            await recv_json(ws)
+            assert texts(await next_of(ws, "lines")) == ["WARN slow"]
+            with log.open("a") as f:
+                f.write("INFO x\nWARNING y\n")
+            assert texts(await next_of(ws, "lines")) == ["WARNING y"]

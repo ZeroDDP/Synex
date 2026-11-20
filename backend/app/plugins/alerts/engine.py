@@ -71,6 +71,7 @@ class Alert:
     resolved_at: int | None = None
     resolved_reason: str | None = None
     acknowledged: bool = False
+    title: str = ""
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -85,6 +86,7 @@ class Alert:
             "value": self.value,
             "peak": self.peak,
             "threshold": self.threshold,
+            "title": self.title,
             "message": self.message,
             "started_at": self.started_at,
             "updated_at": self.updated_at,
@@ -235,6 +237,7 @@ class AlertEngine:
                 updated_at=now_ms,
             )
             alert.message = _message(alert, rule)
+            alert.title = _title(alert)
             self.active[key] = alert
             return Change("fired", alert)
 
@@ -264,6 +267,7 @@ class AlertEngine:
         alert.updated_at = now_ms
         alert.acknowledged = False  # стало хуже или лучше: пользователь должен увидеть
         alert.message = _message(alert, rule)
+        alert.title = _title(alert)
         return Change("updated", alert)
 
     def _resolve(self, key: Key, now_ms: int, reason: str) -> Change:
@@ -299,6 +303,19 @@ def _down(server_name: str, snapshot: MetricsSnapshot) -> bool | None:
 
 def _off(metric: Metric) -> AlertRule:
     return AlertRule(metric=metric, warning=100, critical=100, enabled=False)
+
+
+def _title(alert: Alert) -> str:
+    """Короткий заголовок карточки алерта (как в макете: "Disk usage above 85%")."""
+    if alert.metric == "server":
+        return "Server does not respond"
+    unit = _UNITS[alert.metric]
+    limit = f"{alert.threshold:g}{unit}"
+    if alert.metric == "disk":
+        return f"Disk {alert.target} above {limit}"
+    if alert.metric == "gpu_temperature":
+        return f"GPU {alert.target} temperature above {limit}"
+    return f"{_LABELS[alert.metric]} above {limit}"
 
 
 def _message(alert: Alert, rule: AlertRule) -> str:

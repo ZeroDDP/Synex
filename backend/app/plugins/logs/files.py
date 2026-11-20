@@ -17,6 +17,7 @@ head -c, grep -F. stat в формате GNU и busybox (-c), на BSD и macOS 
 
 from __future__ import annotations
 
+import re
 import shlex
 from dataclasses import dataclass, field
 
@@ -93,6 +94,38 @@ if [ $((size - from)) -gt "$C" ]; then skipped=$((size - C - from)) from=$((size
 echo "{HEADER} ok $size $inode $from $state $skipped"
 if [ "$size" -gt "$from" ]; then tail -c +$((from + 1)) -- "$f" | head -c $((size - from)); fi
 {_END}"""
+
+
+# ------------------------------------------------------------------ severity
+
+# Уровень строки обычного лога: первое слово уровня в начале строки ("ERROR", "[warn]",
+# "level=info", "<E>" не ищем). Вкладки UI: error, warn, info, debug.
+_LEVEL_WORD = re.compile(
+    r"\b(emerg(?:ency)?|alert|crit(?:ical)?|fatal|panic|err(?:or)?|warn(?:ing)?|notice|"
+    r"info|debug|trace)\b",
+    re.IGNORECASE,
+)
+_SEVERITY = {
+    "emerg": "error", "emergency": "error", "alert": "error", "crit": "error",
+    "critical": "error", "fatal": "error", "panic": "error", "err": "error", "error": "error",
+    "warn": "warn", "warning": "warn", "notice": "info", "info": "info",
+    "debug": "debug", "trace": "debug",
+}  # fmt: skip
+LEVEL_SCAN = 160  # уровень ищется в начале строки: дальше это уже текст сообщения
+
+
+def detect_severity(line: str) -> str:
+    """Вкладка UI для строки файла лога; без слова уровня — info."""
+    match = _LEVEL_WORD.search(line, 0, LEVEL_SCAN)
+    return _SEVERITY[match.group(1).lower()] if match else "info"
+
+
+def log_lines(lines: list[str], severity: str | None = None) -> list[dict[str, str]]:
+    """Строки для UI: текст и уровень; severity — только строки этой вкладки."""
+    items = [{"text": line, "severity": detect_severity(line)} for line in lines]
+    if severity is not None:
+        items = [item for item in items if item["severity"] == severity]
+    return items
 
 
 # ------------------------------------------------------------------- parsing

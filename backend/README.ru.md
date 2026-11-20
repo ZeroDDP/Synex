@@ -554,27 +554,34 @@ POST /api/connections
 {"server": "10.0.0.5:22", "session_id": "...", "more": true,
  "before": "s=...;i=1a2", "cursor": "s=...;i=1b7",
  "entries": [{"cursor": "s=...;i=1b7", "time": 1795150389396, "priority": 3, "level": "err",
-              "unit": "nginx.service", "identifier": "nginx", "pid": 812,
-              "hostname": "web-1", "boot_id": "...", "message": "upstream timed out"}]}
+              "severity": "error", "unit": "nginx.service", "identifier": "nginx",
+              "pid": 812, "hostname": "web-1", "boot_id": "...",
+              "message": "upstream timed out"}]}
 ```
 
-  Фильтры: `unit` (можно несколько и шаблон: `nginx*`), `priority` (`emerg` ... `debug`:
-  этот уровень и важнее), `grep` (текст, не регулярное выражение; латиница без учёта
-  регистра), `since` и `until` (Unix-время в мс или то, что понимает journalctl:
-  `2026-11-20 10:00:00`, `today`, `-1h`), `boot=true` (с последней загрузки). Страница
-  старше: `?before=<before прошлой страницы>`. `more: true`: могут быть записи старше.
-  Фильтр, который journalctl не принял: 422 `logs_bad_filter`, его текст в `detail`.
+  `severity` — вкладка уровня в UI: `error` (emerg ... err), `warn` (warning), `info`
+  (notice, info), `debug`.
+
+  Фильтры: `unit` (можно несколько и шаблон: `nginx*`), `severity` (только одна вкладка, как
+  кнопки ALL / INFO / WARN / ERROR экрана Logs), `priority` (`emerg` ... `debug`: этот
+  уровень и важнее; не вместе с `severity`), `grep` (текст, не регулярное выражение;
+  латиница без учёта регистра), `since` и `until` (Unix-время в мс или то, что понимает
+  journalctl: `2026-11-20 10:00:00`, `today`, `-1h`), `boot=true` (с последней загрузки).
+  Страница старше: `?before=<before прошлой страницы>`. `more: true`: могут быть записи
+  старше. Фильтр, который journalctl не принял: 422 `logs_bad_filter`, его текст в `detail`.
 - `GET .../files?dir=/var/log`: файлы папки и её подпапок (на один уровень): `{path, name,
   readable, size, modified, rotated}`; сжатые (`.gz`, `.xz`) и двоичные (`wtmp`, `btmp`,
   `lastlog`, файлы журнала) не показываются. `rotated`: старая копия после logrotate
   (`syslog.1`). Файлы, которые пользователь SSH не может читать, есть в списке с
   `readable: false`.
 - `GET .../file?path=/var/log/syslog&lines=200`: последние строки `{lines, size, offset,
-  inode, truncated}`; с `grep` — последние строки с этим текстом. `truncated: true`: строк
-  меньше, чем просили, потому что читаются только последние `LOGS_CHUNK_BYTES` (1 МиБ) файла.
+  inode, truncated}`, строка — `{text, severity}`: уровень берётся по слову уровня в начале
+  строки (`ERROR`, `[warn]`, `level=info`), без него `info`. С `grep` — последние строки с
+  этим текстом, с `severity` — только строки этой вкладки. `truncated: true`: строк меньше,
+  чем просили, потому что читаются только последние `LOGS_CHUNK_BYTES` (1 МиБ) файла.
 - Живой лог: WebSocket `.../journal/ws` (фильтры журнала, `lines`, `after`) и `.../file/ws`
-  (`path`, `lines`, `grep`, `offset`, `inode`). Сначала последние `lines` строк, потом новые
-  по мере появления. Конверт сообщений тот же, что у `/ws`, `{type, ts, data}`:
+  (`path`, `lines`, `grep`, `severity`, `offset`, `inode`). Сначала последние `lines` строк,
+  потом новые по мере появления. Конверт сообщений тот же, что у `/ws`, `{type, ts, data}`:
 
   | type | data |
   |---|---|
@@ -899,10 +906,12 @@ UI обновляет по нему список сессий, даже если
   (значения в них старые).
 - `GET /api/alerts`: `{counts: {active, critical, warning, unacknowledged, resolved},
   alerts: [...]}`, сначала активные (critical выше), потом погасшие, новые выше. Алерт:
-  `{id, server, host, port, metric, target, severity, status, value, peak, threshold,
-  message, started_at, updated_at, resolved_at, resolved_reason, acknowledged}`;
-  `resolved_reason`: `back_to_normal`, `server_disconnected` (закрыли последнюю сессию к
-  серверу), `rule_changed` (его правило выключили).
+  `{id, server, host, port, metric, target, severity, status, value, peak, threshold, title,
+  message, started_at, updated_at, resolved_at, resolved_reason, acknowledged}`; `title` —
+  заголовок карточки (`CPU load above 95%`, `Disk /data above 90%`,
+  `Server does not respond`), `message` — подробности под ним; `resolved_reason`:
+  `back_to_normal`, `server_disconnected` (закрыли последнюю сессию к серверу),
+  `rule_changed` (его правило выключили).
 - В `/ws` приходит `alert` `{action, alert}`, когда алерт загорелся, сменил уровень, погас
   или его отметили. UI берёт список из `GET /api/alerts` и обновляет его по этим событиям.
 - `POST /api/alerts/{id}/ack` отмечает алерт увиденным (для значка); при смене уровня

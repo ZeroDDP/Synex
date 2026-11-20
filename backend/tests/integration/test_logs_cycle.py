@@ -84,7 +84,7 @@ async def test_live_log_file_through_the_worker(ui: UI, ssh_target: SSHTarget, t
 
     tail = await ui.api.get(f"{base}/file", params={"path": str(log), "lines": 2})
     assert tail.status_code == 200, tail.text
-    assert tail.json()["lines"] == ["start 3", "start 4"]
+    assert [line["text"] for line in tail.json()["lines"]] == ["start 3", "start 4"]
 
     url = f"{ui.ws_base}{base}/file/ws?path={log}&lines=1"
     async with connect(url, origin=UI_ORIGIN) as ws:
@@ -92,11 +92,11 @@ async def test_live_log_file_through_the_worker(ui: UI, ssh_target: SSHTarget, t
         hello = await stream.next()
         assert hello["data"]["companion"] is True
         first = await stream.wait_for("lines")
-        assert first["data"]["lines"] == ["start 4"]
+        assert [line["text"] for line in first["data"]["lines"]] == ["start 4"]
         with log.open("a") as f:
             f.write("added 1\nadded 2\n")
         later = await stream.wait_for("lines")
-        assert later["data"]["lines"] == ["added 1", "added 2"]
+        assert [line["text"] for line in later["data"]["lines"]] == ["added 1", "added 2"]
 
         # Команда в терминале идёт долго, а живой лог не ждёт её: своя служебная сессия
         session_id = hello["data"]["session_id"]
@@ -105,6 +105,6 @@ async def test_live_log_file_through_the_worker(ui: UI, ssh_target: SSHTarget, t
         with log.open("a") as f:
             f.write("while busy\n")
         during = await stream.wait_for("lines", timeout=2.5)
-        assert during["data"]["lines"] == ["while busy"]
+        assert [line["text"] for line in during["data"]["lines"]] == ["while busy"]
         assert not command.done()
         assert (await command)["stdout"] == "done"

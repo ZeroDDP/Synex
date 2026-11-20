@@ -312,11 +312,17 @@ async def list_files(runner: LogRunner, directory: str) -> list[logfiles.LogFile
 
 
 async def read_tail(
-    runner: LogRunner, path: str, lines: int, grep: str | None = None
+    runner: LogRunner,
+    path: str,
+    lines: int,
+    grep: str | None = None,
+    severity: str | None = None,
 ) -> logfiles.Chunk:
-    """Последние `lines` строк файла (с текстом grep)."""
+    """Последние `lines` строк файла (с текстом grep, уровня severity)."""
     if grep:
-        result = await runner.run(logfiles.grep_command(path, grep, lines))
+        # С фильтром уровня часть найденного отсеется: берём с запасом
+        count = min(lines * 4, settings.LOGS_MAX_LINES * 4) if severity else lines
+        result = await runner.run(logfiles.grep_command(path, grep, count))
         chunk = logfiles.parse_grep(result.stdout)
     else:
         window = settings.LOGS_CHUNK_BYTES if lines else 0
@@ -325,6 +331,8 @@ async def read_tail(
     error = classify_file(result, chunk.status, path)
     if error is not None:
         raise error
+    if severity is not None:
+        chunk.lines = [line for line in chunk.lines if logfiles.detect_severity(line) == severity]
     chunk.lines = chunk.lines[-lines:] if lines else []
     return chunk
 
