@@ -168,6 +168,13 @@ glibc 2.38 или новее (Ubuntu 24.04, Debian 13, Fedora 39 и новее).
 | POST | `/api/alerts/{id}/ack` | Отметить алерт как увиденный; `POST /api/alerts/ack-all` для всех активных |
 | DELETE | `/api/alerts/{id}` | Убрать погасший алерт из истории; `DELETE /api/alerts` очищает историю |
 | GET / PUT / DELETE | `/api/alerts/rules` | Правила алертов (пороги): прочитать, заменить, вернуть по умолчанию |
+| GET | `/api/logs/servers/{server}/sources` | Какие логи есть на сервере: журнал systemd (и доступ к нему), файлы в `/var/log` |
+| GET | `/api/logs/servers/{server}/journal` | Записи журнала: `?unit=&priority=&grep=&since=&until=&boot=&lines=200&before=` |
+| GET | `/api/logs/servers/{server}/journal/units` | Юниты, которые писали в журнал (для фильтра) |
+| WS | `/api/logs/servers/{server}/journal/ws` | Живой журнал: те же фильтры, `?lines=200&after=<cursor>` |
+| GET | `/api/logs/servers/{server}/files` | Файлы логов в папке: `?dir=/var/log` |
+| GET | `/api/logs/servers/{server}/file` | Последние строки файла: `?path=&lines=200&grep=` |
+| WS | `/api/logs/servers/{server}/file/ws` | Живой файл лога: `?path=&lines=200&grep=&offset=&inode=` |
 | GET | `/api/health` | Состояние бэкенда и воркера, загруженные плагины |
 | GET | `/api/plugins` | Плагины: версия, описание, зависимости, `status` и причина сбоя (см. ниже) |
 | POST | `/api/plugins/{name}/enable` | Включить плагин без перезапуска (вместе с зависимостями); выбор запоминается |
@@ -458,6 +465,70 @@ POST /api/connections
   502 `docker_command_failed` (текст docker в `detail`). Сессия, занятая командой
   пользователя, даёт 409 `ssh_session_busy`: для панели Docker UI лучше открыть
   отдельную сессию.
+
+### Логи серверов (плагин `logs`)
+
+Логи сервера, выбранного на Dashboard: журнал systemd и файлы логов. Пути начинаются с
+`/api/logs/servers/{server}/`, где `{server}` — `host:port`, как `server` в `metrics` из
+`/ws` и в алертах (в URL: `encodeURIComponent`). UI не думает о сессиях: backend берёт
+открытую SSH-сессию к этому серверу, свободную от команды пользователя, если такая есть;
+`?session_id=` выбирает конкретную. Нет открытой сессии к серверу: 404
+`logs_server_not_connected`. Команды идут служебными командами сессии и в её терминал не
+попадают.
+
+- `GET .../sources`: `{journal: {available, version, access, detail}, directory, files,
+  files_detail}`. `access`: `all` (виден весь журнал), `user` (только сообщения пользователя
+  SSH: добавьте его в группу `systemd-journal` или `adm`), `none`. `files` — то же, что
+  `GET .../files` для `/var/log`; если папку не прочитать, `files` пустой, причина в
+  `files_detail`.
+- `GET .../journal?lines=200`: последние записи, старые первыми:
+
+```json
+{"server": "10.0.0.5:22", "session_id": "...", "more": true,
+ "before": "s=...;i=1a2", "cursor": "s=...;i=1b7",
+ "entries": [{"cursor": "s=...;i=1b7", "time": 1795150389396, "priority": 3, "level": "err",
+              "unit": "nginx.service", "identifier": "nginx", "pid": 812,
+              "hostname": "web-1", "boot_id": "...", "message": "upstream timed out"}]}
+```
+
+  Фильтры: `unit` (можно несколько и шаблон: `nginx*`), `priority` (`emerg` ... `debug`:
+  этот уровень и важнее), `grep` (текст, не регулярное выражение; латиница без учёта
+  регистра), `since` и `until` (Unix-время в мс или то, что понимает journalctl:
+  `2026-11-20 10:00:00`, `today`, `-1h`), `boot=true` (с последней загрузки). Страница
+  старше: `?before=<before прошлой страницы>`. `more: true`: могут быть записи старше.
+  Фильтр, который journalctl не принял: 422 `logs_bad_filter`, его текст в `detail`.
+- `GET .../files?dir=/var/log`: файлы папки и её подпапок (на один уровень): `{path, name,
+  readable, size, modified, rotated}`; сжатые (`.gz`, `.xz`) и двоичные (`wtmp`, `btmp`,
+  `lastlog`, файлы журнала) не показываются. `rotated`: старая копия после logrotate
+  (`syslog.1`). Файлы, которые пользователь SSH не может читать, есть в списке с
+  `readable: false`.
+- `GET .../file?path=/var/log/syslog&lines=200`: последние строки `{lines, size, offset,
+  inode, truncated}`; с `grep` — последние строки с этим текстом. `truncated: true`: строк
+  меньше, чем просили, потому что читаются только последние `LOGS_CHUNK_BYTES` (1 МиБ) файла.
+- Живой лог: WebSocket `.../journal/ws` (фильтры журнала, `lines`, `after`) и `.../file/ws`
+  (`path`, `lines`, `grep`, `offset`, `inode`). Сначала последние `lines` строк, потом новые
+  по мере появления. Конверт сообщений тот же, что у `/ws`, `{type, ts, data}`:
+
+  | type | data |
+  |---|---|
+  | `hello` | `{protocol, server, session_id, source: journal\|file, interval_ms, lines, companion}`; `companion: true`: опрос идёт в своём SSH-подключении и не ждёт команду в терминале |
+  | `entries` | журнал: `{entries, cursor, truncated}`. После переподключения UI передаёт `?after=<cursor>` и не получает записи повторно |
+  | `lines` | файл: `{lines, offset, inode, size, rotated, skipped, truncated}`. После переподключения `?offset=&inode=` продолжают с того же места. `rotated: true`: logrotate заменил файл, он читается с начала; `skipped`: сколько байт пропущено, потому что лог рос быстрее `LOGS_CHUNK_BYTES` за опрос. Строка, которую ещё дописывают, приходит, когда допишут |
+  | `error` | `{error, detail, fatal}`. `fatal: false`: временная помеха (сессия занята, файл пропал при ротации, journalctl не ответил), опрос продолжается, та же ошибка не повторяется. `fatal: true`: журнала нет, фильтр неверный, файла нет или его не прочитать при открытии; подключение закрывается (4404, 4422, 4403) |
+  | `closed` | `{reason}`: `server_disconnected` (закрыли последнюю SSH-сессию к серверу) или `shutdown` |
+  | `pong` | `data` из `ping` UI |
+
+  Воркер отдаёт вывод команды только целиком, поэтому `journalctl -f` и `tail -f` через
+  него не идут: новые строки собираются опросом раз в `LOGS_INTERVAL` (2 с). Когда ядро
+  научится отдавать поток, протокол для UI не изменится.
+- Для системных логов пользователю SSH обычно нужна группа `adm` (файлы) или
+  `systemd-journal` (журнал): `sudo usermod -aG adm,systemd-journal <user>`, затем
+  переподключиться.
+- Ошибки: 404 `logs_server_not_connected`, 404 `logs_journal_unavailable` (нет journalctl, не
+  systemd), 422 `logs_bad_filter`, 404 `log_file_not_found`, 403
+  `log_file_permission_denied`, 422 `log_file_is_directory`, 504 `logs_timeout`
+  (`LOGS_TIMEOUT`, 20 с), 502 `logs_command_failed`. Сессия занята командой пользователя
+  дольше `SSH_SERVICE_WAIT`: 409 `ssh_session_busy`.
 
 ### Git на серверах (плагин `git`)
 
@@ -810,6 +881,7 @@ ws.onmessage = (e) => console.log(JSON.parse(e.data));
 | 403/404/502/503/504 | `docker_*` | Ошибки Docker на сервере (см. «Docker на серверах») |
 | 404/409/502/504 | `git_*` | Ошибки git на сервере (см. «Git на серверах») |
 | 404/409/500 | `alert_*` | `alert_not_found`, `alert_active` (активный алерт нельзя удалить), `alert_rules_corrupted` (`alerts.json` повреждён) |
+| 403/404/422/502/504 | `logs_*`, `log_file_*` | Ошибки логов сервера (см. «Логи серверов») |
 | 403/404/409/422/5xx | `sftp_*` | Ошибки файлов на сервере и на этом компьютере (см. «Файлы на серверах») |
 
 ## Структура
@@ -837,6 +909,9 @@ app/
                        errors
     monitor/           /api/monitor/*: service (опрос и публикация), aggregator
                        (окно, статусы), values (ответ воркера), hardware (диски, GPU)
+    logs/              /api/logs/*: journal (команды journalctl и разбор JSON), files
+                       (скрипты файлов логов), service (выбор сессии, ошибки), stream
+                       (WebSocket живого лога), routes
     alerts/            /api/alerts/*: rules (пороги, alerts.json), engine (когда алерт
                        загорается и гаснет), service (история, события в /ws), routes
     keys/              /api/keys/*

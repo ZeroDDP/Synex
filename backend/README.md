@@ -169,6 +169,13 @@ servers through `fetch` and WebSocket.
 | POST | `/api/alerts/{id}/ack` | Mark an alert as seen; `POST /api/alerts/ack-all` for all active ones |
 | DELETE | `/api/alerts/{id}` | Remove a resolved alert from the history; `DELETE /api/alerts` clears the history |
 | GET / PUT / DELETE | `/api/alerts/rules` | Alert rules (thresholds): read, replace, reset to defaults |
+| GET | `/api/logs/servers/{server}/sources` | What logs the server has: systemd journal (and access to it), files in `/var/log` |
+| GET | `/api/logs/servers/{server}/journal` | Journal entries: `?unit=&priority=&grep=&since=&until=&boot=&lines=200&before=` |
+| GET | `/api/logs/servers/{server}/journal/units` | Units that wrote to the journal (for the filter) |
+| WS | `/api/logs/servers/{server}/journal/ws` | Live journal: same filters, `?lines=200&after=<cursor>` |
+| GET | `/api/logs/servers/{server}/files` | Log files in a folder: `?dir=/var/log` |
+| GET | `/api/logs/servers/{server}/file` | Last lines of a file: `?path=&lines=200&grep=` |
+| WS | `/api/logs/servers/{server}/file/ws` | Live log file: `?path=&lines=200&grep=&offset=&inode=` |
 | GET | `/api/health` | State of the backend and the worker, loaded plugins |
 | GET | `/api/plugins` | Plugins: version, description, dependencies, `status` and failure reason (see below) |
 | POST | `/api/plugins/{name}/enable` | Enable a plugin without a restart (with its dependencies); the choice is remembered |
@@ -463,6 +470,68 @@ service commands of the session and do not show up in its terminal. All paths st
   `docker_container_conflict`, 504 `docker_timeout`, 502 `docker_command_failed` (the docker
   text in `detail`). A session busy with a user command gives 409 `ssh_session_busy`: the UI
   should open a separate session for the Docker panel.
+
+### Server logs (plugin `logs`)
+
+Logs of the server selected on the Dashboard: the systemd journal and log files. Paths start
+with `/api/logs/servers/{server}/`, where `{server}` is `host:port`, the same as `server` in
+the `metrics` of `/ws` and in alerts (in a URL: `encodeURIComponent`). The UI does not deal
+with sessions: the backend takes an open SSH session to this server, one that is not busy
+with a user command if there is one; `?session_id=` picks a specific session. No open session
+to the server is 404 `logs_server_not_connected`. Commands are service commands of the
+session and do not show up in its terminal.
+
+- `GET .../sources`: `{journal: {available, version, access, detail}, directory, files,
+  files_detail}`. `access`: `all` (the whole journal is visible), `user` (only the SSH user's
+  own messages: add the user to the `systemd-journal` or `adm` group), `none`. `files` is the
+  same as `GET .../files` for `/var/log`; if the folder cannot be listed, `files` is `[]`
+  and the reason is in `files_detail`.
+- `GET .../journal?lines=200`: the last entries, oldest first:
+
+```json
+{"server": "10.0.0.5:22", "session_id": "...", "more": true,
+ "before": "s=...;i=1a2", "cursor": "s=...;i=1b7",
+ "entries": [{"cursor": "s=...;i=1b7", "time": 1795150389396, "priority": 3, "level": "err",
+              "unit": "nginx.service", "identifier": "nginx", "pid": 812,
+              "hostname": "web-1", "boot_id": "...", "message": "upstream timed out"}]}
+```
+
+  Filters: `unit` (several allowed, a pattern too: `nginx*`), `priority` (`emerg` ... `debug`:
+  this level and more important), `grep` (text, not a regex; Latin letters are matched
+  case-insensitively), `since` and `until` (Unix time in ms or what journalctl understands:
+  `2026-11-20 10:00:00`, `today`, `-1h`), `boot=true` (since the last boot). An older page:
+  `?before=<before of the previous page>`. `more: true`: there may be older entries. A filter
+  journalctl does not accept is 422 `logs_bad_filter` with its text in `detail`.
+- `GET .../files?dir=/var/log`: files of the folder and its subfolders (one level): `{path,
+  name, readable, size, modified, rotated}`; compressed (`.gz`, `.xz`) and binary (`wtmp`,
+  `btmp`, `lastlog`, journal files) are not listed. `rotated`: an old copy after logrotate
+  (`syslog.1`). Files the SSH user cannot read are listed with `readable: false`.
+- `GET .../file?path=/var/log/syslog&lines=200`: the last lines `{lines, size, offset, inode,
+  truncated}`; with `grep`, the last lines containing the text. `truncated: true`: fewer lines
+  than asked, because only the last `LOGS_CHUNK_BYTES` (1 MiB) of the file are read.
+- Live logs: WebSocket `.../journal/ws` (journal filters, `lines`, `after`) and `.../file/ws`
+  (`path`, `lines`, `grep`, `offset`, `inode`). First the last `lines` lines, then new ones as
+  they appear. Messages use the same envelope `{type, ts, data}` as `/ws`:
+
+  | type | data |
+  |---|---|
+  | `hello` | `{protocol, server, session_id, source: journal\|file, interval_ms, lines, companion}`; `companion: true`: polling goes through its own SSH connection and does not wait for a command in the terminal |
+  | `entries` | journal: `{entries, cursor, truncated}`. After a reconnect the UI passes `?after=<cursor>` and does not get entries twice |
+  | `lines` | file: `{lines, offset, inode, size, rotated, skipped, truncated}`. After a reconnect `?offset=&inode=` continue from the same place. `rotated: true`: logrotate replaced the file, it is read from the start; `skipped`: bytes skipped because the log grew faster than `LOGS_CHUNK_BYTES` per poll. A line still being written is sent once it ends |
+  | `error` | `{error, detail, fatal}`. `fatal: false`: a temporary hiccup (the session is busy, the file disappeared during rotation, journalctl did not answer), polling goes on, the same error is not repeated. `fatal: true`: no journal, a wrong filter, the file does not exist or cannot be read when the stream opens; the connection is closed (4404, 4422, 4403) |
+  | `closed` | `{reason}`: `server_disconnected` (the last SSH session to the server was closed) or `shutdown` |
+  | `pong` | `data` from the UI's `ping` |
+
+  The worker returns command output only as a whole, so `journalctl -f` and `tail -f` cannot
+  stream through it: new lines are polled every `LOGS_INTERVAL` (2 s). When the core streams
+  output, the protocol for the UI will not change.
+- System logs usually need the SSH user in the `adm` group (files) or `systemd-journal`
+  (journal): `sudo usermod -aG adm,systemd-journal <user>`, then reconnect.
+- Errors: 404 `logs_server_not_connected`, 404 `logs_journal_unavailable` (no journalctl, not
+  systemd), 422 `logs_bad_filter`, 404 `log_file_not_found`, 403 `log_file_permission_denied`,
+  422 `log_file_is_directory`, 504 `logs_timeout` (`LOGS_TIMEOUT`, 20 s), 502
+  `logs_command_failed`. A session busy with a user command longer than `SSH_SERVICE_WAIT`
+  gives 409 `ssh_session_busy`.
 
 ### Git on servers (plugin `git`)
 
@@ -825,6 +894,7 @@ details, for example `host_key`); validation errors as 422:
 | 403/404/502/503/504 | `docker_*` | Docker errors on the server (see "Docker on servers") |
 | 404/409/502/504 | `git_*` | Git errors on the server (see "Git on servers") |
 | 404/409/500 | `alert_*` | `alert_not_found`, `alert_active` (an active alert cannot be removed), `alert_rules_corrupted` (`alerts.json` is damaged) |
+| 403/404/422/502/504 | `logs_*`, `log_file_*` | Server log errors (see "Server logs") |
 | 403/404/409/422/5xx | `sftp_*` | File errors on the server and on this computer (see "Files on servers") |
 
 ## Structure
@@ -851,6 +921,9 @@ app/
                        errors
     monitor/           /api/monitor/*: service (polling and publishing), aggregator
                        (window, statuses), values (worker response), hardware (disks, GPU)
+    logs/              /api/logs/*: journal (journalctl commands and JSON parsing), files
+                       (log file scripts), service (session choice, errors), stream (live
+                       log WebSocket), routes
     alerts/            /api/alerts/*: rules (thresholds, alerts.json), engine (when an
                        alert fires and resolves), service (history, /ws events), routes
     keys/              /api/keys/*

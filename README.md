@@ -37,6 +37,8 @@ workspace, and every part of it is a plugin you can switch on or off while the a
 |---|---|---|:---:|:---:|
 | 🔐 | **SSH** | Several sessions at once with a terminal each, encrypted key vault, saved connections. Server keys are verified on first use (TOFU); keys already in `~/.ssh/known_hosts` are trusted automatically | ✅ | 🚧 |
 | 📈 | **Monitoring** | CPU, RAM, disks, network and GPU of every connected server, streamed to the UI twice a second, with avg / min / max over a window | ✅ | ✅ |
+| 🔔 | **Alerts** | CPU, memory, disk, GPU temperature and "server does not respond" thresholds for every connected server, with history and acknowledgement | ✅ | 🚧 |
+| 📜 | **Logs** | systemd journal with filters by unit, level, time and text, log files from `/var/log`, both live | ✅ | 🚧 |
 | 🐳 | **Docker** | Containers on the server: list, start, stop, restart, remove, read logs and follow them live | ✅ | 🚧 |
 | 📁 | **Files** | Two-pane SFTP manager: browse, upload and download files and whole folders, SHA-256 verification, progress and cancel | ✅ | 🚧 |
 | 🚀 | **Git** | Repositories on the server: status, history, fetch, fast-forward pull and deploy with your own command | ✅ | 🚧 |
@@ -84,6 +86,7 @@ flowchart LR
 | `connections` | 0.1.0 | `ssh` | `/api/connections` — saved servers |
 | `monitor` | 0.2.0 | `ssh` | `/api/monitor` and the `metrics` stream in `/ws` |
 | `alerts` | 0.1.0 | `monitor` | `/api/alerts` — alerts of all servers by metric thresholds, `alert` events in `/ws` |
+| `logs` | 0.1.0 | `ssh` | `/api/logs` — systemd journal and log files of a server, live log WebSocket |
 | `docker` | 0.2.0 | `ssh` | `/api/docker` — containers, logs, live log WebSocket |
 | `git` | 0.1.0 | `ssh` | `/api/git` — status, log, fetch, pull, deploy |
 | `sftp` | 0.1.0 | `ssh` | `/api/sftp` — files and folders, transfers with progress in `/ws` |

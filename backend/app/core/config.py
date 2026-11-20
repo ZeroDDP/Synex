@@ -126,6 +126,17 @@ class Settings(BaseSettings):
     ALERTS_HISTORY: int = Field(default=200, ge=1)
     ALERTS_KEEP_POLLING: bool = True
 
+    # Логи серверов (плагин logs): журнал systemd и файлы логов. Лимит команды
+    # journalctl или чтения файла на сервере, сек. Сколько строк отдаётся за один раз
+    # (больше не попросить). Как часто живой лог спрашивает новые строки, сек. Сколько
+    # байт файла читается за раз (последние строки файла ищутся в этом окне). Живой лог в
+    # своей служебной SSH-сессии: команда в терминале его не задерживает.
+    LOGS_TIMEOUT: float = Field(default=20.0, gt=0)
+    LOGS_MAX_LINES: int = Field(default=5000, ge=1)
+    LOGS_INTERVAL: float = Field(default=2.0, gt=0)
+    LOGS_CHUNK_BYTES: int = Field(default=1024 * 1024, ge=4096)
+    LOGS_COMPANION: bool = True
+
     # Docker на серверах (плагин docker). Команда docker на сервере: например
     # "sudo -n docker", если пользователь SSH не в группе docker (нужен sudo без пароля).
     DOCKER_COMMAND: str = Field(default="docker", min_length=1)
