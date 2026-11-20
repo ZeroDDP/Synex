@@ -416,12 +416,13 @@ async def test_busy_session_is_skipped(rig):
     await rig.poll()
     assert rig.monitor_requests() == [first]
 
-    # Первая сессия занята долгой командой: опрос идёт через вторую и не ждёт
-    command = asyncio.create_task(rig.manager.execute(first, "sleep 0.5", track_cwd=False))
+    # Первая сессия занята долгой командой: опрос идёт через вторую и не ждёт её.
+    # Проверка — команда ещё идёт, когда опрос закончился (а не «опрос быстрее 0,3 с»:
+    # на нагруженной машине CI он бывает и дольше)
+    command = asyncio.create_task(rig.manager.execute(first, "sleep 2", track_cwd=False))
     await asyncio.sleep(0.05)
-    started = time.monotonic()
     await rig.poll()
-    assert time.monotonic() - started < 0.3
+    assert not command.done()
     assert rig.monitor_requests() == [first, second]
     await command
 

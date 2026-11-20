@@ -179,10 +179,13 @@ class FakeWorkerState:
         self.sftp_delay = 0.0  # секунд на каждый мегабайт sftp_upload/download
         # Как настоящий воркер: передача, подключение которой закрыли, не прерывается, а
         # доделывается в фоне (sftp_zombie); файл она создаёт через sftp_start_delay секунд
-        # после запроса, то есть может создать его уже после отмены. В sftp_finished_late
-        # попадают пути файлов, которые такая передача дописала.
+        # после запроса, то есть может создать его уже после отмены. С sftp_start_after_loss
+        # пауза отсчитывается от закрытия подключения: файл точно появится после отмены
+        # (на нагруженной машине отмена бывает дольше любой паузы от запроса). В
+        # sftp_finished_late попадают пути файлов, которые такая передача дописала.
         self.sftp_zombie = False
         self.sftp_start_delay = 0.0
+        self.sftp_start_after_loss = False
         self.sftp_finished_late: list[str] = []
         self.sftp_fail: dict[str, str] = {}  # action -> текст ошибки (сбой по заказу)
         # Сбой по условию: (action, payload) -> текст ошибки или None (без сбоя)
@@ -686,8 +689,7 @@ class FakeSftp:
         shutil.copyfile(src, dst)
 
     async def upload(self, local: str | None, remote: str | None) -> None:
-        if self.state.sftp_start_delay:
-            await asyncio.sleep(self.state.sftp_start_delay)
+        await self._start()
         source = Path(local or "")
         if not source.is_file():
             raise _SftpError(
@@ -704,8 +706,7 @@ class FakeSftp:
         await self._copy_stream(source, target)
 
     async def download(self, remote: str | None, local: str | None) -> None:
-        if self.state.sftp_start_delay:
-            await asyncio.sleep(self.state.sftp_start_delay)
+        await self._start()
         source = self.state.remote(remote or "")
         if not source.exists():
             if self.new:
@@ -723,6 +724,17 @@ class FakeSftp:
             target.write_bytes(b"")  # как воркер: локальный файл уже создан
             self._raise("failed", "Failed to download file", "f")
         await self._copy_stream(source, target)
+
+    async def _start(self) -> None:
+        """Пауза перед тем, как передача создаст файл: sftp_start_delay секунд, с
+        sftp_start_after_loss — после того, как подключение закрыли."""
+        if self.state.sftp_start_after_loss:
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + 10
+            while not self.lost() and loop.time() < deadline:
+                await asyncio.sleep(0.01)
+        if self.state.sftp_start_delay:
+            await asyncio.sleep(self.state.sftp_start_delay)
 
     async def _copy_stream(self, source: Path, target: Path) -> None:
         with source.open("rb") as reader, target.open("wb") as writer:

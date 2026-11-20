@@ -311,10 +311,11 @@ async def test_closing_the_session_stops_a_folder_transfer(files: Files):
 
 @pytest.fixture
 def late_worker(files: Files, monkeypatch) -> Files:
-    """Фейковый воркер ведёт себя так же: файл создаёт через 0,2 с после запроса и
-    дописывает его, даже если подключение уже закрыто."""
+    """Фейковый воркер ведёт себя так же: файл создаёт через 0,5 с после того, как
+    подключение закрыли (отмена пришла в самом начале файла), и дописывает его."""
     files.rig.worker.sftp_zombie = True
-    files.rig.worker.sftp_start_delay = 0.2
+    files.rig.worker.sftp_start_after_loss = True
+    files.rig.worker.sftp_start_delay = 0.5
     monkeypatch.setattr(transfers, "SWEEP_PAUSES", (0.05,) * 60)
     monkeypatch.setattr(transfers, "CLEANUP_PAUSE", 0.05)
     monkeypatch.setattr(transfers, "LATE_SECONDS", 3.0)
@@ -438,6 +439,7 @@ async def test_a_new_folder_is_removed_even_if_the_first_try_fails(late_worker: 
     """Новая папка: воркер успел создать в ней файл, пока backend её убирал, и удалить
     папку с первого раза не вышло. Она убирается следующей проверкой."""
     files = late_worker
+    files.rig.worker.sftp_start_after_loss = False
     files.rig.worker.sftp_start_delay = 0.0
     files.rig.worker.sftp_delay = 0.2
     make_tree(files.local / "big", {"a.bin": os.urandom(4 * MB)})
