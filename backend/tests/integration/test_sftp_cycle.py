@@ -444,3 +444,30 @@ async def test_cancelled_folder_leaves_nothing_behind(ui: UI, workspace, tmp_pat
         while list(tmp_path.glob("*.synex-part")):
             await asyncio.sleep(0.2)
     assert not (tmp_path / "down").exists()
+
+
+async def test_search_on_the_server(ui: UI, workspace):
+    """Поиск вкладки Files: find на сервере в своём SSH-подключении."""
+    session_id, base, directory = workspace
+    created = await ui.exec(
+        session_id,
+        f"cd {directory} && mkdir -p conf/nginx .cache && printf 'listen 80;\\n' > "
+        "conf/nginx/site.conf && printf 'x' > conf/app.log && printf 'listen' > .cache/x.conf",
+    )
+    assert created["exit_code"] == 0, created
+
+    by_name = await ui.api.get(f"{base}/search", params={"path": directory, "name": "*.conf"})
+    assert by_name.status_code == 200, by_name.text
+    assert [e["path"] for e in by_name.json()["entries"]] == [f"{directory}/conf/nginx/site.conf"]
+
+    inside = await ui.api.get(
+        f"{base}/search", params={"path": directory, "contains": "LISTEN", "hidden": "true"}
+    )
+    assert inside.status_code == 200, inside.text
+    assert sorted(e["name"] for e in inside.json()["entries"]) == ["site.conf", "x.conf"]
+
+    folders = await ui.api.get(
+        f"{base}/search", params={"path": directory, "name": "nginx", "type": "dir"}
+    )
+    (entry,) = folders.json()["entries"]
+    assert (entry["name"], entry["parent"]) == ("nginx", f"{directory}/conf")

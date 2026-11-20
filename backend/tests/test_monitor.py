@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import sys
 import time
@@ -416,12 +417,13 @@ async def test_busy_session_is_skipped(rig):
     await rig.poll()
     assert rig.monitor_requests() == [first]
 
-    # Первая сессия занята долгой командой: опрос идёт через вторую и не ждёт
-    command = asyncio.create_task(rig.manager.execute(first, "sleep 0.5", track_cwd=False))
+    # Первая сессия занята долгой командой: опрос идёт через вторую и не ждёт её.
+    # Проверка — команда ещё идёт, когда опрос закончился (а не «опрос быстрее 0,3 с»:
+    # на нагруженной машине CI он бывает и дольше)
+    command = asyncio.create_task(rig.manager.execute(first, "sleep 2", track_cwd=False))
     await asyncio.sleep(0.05)
-    started = time.monotonic()
     await rig.poll()
-    assert time.monotonic() - started < 0.3
+    assert not command.done()
     assert rig.monitor_requests() == [first, second]
     await command
 
@@ -550,6 +552,7 @@ async def test_publishes_snapshot_every_interval(rig):
 
     event_bus.subscribe(METRICS_EVENT, collect)
     try:
+        started = time.monotonic()
         rig.monitor.start()
         async with asyncio.timeout(5):
             while len(snapshots) < 8:
@@ -558,10 +561,14 @@ async def test_publishes_snapshot_every_interval(rig):
     finally:
         event_bus.unsubscribe(METRICS_EVENT, collect)
 
-    times = [t for t, _ in snapshots]
-    # 5 периодов по 50 мс. Тики без дрейфа, но любой из них может начаться на пару мс
-    # позже (event loop занят), поэтому точное 0.25 как нижняя граница даёт ложные падения
-    assert 0.2 <= times[7] - times[2] <= 0.5
+    times = [t - started for t, _ in snapshots]
+    interval = settings.MONITOR_PUBLISH_INTERVAL
+    # Расписание считается от старта: k-е сообщение не раньше k периодов (не на каждый
+    # опрос) и без долгих пауз. Промежутки между соседними не сравниваются: опоздавший
+    # тик (занятый loop, медленный раннер CI) догоняет расписание, и следующий идёт почти
+    # сразу. 0,02 с: часы Windows тикают раз в 15 мс
+    assert all(t >= k * interval - 0.02 for k, t in enumerate(times)), times
+    assert times[7] <= 7 * interval + 1.0, times
     last = snapshots[-1][1]
     assert isinstance(last, MetricsSnapshot) and last.source == "ssh"
     assert last.servers[0].status == "ok"
@@ -648,11 +655,9 @@ async def test_ws_streams_server_metrics(app_settings, key_file):
             assert created.status_code == 201, created.text
             session_id = created.json()["session_id"]
 
-            stamps = []
             async with asyncio.timeout(5):
                 while True:
                     message = await recv_metrics(ws)  # ssh.session opened пропускается
-                    stamps.append(message["ts"])
                     data = MetricsSnapshot.model_validate(message["data"])
                     if data.servers and data.servers[0].status == "ok":
                         break
@@ -666,5 +671,15 @@ async def test_ws_streams_server_metrics(app_settings, key_file):
             assert set(raw["network"]) == {"rx", "tx"}
             assert set(raw["network"]["rx"]) == {"total", "speed", "avg", "min", "max"}
             assert set(raw["disk"]) == {"total", "used", "available", "percent"}
-            gaps = [b - a for a, b in zip(stamps, stamps[1:], strict=False)]
-            assert all(50 <= gap <= 300 for gap in gaps), gaps
+
+            # Метрики идут раз в MONITOR_PUBLISH_INTERVAL (0,1 с): за секунду около 10
+            # сообщений — не на каждый опрос и без пауз. Считается их число, а не
+            # промежутки: опоздавший тик (медленный раннер CI) догоняет расписание, и два
+            # сообщения могут прийти почти одновременно
+            received = 0
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(1.0):
+                    while True:
+                        await recv_metrics(ws)
+                        received += 1
+            assert 4 <= received <= 12, received

@@ -9,11 +9,24 @@
 - Готово — открываем pull request в `main`. Если есть кому посмотреть, просим одного ревьюера; не успеваем — мержим сами, но только с зелёными проверками.
 - Перед PR подтягиваем свежий `main`: `git pull --rebase origin main`.
 
+Например, задача «поиск файлов» в backend:
+
+**PowerShell** (Windows):
+
+```powershell
+git switch -c backend/search              # новая ветка: <область>/<задача>
+git add backend/app/plugins/sftp/search.py
+git commit -m "Добавить поиск файлов"
+git push -u origin backend/search         # дальше — PR на GitHub
+```
+
+**bash** (Linux, macOS):
+
 ```bash
-git switch -c <область>/<задача>          # новая ветка
-git add <файлы>
-git commit -m "<короткий комментарий>"
-git push -u origin <область>/<задача>     # дальше — PR на GitHub
+git switch -c backend/search              # новая ветка: <область>/<задача>
+git add backend/app/plugins/sftp/search.py
+git commit -m "Добавить поиск файлов"
+git push -u origin backend/search         # дальше — PR на GitHub
 ```
 
 ## Коммиты

@@ -13,6 +13,8 @@ feature is a plugin.
 
 You need Python 3.12 and [uv](https://docs.astral.sh/uv/).
 
+**PowerShell** (Windows):
+
 ```powershell
 cd backend
 uv sync                      # dependencies, including the dev group (pytest, ruff)
@@ -163,6 +165,8 @@ servers through `fetch` and WebSocket.
 | GET | `/api/sftp/transfers/{id}` | Transfer state |
 | DELETE | `/api/sftp/transfers/{id}` | Cancel a transfer or remove a finished one from the list |
 | GET | `/api/sftp/local/list` | A folder of this computer (second pane): `?path=` |
+| GET | `/api/sftp/sessions/{id}/search` | Find files and folders on the server: `?path=&name=&contains=&type=&max_depth=&hidden=&limit=` |
+| GET | `/api/sftp/local/search` | The same on this computer |
 | GET | `/api/monitor/metrics` | Server metrics right now (same as `metrics` in `/ws`) |
 | GET | `/api/alerts` | Alerts of all servers: `?status=active\|resolved\|all&server=host:port` |
 | GET | `/api/alerts/{id}` | One alert |
@@ -186,6 +190,8 @@ With `DEBUG=true` Swagger is available at `/api/docs`.
 
 ### Example: key from the vault → connect → command → disconnect
 
+**PowerShell** (Windows):
+
 ```powershell
 $api = "http://127.0.0.1:8000/api"
 $key = Invoke-RestMethod -Method Post "$api/keys" -ContentType "application/json" `
@@ -197,6 +203,22 @@ Invoke-RestMethod -Method Post "$api/ssh/sessions/$($s.session_id)/exec" `
 Invoke-RestMethod "$api/ssh/sessions/$($s.session_id)/output"
 Invoke-RestMethod -Method Delete "$api/ssh/sessions/$($s.session_id)"
 ```
+
+**bash** (Linux, macOS):
+
+```bash
+api=http://127.0.0.1:8000/api
+key=$(curl -s -X POST "$api/keys" -H "Content-Type: application/json" \
+  -d '{"name": "prod", "private_key_path": "/home/me/.ssh/id_ed25519"}' | jq -r .id)
+s=$(curl -s -X POST "$api/ssh/sessions" -H "Content-Type: application/json" \
+  -d "{\"host\": \"1.2.3.4\", \"username\": \"root\", \"key_id\": \"$key\"}" | jq -r .session_id)
+curl -s -X POST "$api/ssh/sessions/$s/exec" -H "Content-Type: application/json" \
+  -d '{"command": "cd /var/log && ls", "timeout": 10}'
+curl -s "$api/ssh/sessions/$s/output"
+curl -s -X DELETE "$api/ssh/sessions/$s"
+```
+
+The bash variant reads the JSON responses with [jq](https://jqlang.org/).
 
 ### SSH sessions
 
@@ -699,13 +721,29 @@ and transfers between them with progress. It works through the SFTP of the Rust 
   computer for the second pane: `{path, parent, home, roots, separator, entries}`, `roots`
   are the drives on Windows and `["/"]` on Linux and macOS. The UI runs in a browser window
   and cannot see the disk, so the backend lists the folders for it.
+- Search: `GET .../search` (server) and `GET /api/sftp/local/search` (this computer) look
+  through a folder and its subfolders (`path`, home folder without it). Filtering the open
+  folder by name is the UI's job: it already has the list. Parameters: `name` (text in the
+  name, case-insensitive, or a pattern with `*?[`: `*.log`), `contains` (text inside files;
+  binary files and files over `SFTP_SEARCH_MAX_FILE`, 10 MB, are skipped), `type`
+  (`any`, `file`, `dir`), `max_depth` (10), `hidden=true` (also inside `.git`, `.cache` and
+  other hidden folders), `limit` (up to `SFTP_SEARCH_LIMIT`, 1000). At least `name` or
+  `contains` is needed, otherwise 422 `sftp_bad_search`. Response `{path, entries: [{name,
+  path, parent, type, is_dir, size, modified_at}], truncated, timed_out, denied,
+  elapsed_ms}`, nearer levels first; `parent` opens the folder of a result. On the server
+  it is one `find` command in its own SSH connection (the terminal does not wait for it),
+  `/proc`, `/sys`, `/dev` and `/run` are skipped; without GNU find (BSD, busybox) only paths
+  come back (`type` and `size` are `null`). After `SFTP_SEARCH_TIMEOUT` (30 s) the search
+  stops and returns what it found with `timed_out: true`; `denied` counts folders it could
+  not open.
 - Errors: 404 `sftp_not_found`, 403 `sftp_permission_denied`, `sftp_protected_path`, 409
   `sftp_target_exists`, `sftp_is_a_directory`, `sftp_not_a_directory`, `sftp_not_a_file`,
-  `sftp_directory_not_empty`, 422 `sftp_bad_path` (including a server file name that cannot
-  be given to a file on this computer, for example `a:b.txt` on Windows), 502 `sftp_failed`
-  (the worker text in `detail`), `sftp_unavailable` (the server has no SFTP: its
-  `sshd_config` needs a `Subsystem sftp ...` line; or the worker build is old and does not
-  know the `sftp_*` actions, then update the worker), `sftp_transfer_corrupted`, 504
+  `sftp_directory_not_empty`, 422 `sftp_bad_search`, 422 `sftp_bad_path` (including a server
+  file name that cannot be given to a file on this computer, for example `a:b.txt` on
+  Windows), 502 `sftp_failed` (the worker text in `detail`), `sftp_unavailable` (the server
+  has no SFTP: its `sshd_config` needs a `Subsystem sftp ...` line; or the worker build is
+  old and does not know the `sftp_*` actions, then update the worker),
+  `sftp_transfer_corrupted`, 504
   `sftp_timeout`, for a folder transfer also 422 `sftp_folder_too_large`; for this computer
   `sftp_local_not_found` (404), `sftp_local_permission_denied` (403), `sftp_local_exists` and
   `sftp_local_not_a_directory` (409), `sftp_local_error` (422). A session busy with a user
@@ -936,7 +974,8 @@ app/
     sftp/              /api/sftp/*: remote (server files through the worker's SFTP),
                        transfers (transfers, progress, verification), folders (a whole
                        folder), tree (walking a folder), local (files of this computer),
-                       paths, routes, schemas
+                       search (find on the server, walking folders here), paths,
+                       routes, schemas
 tests/                 pytest; fake_worker.py imitates synex_worker
   integration/         the full cycle UI → FastAPI → worker → SSH server
 ```
@@ -975,6 +1014,16 @@ run); `registered` is not loaded yet (the app is starting).
 ### Plugins at runtime (data bus)
 
 Modules are enabled and disabled on a running backend, without a restart:
+
+**PowerShell** (Windows):
+
+```powershell
+Invoke-RestMethod -Method Post http://127.0.0.1:8000/api/plugins/docker/disable
+Invoke-RestMethod -Method Post http://127.0.0.1:8000/api/plugins/docker/enable
+Invoke-RestMethod -Method Post "http://127.0.0.1:8000/api/plugins/ssh/disable?cascade=true"
+```
+
+**bash** (Linux, macOS):
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/plugins/docker/disable
@@ -1026,7 +1075,15 @@ is written to `plugins.json` next to `keys.json` (`PLUGINS_STATE_PATH`) and appl
 
 ## Tests
 
+**PowerShell** (Windows):
+
 ```powershell
+uv run pytest
+```
+
+**bash** (Linux, macOS):
+
+```bash
 uv run pytest
 ```
 
@@ -1039,7 +1096,18 @@ with a real `sh -c`, and on Windows with a shell emulator (`tests/fake_shell.py`
 file system with `/tmp` and `/home/synex` and exactly the commands the tests need. Server
 programs such as `docker` and `git` are plugged into the emulator by the tests
 (`FakeShell.programs`). `tests/test_fake_shell.py` checks that the emulator answers the same
-way as a real sh. The emulator can be enabled on Linux/macOS too:
+way as a real sh. The emulator can be enabled explicitly on any OS (on Windows it is always
+on), for example to run the Windows variant of the tests on Linux/macOS:
+
+**PowerShell** (Windows):
+
+```powershell
+$env:SYNEX_TEST_SHELL = "emulated"
+uv run pytest
+Remove-Item Env:SYNEX_TEST_SHELL
+```
+
+**bash** (Linux, macOS):
 
 ```bash
 SYNEX_TEST_SHELL=emulated uv run pytest
@@ -1054,6 +1122,16 @@ pytest on Windows, Linux and macOS on every push to `main` and every pull reques
 changes in `backend/`, and once more on Linux with `SYNEX_TEST_SHELL=emulated`. The same
 locally before a push:
 
+**PowerShell** (Windows):
+
+```powershell
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest
+```
+
+**bash** (Linux, macOS):
+
 ```bash
 uv run ruff check . && uv run ruff format --check . && uv run pytest
 ```
@@ -1063,10 +1141,23 @@ uv run ruff check . && uv run ruff format --check . && uv run pytest
 command from `SYNEX_TEST_WORKER` (for example, a script that runs the exe through wine).
 Checks against a real SSH server are enabled with environment variables:
 
+**PowerShell** (Windows):
+
 ```powershell
-$env:SYNEX_TEST_SSH_HOST="1.2.3.4"; $env:SYNEX_TEST_SSH_USER="root"
-$env:SYNEX_TEST_SSH_KEY="C:/Users/me/.ssh/id_ed25519"
-$env:SYNEX_TEST_SSH_PASSWORD="..."   # optional: check password login
+$env:SYNEX_TEST_SSH_HOST = "1.2.3.4"
+$env:SYNEX_TEST_SSH_USER = "root"
+$env:SYNEX_TEST_SSH_KEY = "C:/Users/me/.ssh/id_ed25519"
+$env:SYNEX_TEST_SSH_PASSWORD = "..."   # optional: check password login
+uv run pytest tests/test_real_worker.py -v
+```
+
+**bash** (Linux, macOS):
+
+```bash
+export SYNEX_TEST_SSH_HOST=1.2.3.4
+export SYNEX_TEST_SSH_USER=root
+export SYNEX_TEST_SSH_KEY=~/.ssh/id_ed25519
+export SYNEX_TEST_SSH_PASSWORD=...      # optional: check password login
 uv run pytest tests/test_real_worker.py -v
 ```
 
@@ -1131,6 +1222,15 @@ They need a worker (as for `test_real_worker.py`) and an SSH server. If `SYNEX_T
 not set, on Linux and macOS the tests start their own `sshd` on `127.0.0.1` with a random
 port and their own keys (login as the current user, the system is not changed). Without a
 worker or an SSH server the tests are skipped.
+
+**PowerShell** (Windows):
+
+```powershell
+uv run pytest -m integration            # integration tests only
+uv run pytest -m "not integration"      # everything else
+```
+
+**bash** (Linux, macOS):
 
 ```bash
 uv run pytest -m integration            # integration tests only

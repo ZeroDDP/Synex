@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from app.plugins.sftp.local import LocalEntry, LocalListing
 from app.plugins.sftp.remote import Entry, Listing, ServerInfo
+from app.plugins.sftp.search import Found, SearchResult
 
 TRANSFER_ID_PATTERN = r"^[0-9a-f]{12}$"
 PATH_DESCRIPTION = "Путь на сервере: абсолютный (/var/log), от домашней папки (docs) или ~/docs"
@@ -185,3 +186,51 @@ class TransferInfo(BaseModel):
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+
+
+class SearchEntryInfo(BaseModel):
+    name: str
+    path: str = Field(..., description="Абсолютный путь найденного")
+    parent: str | None = Field(..., description="Папка, в которой он лежит (открыть её)")
+    type: Literal["file", "dir", "link", "other"] | None = Field(
+        ..., description="null: сервер без GNU find не сообщает тип"
+    )
+    is_dir: bool
+    size: int | None = Field(..., description="Байты; null у папок и без GNU find")
+    modified_at: datetime | None
+
+    @classmethod
+    def from_found(cls, found: Found) -> SearchEntryInfo:
+        return cls(
+            name=found.name,
+            path=found.path,
+            parent=found.parent,
+            type=found.type,
+            is_dir=found.is_dir,
+            size=found.size,
+            modified_at=found.modified_at,
+        )
+
+
+class SearchInfo(BaseModel):
+    path: str = Field(..., description="Папка, в которой искали")
+    entries: list[SearchEntryInfo] = Field(
+        ..., description="Найденное: сначала ближе к папке поиска"
+    )
+    truncated: bool = Field(..., description="Нашлось больше limit, показаны первые")
+    timed_out: bool = Field(
+        ..., description="Поиск остановлен через SFTP_SEARCH_TIMEOUT: найдено не всё"
+    )
+    denied: int = Field(..., description="Сколько папок не открылось (нет прав)")
+    elapsed_ms: int
+
+    @classmethod
+    def from_result(cls, result: SearchResult) -> SearchInfo:
+        return cls(
+            path=result.path,
+            entries=[SearchEntryInfo.from_found(item) for item in result.entries],
+            truncated=result.truncated,
+            timed_out=result.timed_out,
+            denied=result.denied,
+            elapsed_ms=result.elapsed_ms,
+        )

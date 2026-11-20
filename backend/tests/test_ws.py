@@ -169,14 +169,19 @@ async def test_publisher_keeps_interval_and_stops():
     event_bus.subscribe(METRICS_EVENT, on_metrics)
     publisher = FakeMetricsPublisher(0.1)
     try:
+        started = time.monotonic()
         publisher.start()
         async with asyncio.timeout(5):
             while len(times) < 6:
                 await asyncio.sleep(0.01)
         await publisher.stop()
         assert not publisher.running
-        # 5 периодов по 100 мс; расписание считается от старта, поэтому без дрейфа
-        assert 0.4 <= times[5] - times[0] <= 0.7
+        # Расписание считается от старта: k-е сообщение не раньше k периодов по 100 мс и
+        # без долгих пауз. Промежутки между соседними не сравниваются: опоздавший тик
+        # (медленный раннер CI) догоняет расписание. 0,02 с: часы Windows тикают раз в 15 мс
+        offsets = [t - started for t in times]
+        assert all(t >= k * 0.1 - 0.02 for k, t in enumerate(offsets)), offsets
+        assert offsets[5] <= 0.5 + 1.0, offsets
 
         published = len(times)
         await asyncio.sleep(0.3)

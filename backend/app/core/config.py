@@ -165,6 +165,11 @@ class Settings(BaseSettings):
     SFTP_TRANSFER_HISTORY: int = Field(default=100, ge=1)
     # Сколько файлов и папок может быть в папке, которую передают целиком
     SFTP_FOLDER_LIMIT: int = Field(default=100_000, ge=1)
+    # Поиск файлов (на сервере и на этом компьютере): сколько ищет, сек; больше скольких
+    # найденных не отдаёт; файлы больше SFTP_SEARCH_MAX_FILE байт внутри не просматриваются.
+    SFTP_SEARCH_TIMEOUT: float = Field(default=30.0, gt=0)
+    SFTP_SEARCH_LIMIT: int = Field(default=1000, ge=1)
+    SFTP_SEARCH_MAX_FILE: int = Field(default=10 * 1024 * 1024, ge=1)
 
     # WebSocket /ws (поток данных для UI). Тестовые метрики вместо настоящих: для
     # разработки UI без SSH-сервера; период публикации, сек.

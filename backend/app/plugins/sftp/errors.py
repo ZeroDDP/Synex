@@ -52,6 +52,13 @@ class SftpBadPathError(AppError):
     status_code = 422
 
 
+class SftpBadSearchError(AppError):
+    """Поиску не сказали, что искать (нет ни name, ни contains), или в name есть "/"."""
+
+    code = "sftp_bad_search"
+    status_code = 422
+
+
 class SftpCommandError(AppError):
     """Воркер или сервер не выполнил операцию; текст в detail."""
 
