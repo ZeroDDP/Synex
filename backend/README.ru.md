@@ -162,6 +162,8 @@ glibc 2.38 или новее (Ubuntu 24.04, Debian 13, Fedora 39 и новее).
 | GET | `/api/sftp/transfers/{id}` | Состояние передачи |
 | DELETE | `/api/sftp/transfers/{id}` | Отменить передачу или убрать завершённую из списка |
 | GET | `/api/sftp/local/list` | Папка этого компьютера (вторая панель): `?path=` |
+| GET | `/api/sftp/sessions/{id}/search` | Найти файлы и папки на сервере: `?path=&name=&contains=&type=&max_depth=&hidden=&limit=` |
+| GET | `/api/sftp/local/search` | То же на этом компьютере |
 | GET | `/api/monitor/metrics` | Метрики серверов сейчас (то же, что `metrics` в `/ws`) |
 | GET | `/api/alerts` | Алерты всех серверов: `?status=active\|resolved\|all&server=host:port` |
 | GET | `/api/alerts/{id}` | Один алерт |
@@ -686,13 +688,28 @@ POST /api/connections
   компьютера для второй панели: `{path, parent, home, roots, separator, entries}`,
   `roots` это диски на Windows и `["/"]` на Linux и macOS. UI работает в окне браузера и
   диск не видит, поэтому папки ему показывает backend.
+- Поиск: `GET .../search` (сервер) и `GET /api/sftp/local/search` (этот компьютер) ищут в
+  папке и её подпапках (`path`, без него домашняя папка). Фильтр открытой папки по имени
+  делает UI: список у него уже есть. Параметры: `name` (текст в имени без учёта регистра
+  или шаблон с `*?[`: `*.log`), `contains` (текст внутри файлов; двоичные и файлы больше
+  `SFTP_SEARCH_MAX_FILE`, 10 МБ, пропускаются), `type` (`any`, `file`, `dir`), `max_depth`
+  (10), `hidden=true` (и внутри `.git`, `.cache` и других скрытых папок), `limit` (до
+  `SFTP_SEARCH_LIMIT`, 1000). Нужен хотя бы `name` или `contains`, иначе 422
+  `sftp_bad_search`. Ответ `{path, entries: [{name, path, parent, type, is_dir, size,
+  modified_at}], truncated, timed_out, denied, elapsed_ms}`, ближние уровни первыми;
+  `parent` открывает папку найденного. На сервере это одна команда `find` в своём
+  SSH-подключении (терминал её не ждёт), `/proc`, `/sys`, `/dev` и `/run` пропускаются;
+  без GNU find (BSD, busybox) приходят только пути (`type` и `size` равны `null`). Через
+  `SFTP_SEARCH_TIMEOUT` (30 с) поиск останавливается и отдаёт найденное с
+  `timed_out: true`; `denied` — сколько папок не открылось.
 - Ошибки: 404 `sftp_not_found`, 403 `sftp_permission_denied`, `sftp_protected_path`, 409
   `sftp_target_exists`, `sftp_is_a_directory`, `sftp_not_a_directory`, `sftp_not_a_file`,
-  `sftp_directory_not_empty`, 422 `sftp_bad_path` (в том числе имя файла с сервера,
-  которое нельзя дать файлу на этом компьютере, например `a:b.txt` на Windows), 502
-  `sftp_failed` (текст воркера в `detail`), `sftp_unavailable` (на сервере нет SFTP: в
-  его `sshd_config` нужна строка `Subsystem sftp ...`; или сборка воркера старая и не знает
-  действий `sftp_*`, тогда воркер нужно обновить), `sftp_transfer_corrupted`, 504
+  `sftp_directory_not_empty`, 422 `sftp_bad_search`, 422 `sftp_bad_path` (в том числе имя
+  файла с сервера, которое нельзя дать файлу на этом компьютере, например `a:b.txt` на
+  Windows), 502 `sftp_failed` (текст воркера в `detail`), `sftp_unavailable` (на сервере
+  нет SFTP: в его `sshd_config` нужна строка `Subsystem sftp ...`; или сборка воркера
+  старая и не знает действий `sftp_*`, тогда воркер нужно обновить),
+  `sftp_transfer_corrupted`, 504
   `sftp_timeout`, у передачи папки ещё 422 `sftp_folder_too_large`; для этого компьютера
   `sftp_local_not_found` (404), `sftp_local_permission_denied` (403), `sftp_local_exists` и
   `sftp_local_not_a_directory` (409), `sftp_local_error` (422). Сессия, занятая командой
@@ -923,7 +940,8 @@ app/
                        routes, schemas
     sftp/              /api/sftp/*: remote (файлы сервера через SFTP воркера), transfers
                        (передачи, прогресс, сверка), folders (папка целиком), tree (обход
-                       папки), local (файлы этого компьютера), paths, routes, schemas
+                       папки), local (файлы этого компьютера), search (find на сервере,
+                       обход папок здесь), paths, routes, schemas
 tests/                 pytest; fake_worker.py имитирует synex_worker
   integration/         полный цикл UI → FastAPI → воркер → SSH-сервер
 ```

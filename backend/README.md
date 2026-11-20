@@ -163,6 +163,8 @@ servers through `fetch` and WebSocket.
 | GET | `/api/sftp/transfers/{id}` | Transfer state |
 | DELETE | `/api/sftp/transfers/{id}` | Cancel a transfer or remove a finished one from the list |
 | GET | `/api/sftp/local/list` | A folder of this computer (second pane): `?path=` |
+| GET | `/api/sftp/sessions/{id}/search` | Find files and folders on the server: `?path=&name=&contains=&type=&max_depth=&hidden=&limit=` |
+| GET | `/api/sftp/local/search` | The same on this computer |
 | GET | `/api/monitor/metrics` | Server metrics right now (same as `metrics` in `/ws`) |
 | GET | `/api/alerts` | Alerts of all servers: `?status=active\|resolved\|all&server=host:port` |
 | GET | `/api/alerts/{id}` | One alert |
@@ -699,13 +701,29 @@ and transfers between them with progress. It works through the SFTP of the Rust 
   computer for the second pane: `{path, parent, home, roots, separator, entries}`, `roots`
   are the drives on Windows and `["/"]` on Linux and macOS. The UI runs in a browser window
   and cannot see the disk, so the backend lists the folders for it.
+- Search: `GET .../search` (server) and `GET /api/sftp/local/search` (this computer) look
+  through a folder and its subfolders (`path`, home folder without it). Filtering the open
+  folder by name is the UI's job: it already has the list. Parameters: `name` (text in the
+  name, case-insensitive, or a pattern with `*?[`: `*.log`), `contains` (text inside files;
+  binary files and files over `SFTP_SEARCH_MAX_FILE`, 10 MB, are skipped), `type`
+  (`any`, `file`, `dir`), `max_depth` (10), `hidden=true` (also inside `.git`, `.cache` and
+  other hidden folders), `limit` (up to `SFTP_SEARCH_LIMIT`, 1000). At least `name` or
+  `contains` is needed, otherwise 422 `sftp_bad_search`. Response `{path, entries: [{name,
+  path, parent, type, is_dir, size, modified_at}], truncated, timed_out, denied,
+  elapsed_ms}`, nearer levels first; `parent` opens the folder of a result. On the server
+  it is one `find` command in its own SSH connection (the terminal does not wait for it),
+  `/proc`, `/sys`, `/dev` and `/run` are skipped; without GNU find (BSD, busybox) only paths
+  come back (`type` and `size` are `null`). After `SFTP_SEARCH_TIMEOUT` (30 s) the search
+  stops and returns what it found with `timed_out: true`; `denied` counts folders it could
+  not open.
 - Errors: 404 `sftp_not_found`, 403 `sftp_permission_denied`, `sftp_protected_path`, 409
   `sftp_target_exists`, `sftp_is_a_directory`, `sftp_not_a_directory`, `sftp_not_a_file`,
-  `sftp_directory_not_empty`, 422 `sftp_bad_path` (including a server file name that cannot
-  be given to a file on this computer, for example `a:b.txt` on Windows), 502 `sftp_failed`
-  (the worker text in `detail`), `sftp_unavailable` (the server has no SFTP: its
-  `sshd_config` needs a `Subsystem sftp ...` line; or the worker build is old and does not
-  know the `sftp_*` actions, then update the worker), `sftp_transfer_corrupted`, 504
+  `sftp_directory_not_empty`, 422 `sftp_bad_search`, 422 `sftp_bad_path` (including a server
+  file name that cannot be given to a file on this computer, for example `a:b.txt` on
+  Windows), 502 `sftp_failed` (the worker text in `detail`), `sftp_unavailable` (the server
+  has no SFTP: its `sshd_config` needs a `Subsystem sftp ...` line; or the worker build is
+  old and does not know the `sftp_*` actions, then update the worker),
+  `sftp_transfer_corrupted`, 504
   `sftp_timeout`, for a folder transfer also 422 `sftp_folder_too_large`; for this computer
   `sftp_local_not_found` (404), `sftp_local_permission_denied` (403), `sftp_local_exists` and
   `sftp_local_not_a_directory` (409), `sftp_local_error` (422). A session busy with a user
@@ -936,7 +954,8 @@ app/
     sftp/              /api/sftp/*: remote (server files through the worker's SFTP),
                        transfers (transfers, progress, verification), folders (a whole
                        folder), tree (walking a folder), local (files of this computer),
-                       paths, routes, schemas
+                       search (find on the server, walking folders here), paths,
+                       routes, schemas
 tests/                 pytest; fake_worker.py imitates synex_worker
   integration/         the full cycle UI → FastAPI → worker → SSH server
 ```
