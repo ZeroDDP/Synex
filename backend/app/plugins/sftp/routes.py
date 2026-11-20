@@ -353,6 +353,20 @@ SEARCH_DESCRIPTION = (
 
 
 @router.get(
+    "/sessions/{session_id}/search",
+    response_model=SearchInfo,
+    summary="Найти файлы и папки на сервере",
+    description=SEARCH_DESCRIPTION,
+    responses=ERRORS,
+)
+async def search_remote(
+    session_id: SessionId, sftp: Sftp, query: SearchQueryDep, path: OptionalPath = None
+) -> SearchInfo:
+    result = await search.search_remote(sftp.remote, session_id, path, query)
+    return SearchInfo.from_result(result)
+
+
+@router.get(
     "/local/search",
     response_model=SearchInfo,
     summary="Найти файлы и папки на этом компьютере",

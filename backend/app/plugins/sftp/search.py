@@ -1,4 +1,4 @@
-"""Поиск файлов вкладки Files вглубь папок.
+"""Поиск файлов: на сервере (find через SSH) и на этом компьютере (обход папок).
 
 Фильтр по имени в уже открытой папке UI делает сам: список у него есть. Здесь поиск
 вглубь — по папке и её подпапкам, чего UI без backend не сделает.
@@ -11,14 +11,16 @@
 * type: file, dir или any; max_depth: сколько уровней вглубь; hidden: заходить ли в
   скрытые папки (.git, .cache) и показывать скрытые файлы.
 
-На этом компьютере — обход папок в ширину. Поиск останавливается через
-SFTP_SEARCH_TIMEOUT или после SFTP_SEARCH_LIMIT найденных: тогда UI получает то, что
-успели найти, и timed_out или truncated.
+На сервере поиск идёт одной командой find (GNU, BSD, busybox), в своём SSH-подключении:
+терминал не ждёт, пока он закончится. /proc, /sys, /dev и /run пропускаются. Поиск
+останавливается через SFTP_SEARCH_TIMEOUT или после SFTP_SEARCH_LIMIT найденных: тогда
+UI получает то, что успели найти, и timed_out или truncated.
 """
 
 from __future__ import annotations
 
 import os
+import shlex
 import stat as statmod
 import time
 from collections.abc import Iterator
@@ -28,13 +30,22 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Literal
 
+import structlog
+
 from app.core.config import settings
-from app.plugins.sftp import local
+from app.core.errors import AppError
+from app.plugins.sftp import local, paths
 from app.plugins.sftp.errors import (
     SftpBadSearchError,
+    SftpCommandError,
     SftpLocalNotADirectoryError,
     SftpLocalNotFoundError,
+    SftpNotADirectoryError,
+    SftpNotFoundError,
 )
+from app.plugins.sftp.remote import RemoteFS
+
+logger = structlog.get_logger()
 
 # Часы поиска по этому компьютеру (тест подменяет их: на Windows time.monotonic тикает
 # раз в 15 мс, и короткий поиск успевает закончиться за один тик)
@@ -43,6 +54,8 @@ _clock = time.monotonic
 SearchType = Literal["any", "file", "dir"]
 EntryType = Literal["file", "dir", "link", "other"]
 
+HEADER = "synex-search:"
+SKIP_REMOTE = ("/proc", "/sys", "/dev", "/run")
 GLOB_CHARS = "*?["
 BINARY_PROBE = 8192
 
@@ -98,6 +111,148 @@ def check(query: SearchQuery) -> None:
     for value in (query.name, query.contains):
         if value and any(ord(ch) < 32 for ch in value):
             raise SftpBadSearchError("Search text must not contain control characters")
+
+
+# ------------------------------------------------------------------- server
+
+
+async def search_remote(
+    remote: RemoteFS, session_id: str, directory: str | None, query: SearchQuery
+) -> SearchResult:
+    """Поиск на сервере в своём SSH-подключении (нельзя открыть — в основной сессии)."""
+    check(query)
+    target = await remote.normalize(session_id, directory)
+    command = remote_command(target, query)
+    manager = remote.manager
+    started = time.monotonic()
+    companion = None
+    try:
+        companion = await manager.open_companion(session_id, "sftp-search")
+    except AppError as e:
+        logger.info("File search runs in the main SSH session", reason=e.detail)
+    try:
+        if companion is not None:
+            result = await manager.companion_run_service(
+                companion, command, timeout=settings.SFTP_SEARCH_TIMEOUT
+            )
+        else:
+            result = await manager.run_service(
+                session_id, command, timeout=settings.SFTP_SEARCH_TIMEOUT, name="sftp"
+            )
+    finally:
+        if companion is not None:
+            await manager.close_companion(companion)
+    status, found = parse_remote(result.stdout, result.stderr, target, query)
+    if status == "missing":
+        raise SftpNotFoundError(f"Directory {target} not found")
+    if status == "not_a_directory":
+        raise SftpNotADirectoryError(f"{target} is not a directory")
+    if status != "ok":
+        detail = (result.stderr or result.stdout).strip() or f"exit code {result.exit_code}"
+        raise SftpCommandError(f"File search on the server failed: {detail}")
+    found.timed_out = result.timed_out
+    found.elapsed_ms = round((time.monotonic() - started) * 1000)
+    return found
+
+
+def remote_command(directory: str, query: SearchQuery) -> str:
+    """Скрипт поиска на сервере: заголовок `ok gnu|posix`, потом найденное, по строке.
+
+    GNU find печатает тип, размер, время и путь через табуляцию (-printf); другие find
+    только путь. Поиск внутри файлов: grep -l по найденным файлам (-I пропускает
+    двоичные)."""
+    skip = list(SKIP_REMOTE)
+    prune = " -o ".join(f"-path {shlex.quote(item)}" for item in skip)
+    if not query.hidden:
+        prune += " -o -name '.*'"
+    tests: list[str] = []
+    if query.contains or query.type == "file":
+        tests.append("-type f")
+    elif query.type == "dir":
+        tests.append("-type d")
+    if query.pattern:
+        tests.append(f"-iname {shlex.quote(query.pattern)}")
+    if query.contains:
+        max_kb = max(1, settings.SFTP_SEARCH_MAX_FILE // 1024)
+        tests.append(f"-size -{max_kb}k")
+    test = " ".join(tests)
+    head = f"head -n {query.limit + 1}"
+    find = f'find "$p" -mindepth 1 -maxdepth {query.max_depth} \\( {prune} \\) -prune -o'
+    if query.contains:
+        grep = f"grep -l -I -i -F -e {shlex.quote(query.contains)}"
+        found_gnu = f"{find} {test} -exec {grep} {{}} + | {head}"
+        found_posix = found_gnu
+    else:
+        found_gnu = f"{find} {test} -printf '%y\\t%s\\t%T@\\t%p\\n' | {head}"
+        found_posix = f"{find} {test} -print | {head}"
+    return f"""\
+p={shlex.quote(directory)}
+if [ ! -e "$p" ]; then echo "{HEADER} missing"; exit 0; fi
+if [ ! -d "$p" ]; then echo "{HEADER} not_a_directory"; exit 0; fi
+if find "$p" -maxdepth 0 -printf '' >/dev/null 2>&1; then
+  echo "{HEADER} ok gnu"
+  {found_gnu}
+else
+  echo "{HEADER} ok posix"
+  {found_posix}
+fi"""
+
+
+_TYPES: dict[str, EntryType] = {"f": "file", "d": "dir", "l": "link"}
+
+
+def parse_remote(
+    stdout: str, stderr: str, directory: str, query: SearchQuery
+) -> tuple[str, SearchResult]:
+    """(статус, результат). Статус: ok, missing, not_a_directory или пусто (нет ответа)."""
+    first, _, rest = stdout.partition("\n")
+    if not first.startswith(HEADER):
+        return "", SearchResult(path=directory)
+    fields = first.removeprefix(HEADER).split()
+    status = fields[0] if fields else ""
+    gnu = len(fields) > 1 and fields[1] == "gnu"
+    result = SearchResult(path=directory)
+    for line in rest.splitlines():
+        found = _parse_line(line, gnu=gnu and not query.contains, query=query)
+        if found is not None:
+            result.entries.append(found)
+    if len(result.entries) > query.limit:
+        result.entries = result.entries[: query.limit]
+        result.truncated = True
+    # Как на этом компьютере: сначала ближе к папке поиска, внутри уровня по пути
+    result.entries.sort(key=lambda e: (e.path.count("/"), e.path.casefold(), e.path))
+    result.denied = sum(1 for line in stderr.splitlines() if "Permission denied" in line)
+    return status, result
+
+
+def _parse_line(line: str, *, gnu: bool, query: SearchQuery) -> Found | None:
+    if gnu:
+        parts = line.split("\t", 3)
+        if len(parts) != 4 or not parts[3].startswith("/"):
+            return None
+        kind, size, mtime, path = parts
+        entry_type: EntryType | None = _TYPES.get(kind, "other")
+        try:
+            modified = datetime.fromtimestamp(float(mtime), UTC)
+        except (ValueError, OverflowError, OSError):
+            modified = None
+        byte_size = int(size) if size.isdigit() and entry_type != "dir" else None
+    else:
+        if not line.startswith("/"):
+            return None
+        path, modified, byte_size = line, None, None
+        # Тип известен, если искали только файлы или только папки
+        entry_type = "file" if query.contains or query.type == "file" else None
+        if query.type == "dir":
+            entry_type = "dir"
+    return Found(
+        path=path,
+        name=paths.name(path),
+        parent=paths.parent(path),
+        type=entry_type,
+        size=byte_size,
+        modified_at=modified,
+    )
 
 
 # ------------------------------------------------------------ this computer
