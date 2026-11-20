@@ -6,6 +6,8 @@ from contextlib import asynccontextmanager
 import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from starlette.types import Receive, Scope, Send
 
 from app import __version__
 from app.api.router import API_PREFIX, build_api_router
@@ -97,4 +99,29 @@ def create_app() -> FastAPI:
     app.include_router(ws_router)
     plugins.attach(app, API_PREFIX)  # включение и выключение плагинов на ходу
     app.state.plugins = plugins
+    mount_ui(app)
     return app
+
+
+def mount_ui(app: FastAPI) -> None:
+    """Собранный UI (UI_DIR) для всего, что не нашлось среди роутов: /api, /ws и роуты
+    плагинов, включённых на ходу, всегда важнее. Неизвестный путь под /api получает
+    обычный JSON 404, а не страницу UI."""
+    ui_dir = settings.ui_dir
+    if ui_dir is None:
+        return
+    if not (ui_dir / "index.html").is_file():
+        logger.warning("UI_DIR has no index.html, the UI is not served", ui_dir=str(ui_dir))
+        return
+    static = StaticFiles(directory=ui_dir, html=True)
+    not_found = app.router.default
+
+    async def fallback(scope: Scope, receive: Receive, send: Send) -> None:
+        path = scope.get("path", "")
+        if scope["type"] != "http" or path == API_PREFIX or path.startswith(f"{API_PREFIX}/"):
+            await not_found(scope, receive, send)
+        else:
+            await static(scope, receive, send)
+
+    app.router.default = fallback
+    logger.info("Serving the UI", ui_dir=str(ui_dir))

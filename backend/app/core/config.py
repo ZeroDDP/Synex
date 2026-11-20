@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     UI_DEV_SERVER: bool = True
     # Дополнительные имена в заголовке Host (127.0.0.1, localhost и HOST разрешены).
     ALLOWED_HOSTS: str = ""
+    # Собранный UI (frontend/dist после `npm run build`): backend отдаёт его на /, и
+    # приложение открывается по http://127.0.0.1:PORT без dev-сервера. Пусто: UI не
+    # отдаётся (разработка с `npm run dev`). Сборка приложения задаёт его сама.
+    UI_DIR: Path | None = None
 
     # Rust-воркер (имена переменных совпадают с CoreDocs, раздел 3)
     # Unix socket воркера на Linux/macOS. Пусто: личная папка пользователя
@@ -215,6 +219,12 @@ class Settings(BaseSettings):
         if self.KNOWN_HOSTS_PATH.is_absolute():
             return self.KNOWN_HOSTS_PATH
         return BASE_DIR / self.KNOWN_HOSTS_PATH
+
+    @property
+    def ui_dir(self) -> Path | None:
+        if self.UI_DIR is None:
+            return None
+        return self.UI_DIR if self.UI_DIR.is_absolute() else BASE_DIR / self.UI_DIR
 
     @property
     def terminal_history_path(self) -> Path:
