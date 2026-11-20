@@ -83,6 +83,7 @@ flowchart LR
 | `keys` | 0.1.0 | — | `/api/keys` — encrypted SSH key vault |
 | `connections` | 0.1.0 | `ssh` | `/api/connections` — saved servers |
 | `monitor` | 0.2.0 | `ssh` | `/api/monitor` and the `metrics` stream in `/ws` |
+| `alerts` | 0.1.0 | `monitor` | `/api/alerts` — alerts of all servers by metric thresholds, `alert` events in `/ws` |
 | `docker` | 0.2.0 | `ssh` | `/api/docker` — containers, logs, live log WebSocket |
 | `git` | 0.1.0 | `ssh` | `/api/git` — status, log, fetch, pull, deploy |
 | `sftp` | 0.1.0 | `ssh` | `/api/sftp` — files and folders, transfers with progress in `/ws` |

@@ -163,6 +163,11 @@ glibc 2.38 или новее (Ubuntu 24.04, Debian 13, Fedora 39 и новее).
 | DELETE | `/api/sftp/transfers/{id}` | Отменить передачу или убрать завершённую из списка |
 | GET | `/api/sftp/local/list` | Папка этого компьютера (вторая панель): `?path=` |
 | GET | `/api/monitor/metrics` | Метрики серверов сейчас (то же, что `metrics` в `/ws`) |
+| GET | `/api/alerts` | Алерты всех серверов: `?status=active\|resolved\|all&server=host:port` |
+| GET | `/api/alerts/{id}` | Один алерт |
+| POST | `/api/alerts/{id}/ack` | Отметить алерт как увиденный; `POST /api/alerts/ack-all` для всех активных |
+| DELETE | `/api/alerts/{id}` | Убрать погасший алерт из истории; `DELETE /api/alerts` очищает историю |
+| GET / PUT / DELETE | `/api/alerts/rules` | Правила алертов (пороги): прочитать, заменить, вернуть по умолчанию |
 | GET | `/api/health` | Состояние бэкенда и воркера, загруженные плагины |
 | GET | `/api/plugins` | Плагины: версия, описание, зависимости, `status` и причина сбоя (см. ниже) |
 | POST | `/api/plugins/{name}/enable` | Включить плагин без перезапуска (вместе с зависимостями); выбор запоминается |
@@ -637,6 +642,7 @@ POST /api/connections
 | `worker.status` | сервер, когда меняется состояние воркера | `{status, ...}`: `connected`, `connection_lost`, `worker_exited`, `worker_started` |
 | `sftp.transfer` | сервер, пока идёт передача файла | состояние передачи: `{id, status, bytes_done, bytes_total, percent, speed, ...}` (см. «Файлы на серверах») |
 | `plugin.status` | сервер, когда плагин включили, выключили или он упал | `{name, status, version, error}` (см. «Плагины на ходу») |
+| `alert` | сервер, когда алерт загорелся, сменил уровень, погас или его отметили | `{action: fired\|updated\|resolved\|acknowledged, alert}` (см. «Алерты») |
 | `ping` | UI | что угодно, вернётся в `pong` |
 | `pong` | сервер, в ответ на `ping` | `data` из `ping` |
 | `error` | сервер, если не разобрал сообщение UI | `{error, detail}`: `bad_message` или `unknown_type` |
@@ -720,6 +726,42 @@ UI обновляет по нему список сессий, даже если
   самые старые сообщения, а память не растёт.
 - При остановке backend закрывает соединение с кодом 1012: UI стоит переподключиться.
 
+#### Алерты (плагин `alerts`)
+
+Алерты всех серверов с открытыми SSH-сессиями, по тем же метрикам, что видит UI. Правила
+общие для всех серверов:
+
+| metric | по умолчанию | что проверяется |
+|---|---|---|
+| `cpu` | warning 90 %, critical 95 %, 60 с | загрузка CPU |
+| `memory` | warning 90 %, critical 95 %, 60 с | занятость памяти |
+| `disk` | warning 90 %, critical 95 %, сразу | каждый раздел из `disks` отдельно (`target` — точка монтирования) |
+| `gpu_temperature` | warning 80 °C, critical 90 °C, 60 с | каждая карта NVIDIA (`target` — её номер) |
+| `server` | 30 с | сервер не отвечает: опрос с ошибкой или нет свежих данных, хотя его сессии свободны |
+
+- Значение должно держаться выше порога `duration_s` секунд: короткий всплеск CPU алерта
+  не даёт. Алерт гаснет, когда значение опустилось на 5 пунктов ниже порога warning
+  (иначе значение около порога мигало бы); critical сменяется на warning на 5 пунктов ниже
+  порога critical. Пока сервер не отвечает, его остальные метрики не проверяются
+  (значения в них старые).
+- `GET /api/alerts`: `{counts: {active, critical, warning, unacknowledged, resolved},
+  alerts: [...]}`, сначала активные (critical выше), потом погасшие, новые выше. Алерт:
+  `{id, server, host, port, metric, target, severity, status, value, peak, threshold,
+  message, started_at, updated_at, resolved_at, resolved_reason, acknowledged}`;
+  `resolved_reason`: `back_to_normal`, `server_disconnected` (закрыли последнюю сессию к
+  серверу), `rule_changed` (его правило выключили).
+- В `/ws` приходит `alert` `{action, alert}`, когда алерт загорелся, сменил уровень, погас
+  или его отметили. UI берёт список из `GET /api/alerts` и обновляет его по этим событиям.
+- `POST /api/alerts/{id}/ack` отмечает алерт увиденным (для значка); при смене уровня
+  отметка снимается. Погасшие алерты хранятся в памяти (`ALERTS_HISTORY`, 200) до
+  перезапуска.
+- `PUT /api/alerts/rules` `{"rules": [{"metric": "cpu", "warning": 80, "critical": 95,
+  "duration_s": 30, "enabled": true}]}` заменяет правила (метрика, которой нет в списке,
+  остаётся по умолчанию) и сохраняет их в `alerts.json` рядом с `keys.json`
+  (`ALERTS_PATH`); `DELETE /api/alerts/rules` возвращает правила по умолчанию.
+- Монитор опрашивает серверы, только пока метрики кто-то смотрит. Чтобы алерты работали и
+  при закрытом Dashboard, плагин держит опрос включённым (`ALERTS_KEEP_POLLING=true`).
+
 Быстрая проверка: открыть http://127.0.0.1:8000/api/health и в консоли браузера выполнить
 
 ```js
@@ -767,6 +809,7 @@ ws.onmessage = (e) => console.log(JSON.parse(e.data));
 | 504 | `worker_timeout` | Воркер не ответил на другой запрос |
 | 403/404/502/503/504 | `docker_*` | Ошибки Docker на сервере (см. «Docker на серверах») |
 | 404/409/502/504 | `git_*` | Ошибки git на сервере (см. «Git на серверах») |
+| 404/409/500 | `alert_*` | `alert_not_found`, `alert_active` (активный алерт нельзя удалить), `alert_rules_corrupted` (`alerts.json` повреждён) |
 | 403/404/409/422/5xx | `sftp_*` | Ошибки файлов на сервере и на этом компьютере (см. «Файлы на серверах») |
 
 ## Структура
@@ -794,6 +837,8 @@ app/
                        errors
     monitor/           /api/monitor/*: service (опрос и публикация), aggregator
                        (окно, статусы), values (ответ воркера), hardware (диски, GPU)
+    alerts/            /api/alerts/*: rules (пороги, alerts.json), engine (когда алерт
+                       загорается и гаснет), service (история, события в /ws), routes
     keys/              /api/keys/*
     connections/       /api/connections/*: store (connections.json), routes, schemas
     docker/            /api/docker/*: commands (команды docker и разбор вывода),

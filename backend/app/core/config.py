@@ -119,6 +119,13 @@ class Settings(BaseSettings):
     # Как часто обновлять диски и видеокарты сервера (df, nvidia-smi), сек.
     MONITOR_HARDWARE_INTERVAL: float = Field(default=10.0, gt=0)
 
+    # Алерты всех серверов (плагин alerts). Правила (пороги): alerts.json рядом с
+    # keys.json. Сколько погасших алертов помнить. Опрашивать серверы и тогда, когда
+    # метрики никто не смотрит: иначе алерты при закрытом Dashboard не загораются.
+    ALERTS_PATH: Path | None = None
+    ALERTS_HISTORY: int = Field(default=200, ge=1)
+    ALERTS_KEEP_POLLING: bool = True
+
     # Docker на серверах (плагин docker). Команда docker на сервере: например
     # "sudo -n docker", если пользователь SSH не в группе docker (нужен sudo без пароля).
     DOCKER_COMMAND: str = Field(default="docker", min_length=1)
@@ -184,6 +191,14 @@ class Settings(BaseSettings):
         if self.KNOWN_HOSTS_PATH.is_absolute():
             return self.KNOWN_HOSTS_PATH
         return BASE_DIR / self.KNOWN_HOSTS_PATH
+
+    @property
+    def alerts_path(self) -> Path:
+        if self.ALERTS_PATH is None:
+            return user_data_dir() / "alerts.json"
+        if self.ALERTS_PATH.is_absolute():
+            return self.ALERTS_PATH
+        return BASE_DIR / self.ALERTS_PATH
 
     @property
     def plugins_state_path(self) -> Path:

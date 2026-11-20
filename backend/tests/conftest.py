@@ -43,7 +43,7 @@ def default_app_settings(monkeypatch):
 @pytest.fixture(autouse=True)
 def isolated_keystore(monkeypatch, tmp_path: Path) -> Path:
     """Тесты никогда не трогают настоящее хранилище ключей, сохранённые подключения,
-    доверенные ключи серверов, выбор плагинов и системный keychain и не читают
+    доверенные ключи серверов, выбор плагинов, правила алертов и системный keychain и не читают
     known_hosts OpenSSH этого компьютера (вместо него файл теста, которого по умолчанию
     нет)."""
     path = tmp_path / "keystore" / "keys.json"
@@ -53,6 +53,7 @@ def isolated_keystore(monkeypatch, tmp_path: Path) -> Path:
     monkeypatch.setattr(settings, "KNOWN_HOSTS_PATH", path.with_name("known_hosts.json"))
     monkeypatch.setattr(settings, "PLUGINS_REMEMBER", True)
     monkeypatch.setattr(settings, "PLUGINS_STATE_PATH", path.with_name("plugins.json"))
+    monkeypatch.setattr(settings, "ALERTS_PATH", path.with_name("alerts.json"))
     monkeypatch.setattr(settings, "OPENSSH_KNOWN_HOSTS", True)
     monkeypatch.setattr(
         settings, "OPENSSH_KNOWN_HOSTS_FILES", str(path.with_name("openssh_known_hosts"))

@@ -186,6 +186,9 @@ async def test_docker_full_cycle(ui: UI, ssh_target: SSHTarget, tmp_path: Path):
 # ------------------------------------------------------- plugins on the fly
 
 CORE_MODULES = ("ssh", "sftp", "monitor", "docker")
+# От мониторинга зависят алерты: выключаются вместе с ним (cascade), включаются обратно
+# вместе с ним (мониторинг включается как их зависимость)
+DEPENDENTS = {"monitor": ["alerts"]}
 
 
 def plugin_status(name: str, status: str):
@@ -209,15 +212,18 @@ async def test_four_modules_switch_on_a_running_backend(ui: UI, ssh_target: SSHT
 
         # SFTP, Docker и мониторинг по одному: сессия при этом не закрывается
         for name, path in checks.items():
-            off = await ui.api.post(f"/api/plugins/{name}/disable")
-            assert (off.status_code, off.json()["changed"]) == (200, [name]), off.text
+            dependents = DEPENDENTS.get(name, [])
+            params = {"cascade": "true"} if dependents else None
+            off = await ui.api.post(f"/api/plugins/{name}/disable", params=params)
+            assert (off.status_code, off.json()["changed"]) == (200, [*dependents, name]), off.text
             await events.wait_for("plugin.status", plugin_status(name, "disabled"))
             refused = await ui.api.get(path)
             assert (refused.status_code, refused.json()["error"]) == (404, "plugin_disabled")
 
-            on = await ui.api.post(f"/api/plugins/{name}/enable")
-            assert (on.status_code, on.json()["changed"]) == (200, [name]), on.text
-            await events.wait_for("plugin.status", plugin_status(name, "loaded"))
+            top = dependents[-1] if dependents else name
+            on = await ui.api.post(f"/api/plugins/{top}/enable")
+            assert (on.status_code, on.json()["changed"]) == (200, [name, *dependents]), on.text
+            await events.wait_for("plugin.status", plugin_status(top, "loaded"))
             assert (await ui.api.get(path)).status_code == 200, path
         await events.wait_for("metrics", server_ok)  # мониторинг снова идёт сам
 
