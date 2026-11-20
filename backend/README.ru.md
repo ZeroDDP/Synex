@@ -13,6 +13,8 @@ WebSocket каждые 500 мс, управляет Docker, git и файлам�
 
 Нужны Python 3.12 и [uv](https://docs.astral.sh/uv/).
 
+**PowerShell** (Windows):
+
 ```powershell
 cd backend
 uv sync                      # зависимости, включая dev-группу (pytest, ruff)
@@ -187,6 +189,8 @@ glibc 2.38 или новее (Ubuntu 24.04, Debian 13, Fedora 39 и новее).
 
 ### Пример: ключ из хранилища → подключение → команда → отключение
 
+**PowerShell** (Windows):
+
 ```powershell
 $api = "http://127.0.0.1:8000/api"
 $key = Invoke-RestMethod -Method Post "$api/keys" -ContentType "application/json" `
@@ -198,6 +202,22 @@ Invoke-RestMethod -Method Post "$api/ssh/sessions/$($s.session_id)/exec" `
 Invoke-RestMethod "$api/ssh/sessions/$($s.session_id)/output"
 Invoke-RestMethod -Method Delete "$api/ssh/sessions/$($s.session_id)"
 ```
+
+**bash** (Linux, macOS):
+
+```bash
+api=http://127.0.0.1:8000/api
+key=$(curl -s -X POST "$api/keys" -H "Content-Type: application/json" \
+  -d '{"name": "prod", "private_key_path": "/home/me/.ssh/id_ed25519"}' | jq -r .id)
+s=$(curl -s -X POST "$api/ssh/sessions" -H "Content-Type: application/json" \
+  -d "{\"host\": \"1.2.3.4\", \"username\": \"root\", \"key_id\": \"$key\"}" | jq -r .session_id)
+curl -s -X POST "$api/ssh/sessions/$s/exec" -H "Content-Type: application/json" \
+  -d '{"command": "cd /var/log && ls", "timeout": 10}'
+curl -s "$api/ssh/sessions/$s/output"
+curl -s -X DELETE "$api/ssh/sessions/$s"
+```
+
+Вариант для bash читает JSON-ответы через [jq](https://jqlang.org/).
 
 ### SSH-сессии
 
@@ -982,6 +1002,16 @@ tests/                 pytest; fake_worker.py имитирует synex_worker
 
 Модули включаются и выключаются на работающем backend, без перезапуска:
 
+**PowerShell** (Windows):
+
+```powershell
+Invoke-RestMethod -Method Post http://127.0.0.1:8000/api/plugins/docker/disable
+Invoke-RestMethod -Method Post http://127.0.0.1:8000/api/plugins/docker/enable
+Invoke-RestMethod -Method Post "http://127.0.0.1:8000/api/plugins/ssh/disable?cascade=true"
+```
+
+**bash** (Linux, macOS):
+
 ```bash
 curl -X POST http://127.0.0.1:8000/api/plugins/docker/disable
 curl -X POST http://127.0.0.1:8000/api/plugins/docker/enable
@@ -1030,7 +1060,15 @@ curl -X POST "http://127.0.0.1:8000/api/plugins/ssh/disable?cascade=true"
 
 ## Тесты
 
+**PowerShell** (Windows):
+
 ```powershell
+uv run pytest
+```
+
+**bash** (Linux, macOS):
+
+```bash
 uv run pytest
 ```
 
@@ -1043,7 +1081,18 @@ Credential Manager они не трогают. От `backend/.env` они тож
 виртуальная файловая система с `/tmp` и `/home/synex` и ровно те команды, что нужны
 тестам. Программы сервера вроде `docker` и `git` тесты подставляют в эмулятор сами
 (`FakeShell.programs`). Что эмулятор отвечает так же, как настоящий sh, проверяет
-`tests/test_fake_shell.py`. Эмулятор можно включить и на Linux/macOS:
+`tests/test_fake_shell.py`. Эмулятор можно включить явно на любой ОС (на Windows он
+включён всегда), например чтобы прогнать на Linux/macOS вариант тестов для Windows:
+
+**PowerShell** (Windows):
+
+```powershell
+$env:SYNEX_TEST_SHELL = "emulated"
+uv run pytest
+Remove-Item Env:SYNEX_TEST_SHELL
+```
+
+**bash** (Linux, macOS):
 
 ```bash
 SYNEX_TEST_SHELL=emulated uv run pytest
@@ -1058,6 +1107,16 @@ GitHub Actions (`.github/workflows/backend.yml`) на каждый push в `main
 Windows, Linux и macOS, а на Linux ещё раз с `SYNEX_TEST_SHELL=emulated`. Перед push
 то же самое локально:
 
+**PowerShell** (Windows):
+
+```powershell
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest
+```
+
+**bash** (Linux, macOS):
+
 ```bash
 uv run ruff check . && uv run ruff format --check . && uv run pytest
 ```
@@ -1067,10 +1126,23 @@ uv run ruff check . && uv run ruff format --check . && uv run pytest
 команду из `SYNEX_TEST_WORKER` (например, скрипт, который запускает exe через wine).
 Проверки с реальным SSH-сервером включаются переменными окружения:
 
+**PowerShell** (Windows):
+
 ```powershell
-$env:SYNEX_TEST_SSH_HOST="1.2.3.4"; $env:SYNEX_TEST_SSH_USER="root"
-$env:SYNEX_TEST_SSH_KEY="C:/Users/me/.ssh/id_ed25519"
-$env:SYNEX_TEST_SSH_PASSWORD="..."   # необязательно: проверить вход по паролю
+$env:SYNEX_TEST_SSH_HOST = "1.2.3.4"
+$env:SYNEX_TEST_SSH_USER = "root"
+$env:SYNEX_TEST_SSH_KEY = "C:/Users/me/.ssh/id_ed25519"
+$env:SYNEX_TEST_SSH_PASSWORD = "..."   # необязательно: проверить вход по паролю
+uv run pytest tests/test_real_worker.py -v
+```
+
+**bash** (Linux, macOS):
+
+```bash
+export SYNEX_TEST_SSH_HOST=1.2.3.4
+export SYNEX_TEST_SSH_USER=root
+export SYNEX_TEST_SSH_KEY=~/.ssh/id_ed25519
+export SYNEX_TEST_SSH_PASSWORD=...      # необязательно: проверить вход по паролю
 uv run pytest tests/test_real_worker.py -v
 ```
 
@@ -1134,6 +1206,15 @@ uv run pytest tests/test_real_worker.py -v
 не заданы, на Linux и macOS тесты сами поднимают `sshd` на `127.0.0.1` со случайным
 портом и своими ключами (вход под текущим пользователем, система не меняется). Без
 воркера или SSH-сервера тесты пропускаются.
+
+**PowerShell** (Windows):
+
+```powershell
+uv run pytest -m integration            # только интеграционные
+uv run pytest -m "not integration"      # всё, кроме них
+```
+
+**bash** (Linux, macOS):
 
 ```bash
 uv run pytest -m integration            # только интеграционные

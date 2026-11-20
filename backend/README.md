@@ -13,6 +13,8 @@ feature is a plugin.
 
 You need Python 3.12 and [uv](https://docs.astral.sh/uv/).
 
+**PowerShell** (Windows):
+
 ```powershell
 cd backend
 uv sync                      # dependencies, including the dev group (pytest, ruff)
@@ -188,6 +190,8 @@ With `DEBUG=true` Swagger is available at `/api/docs`.
 
 ### Example: key from the vault → connect → command → disconnect
 
+**PowerShell** (Windows):
+
 ```powershell
 $api = "http://127.0.0.1:8000/api"
 $key = Invoke-RestMethod -Method Post "$api/keys" -ContentType "application/json" `
@@ -199,6 +203,22 @@ Invoke-RestMethod -Method Post "$api/ssh/sessions/$($s.session_id)/exec" `
 Invoke-RestMethod "$api/ssh/sessions/$($s.session_id)/output"
 Invoke-RestMethod -Method Delete "$api/ssh/sessions/$($s.session_id)"
 ```
+
+**bash** (Linux, macOS):
+
+```bash
+api=http://127.0.0.1:8000/api
+key=$(curl -s -X POST "$api/keys" -H "Content-Type: application/json" \
+  -d '{"name": "prod", "private_key_path": "/home/me/.ssh/id_ed25519"}' | jq -r .id)
+s=$(curl -s -X POST "$api/ssh/sessions" -H "Content-Type: application/json" \
+  -d "{\"host\": \"1.2.3.4\", \"username\": \"root\", \"key_id\": \"$key\"}" | jq -r .session_id)
+curl -s -X POST "$api/ssh/sessions/$s/exec" -H "Content-Type: application/json" \
+  -d '{"command": "cd /var/log && ls", "timeout": 10}'
+curl -s "$api/ssh/sessions/$s/output"
+curl -s -X DELETE "$api/ssh/sessions/$s"
+```
+
+The bash variant reads the JSON responses with [jq](https://jqlang.org/).
 
 ### SSH sessions
 
@@ -995,6 +1015,16 @@ run); `registered` is not loaded yet (the app is starting).
 
 Modules are enabled and disabled on a running backend, without a restart:
 
+**PowerShell** (Windows):
+
+```powershell
+Invoke-RestMethod -Method Post http://127.0.0.1:8000/api/plugins/docker/disable
+Invoke-RestMethod -Method Post http://127.0.0.1:8000/api/plugins/docker/enable
+Invoke-RestMethod -Method Post "http://127.0.0.1:8000/api/plugins/ssh/disable?cascade=true"
+```
+
+**bash** (Linux, macOS):
+
 ```bash
 curl -X POST http://127.0.0.1:8000/api/plugins/docker/disable
 curl -X POST http://127.0.0.1:8000/api/plugins/docker/enable
@@ -1045,7 +1075,15 @@ is written to `plugins.json` next to `keys.json` (`PLUGINS_STATE_PATH`) and appl
 
 ## Tests
 
+**PowerShell** (Windows):
+
 ```powershell
+uv run pytest
+```
+
+**bash** (Linux, macOS):
+
+```bash
 uv run pytest
 ```
 
@@ -1058,7 +1096,18 @@ with a real `sh -c`, and on Windows with a shell emulator (`tests/fake_shell.py`
 file system with `/tmp` and `/home/synex` and exactly the commands the tests need. Server
 programs such as `docker` and `git` are plugged into the emulator by the tests
 (`FakeShell.programs`). `tests/test_fake_shell.py` checks that the emulator answers the same
-way as a real sh. The emulator can be enabled on Linux/macOS too:
+way as a real sh. The emulator can be enabled explicitly on any OS (on Windows it is always
+on), for example to run the Windows variant of the tests on Linux/macOS:
+
+**PowerShell** (Windows):
+
+```powershell
+$env:SYNEX_TEST_SHELL = "emulated"
+uv run pytest
+Remove-Item Env:SYNEX_TEST_SHELL
+```
+
+**bash** (Linux, macOS):
 
 ```bash
 SYNEX_TEST_SHELL=emulated uv run pytest
@@ -1073,6 +1122,16 @@ pytest on Windows, Linux and macOS on every push to `main` and every pull reques
 changes in `backend/`, and once more on Linux with `SYNEX_TEST_SHELL=emulated`. The same
 locally before a push:
 
+**PowerShell** (Windows):
+
+```powershell
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest
+```
+
+**bash** (Linux, macOS):
+
 ```bash
 uv run ruff check . && uv run ruff format --check . && uv run pytest
 ```
@@ -1082,10 +1141,23 @@ uv run ruff check . && uv run ruff format --check . && uv run pytest
 command from `SYNEX_TEST_WORKER` (for example, a script that runs the exe through wine).
 Checks against a real SSH server are enabled with environment variables:
 
+**PowerShell** (Windows):
+
 ```powershell
-$env:SYNEX_TEST_SSH_HOST="1.2.3.4"; $env:SYNEX_TEST_SSH_USER="root"
-$env:SYNEX_TEST_SSH_KEY="C:/Users/me/.ssh/id_ed25519"
-$env:SYNEX_TEST_SSH_PASSWORD="..."   # optional: check password login
+$env:SYNEX_TEST_SSH_HOST = "1.2.3.4"
+$env:SYNEX_TEST_SSH_USER = "root"
+$env:SYNEX_TEST_SSH_KEY = "C:/Users/me/.ssh/id_ed25519"
+$env:SYNEX_TEST_SSH_PASSWORD = "..."   # optional: check password login
+uv run pytest tests/test_real_worker.py -v
+```
+
+**bash** (Linux, macOS):
+
+```bash
+export SYNEX_TEST_SSH_HOST=1.2.3.4
+export SYNEX_TEST_SSH_USER=root
+export SYNEX_TEST_SSH_KEY=~/.ssh/id_ed25519
+export SYNEX_TEST_SSH_PASSWORD=...      # optional: check password login
 uv run pytest tests/test_real_worker.py -v
 ```
 
@@ -1150,6 +1222,15 @@ They need a worker (as for `test_real_worker.py`) and an SSH server. If `SYNEX_T
 not set, on Linux and macOS the tests start their own `sshd` on `127.0.0.1` with a random
 port and their own keys (login as the current user, the system is not changed). Without a
 worker or an SSH server the tests are skipped.
+
+**PowerShell** (Windows):
+
+```powershell
+uv run pytest -m integration            # integration tests only
+uv run pytest -m "not integration"      # everything else
+```
+
+**bash** (Linux, macOS):
 
 ```bash
 uv run pytest -m integration            # integration tests only
