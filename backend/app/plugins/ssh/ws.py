@@ -12,9 +12,11 @@
   closed  {reason}: сессию закрыли, после этого сервер закрывает подключение;
   error   {error, detail, request_id?}: сообщение UI не разобрано или команда не
           запустилась (например, сессия уже закрыта);
+  interrupt {status, signal, command}: ответ на interrupt (как POST .../interrupt);
   pong    data из ping.
 UI → сервер:
   exec    {command, timeout?, track_cwd?, id?}: id вернётся в записях как request_id;
+  interrupt  прервать идущую команду (Ctrl+C);
   close   закрыть сессию (для всех её подключений);
   ping    что угодно, вернётся в pong.
 
@@ -141,6 +143,8 @@ class SessionSocket:
                 self.error("bad_message", _validation_detail(e))
                 return
             self._spawn(self._execute(request))
+        elif kind == "interrupt":
+            self._spawn(self._interrupt())
         elif kind == "close":
             self._spawn(self._close_session())
         else:
@@ -169,6 +173,21 @@ class SessionSocket:
         except Exception as e:
             logger.exception("SSH exec from WebSocket failed", session_id=self.session.id)
             self.error("internal_error", repr(e), request.id)
+
+    async def _interrupt(self) -> None:
+        try:
+            result = await self.manager.interrupt(self.session.id)
+        except AppError as e:
+            self.error(e.code, e.detail)
+            return
+        except Exception as e:
+            logger.exception("SSH interrupt from WebSocket failed", session_id=self.session.id)
+            self.error("internal_error", repr(e))
+            return
+        self.push(
+            "interrupt",
+            {"status": result.status, "signal": result.signal, "command": result.command},
+        )
 
     async def _close_session(self) -> None:
         with contextlib.suppress(SSHSessionNotFoundError):

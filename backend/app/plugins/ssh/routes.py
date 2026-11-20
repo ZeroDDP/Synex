@@ -21,6 +21,7 @@ from app.plugins.ssh.schemas import (
     SSHDisconnectResponse,
     SSHExecRequest,
     SSHExecResponse,
+    SSHInterruptResponse,
     SSHOutputResponse,
     SSHSessionInfo,
     SSHStatusResponse,
@@ -128,6 +129,28 @@ async def exec_in_session(
     """Команды одной сессии выполняются по очереди; результат попадает и в ответ,
     и в буфер вывода сессии (его видят подключённые WebSocket)."""
     return _exec_response(await _execute(manager, session_id, request))
+
+
+@router.post(
+    "/sessions/{session_id}/interrupt",
+    response_model=SSHInterruptResponse,
+    summary="Прервать команду, которая выполняется в сессии (Ctrl+C)",
+    responses={
+        **NOT_FOUND,
+        409: {"description": "Прервать нельзя: воркер не даёт второе подключение"},
+    },
+)
+async def interrupt_session(session_id: SessionId, manager: Manager) -> SSHInterruptResponse:
+    """Сначала INT, как Ctrl+C; не помогло за 2 с: TERM, потом KILL. Ответ приходит, когда
+    команда остановилась; её результат (interrupted=true, код 130 у INT) приходит как
+    обычно: ответом на /exec и записью result в буфер и WebSocket."""
+    result = await manager.interrupt(session_id)
+    return SSHInterruptResponse(
+        session_id=result.session_id,
+        status=result.status,
+        signal=result.signal,  # type: ignore[arg-type]
+        command=result.command,
+    )
 
 
 @router.get(
@@ -334,6 +357,7 @@ def _exec_response(result: ExecResult) -> SSHExecResponse:
         exit_code=result.exit_code,
         cwd=result.cwd,
         timed_out=result.timed_out,
+        interrupted=result.interrupted,
         duration_ms=result.duration_ms,
     )
 

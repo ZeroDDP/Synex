@@ -166,7 +166,23 @@ class SSHExecResponse(BaseModel):
     exit_code: int = Field(..., description="Код возврата (0 = успех; 124/137 при таймауте)")
     cwd: str | None = Field(default=None, description="Текущая директория после команды")
     timed_out: bool = Field(default=False, description="Команду прервал таймаут на сервере")
+    interrupted: bool = Field(default=False, description="Команду прервали (Ctrl+C в UI)")
     duration_ms: int = Field(..., description="Время выполнения, мс")
+
+
+class SSHInterruptResponse(BaseModel):
+    session_id: str
+    status: Literal["interrupted", "idle", "finished", "alive"] = Field(
+        ...,
+        description=(
+            "interrupted: команда остановлена; idle: ничего не выполнялось; finished: "
+            "закончилась сама раньше сигнала; alive: не остановилась даже от KILL"
+        ),
+    )
+    signal: Literal["INT", "TERM", "KILL"] | None = Field(
+        ..., description="Каким сигналом остановлена: INT (как Ctrl+C), потом TERM, KILL"
+    )
+    command: str | None = Field(..., description="Какую команду прерывали")
 
 
 class SSHDisconnectRequest(BaseModel):
@@ -195,8 +211,8 @@ class SSHStatusResponse(BaseModel):
 class SSHOutputEntry(BaseModel):
     """Запись буфера вывода. Поля, кроме seq/ts/kind, зависят от kind:
     opened {host, port, username}; command {command, cwd, source, request_id?};
-    result {stdout, stderr, exit_code, cwd, timed_out, duration_ms, request_id?,
-    truncated?}; error {error, detail, request_id?}."""
+    result {stdout, stderr, exit_code, cwd, timed_out, interrupted, duration_ms,
+    request_id?, truncated?}; error {error, detail, request_id?}."""
 
     model_config = {"extra": "allow"}
 
