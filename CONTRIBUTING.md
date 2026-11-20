@@ -9,11 +9,24 @@
 - Done: open a pull request into `main`. If someone can review it, ask one reviewer; if there is no time, merge it yourself, but only with green checks.
 - Before a PR, pull the fresh `main`: `git pull --rebase origin main`.
 
+For example, the task "file search" in the backend:
+
+**PowerShell** (Windows):
+
+```powershell
+git switch -c backend/search              # new branch: <area>/<task>
+git add backend/app/plugins/sftp/search.py
+git commit -m "Add file search"
+git push -u origin backend/search         # then open a PR on GitHub
+```
+
+**bash** (Linux, macOS):
+
 ```bash
-git switch -c <area>/<task>               # new branch
-git add <files>
-git commit -m "<short message>"
-git push -u origin <area>/<task>          # then open a PR on GitHub
+git switch -c backend/search              # new branch: <area>/<task>
+git add backend/app/plugins/sftp/search.py
+git commit -m "Add file search"
+git push -u origin backend/search         # then open a PR on GitHub
 ```
 
 ## Commits
