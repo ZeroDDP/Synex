@@ -44,6 +44,7 @@ async def test_only_ssh_api_is_exposed():
         "/api/ssh/sessions/{session_id}/exec",
         "/api/ssh/sessions/{session_id}/interrupt",
         "/api/ssh/sessions/{session_id}/history",
+        "/api/ssh/sessions/{session_id}/complete",
         "/api/ssh/sessions/{session_id}/output",
         "/api/monitor/metrics",
         "/api/keys",

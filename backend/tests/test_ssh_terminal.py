@@ -1,8 +1,8 @@
 """Терминал поверх команд сессии: прерывание (Ctrl+C), защита от программ, которым нужен
-терминал, и история команд по серверам.
+терминал, история команд по серверам и дополнение по Tab.
 
-Прерывание идёт в настоящем sh (Linux, macOS): сигналы получают настоящие процессы.
-Остальное идёт где угодно.
+Прерывание и дополнение идут в настоящем sh (Linux, macOS): сигналы получают настоящие
+процессы. Остальное идёт где угодно.
 """
 
 from __future__ import annotations
@@ -18,7 +18,8 @@ import pytest
 from websockets.asyncio.client import connect
 
 from app.core.config import settings
-from app.plugins.ssh.terminal import TerminalHistory, interactive_program
+from app.plugins.ssh import terminal
+from app.plugins.ssh.terminal import TerminalHistory, current_word, interactive_program
 from tests.conftest import needs_timeout_utility
 from tests.plugin_rig import PluginRig, plugin_rig
 from tests.ssh_helpers import recv_json, send_json, serve
@@ -26,6 +27,7 @@ from tests.ssh_helpers import recv_json, send_json, serve
 needs_sh = pytest.mark.skipif(
     sys.platform == "win32" or not shutil.which("sh"), reason="needs a real sh"
 )
+needs_bash = pytest.mark.skipif(not shutil.which("bash"), reason="needs bash for compgen")
 
 
 @pytest.fixture
@@ -247,6 +249,47 @@ async def test_interrupt_needs_a_second_connection(rig: PluginRig, monkeypatch):
     assert (response.status_code, response.json()["error"]) == (409, "ssh_interrupt_unavailable")
     assert session.interrupt_requested is False
     session.running, session.running_marker = None, None
+
+
+# -------------------------------------------------------------- completion
+
+
+def test_word_under_the_cursor():
+    assert current_word("ls -la /va", 10) == terminal.Word("/va", 7, "path")
+    assert current_word("sys", 3) == terminal.Word("sys", 0, "command")
+    assert current_word("cd /tmp && gi", 13) == terminal.Word("gi", 11, "command")
+    assert current_word("sudo apt", 8) == terminal.Word("apt", 5, "command")
+    assert current_word("cat my\\ fi", 10) == terminal.Word("my fi", 4, "path")
+    assert current_word("echo a | gr", 11).kind == "command"
+
+
+@needs_sh
+@needs_timeout_utility
+@needs_bash
+async def test_completion_of_paths_and_commands(shell_rig: PluginRig, tmp_path: Path):
+    rig = shell_rig
+    home = tmp_path / "home"
+    (home / "projects").mkdir()
+    (home / "project.txt").write_text("x")
+    (home / "my file.txt").write_text("x")
+    url = f"/api/ssh/sessions/{rig.session_id}/complete"
+
+    paths = (await rig.api.get(url, params={"line": "cat pro"})).json()
+    assert paths["kind"] == "path" and paths["start"] == 4
+    assert paths["candidates"] == ["project.txt", "projects/"]
+    assert paths["common"] == "project"
+
+    spaced = (await rig.api.get(url, params={"line": "cat my"})).json()
+    assert spaced["candidates"] == ["my file.txt"]
+    assert spaced["insert"] == ["my\\ file.txt"]
+
+    commands = (await rig.api.get(url, params={"line": "ech", "cursor": 3})).json()
+    assert commands["kind"] == "command" and "echo" in commands["candidates"]
+
+    # От текущей папки сессии
+    await rig.api.post(exec_url(rig), json={"command": "cd projects && touch inner.log"})
+    inner = (await rig.api.get(url, params={"line": "tail in"})).json()
+    assert inner["candidates"] == ["inner.log"]
 
 
 async def test_terminal_commands_get_a_longer_limit(rig: PluginRig, monkeypatch):

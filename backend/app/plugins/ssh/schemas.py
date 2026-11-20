@@ -203,6 +203,16 @@ class SSHHistoryCleared(BaseModel):
     removed: int
 
 
+class SSHCompletionResponse(BaseModel):
+    word: str = Field(..., description="Что дополняли (слово под курсором)")
+    start: int = Field(..., description="Где слово начинается в строке: его заменяет вставка")
+    kind: Literal["command", "path"]
+    candidates: list[str] = Field(..., description="Варианты; у папок / в конце")
+    insert: list[str] = Field(..., description="Те же варианты с экранированными пробелами")
+    common: str = Field(..., description="Общее начало вариантов: можно вставить сразу")
+    truncated: bool = Field(..., description="Вариантов больше 200")
+
+
 class SSHDisconnectRequest(BaseModel):
     session_id: str | None = session_id_field()
 

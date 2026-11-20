@@ -15,6 +15,7 @@ from app.plugins.ssh.schemas import (
     KnownHostInfo,
     KnownHostRequest,
     SSHCommandRequest,
+    SSHCompletionResponse,
     SSHConnectRequest,
     SSHConnectResponse,
     SSHDisconnectRequest,
@@ -29,7 +30,7 @@ from app.plugins.ssh.schemas import (
     SSHStatusResponse,
 )
 from app.plugins.ssh.session import SSHSession
-from app.plugins.ssh.terminal import get_history, history_key, run_user_command
+from app.plugins.ssh.terminal import complete, get_history, history_key, run_user_command
 from app.plugins.ssh.ws import serve_session_socket
 
 logger = structlog.get_logger()
@@ -190,6 +191,30 @@ async def clear_session_history(session_id: SessionId, manager: Manager) -> SSHH
     session = manager.get(session_id)
     key = history_key(session.username, session.host, session.port)
     return SSHHistoryCleared(server=key, removed=get_history().clear(key))
+
+
+@router.get(
+    "/sessions/{session_id}/complete",
+    response_model=SSHCompletionResponse,
+    summary="Дополнение по Tab: команды и пути на сервере",
+    responses={
+        **NOT_FOUND,
+        409: {"description": "Сессия занята командой (ssh_session_busy)"},
+    },
+)
+async def complete_in_session(
+    session_id: SessionId,
+    manager: Manager,
+    line: Annotated[str, Query(max_length=4096, description="Набранная строка")],
+    cursor: Annotated[
+        int | None, Query(ge=0, description="Позиция курсора; без неё конец строки")
+    ] = None,
+) -> SSHCompletionResponse:
+    """Первое слово команды дополняется командами из PATH, остальные — файлами и папками
+    от текущей папки сессии. Вставка: заменить строку с `start` до курсора на
+    `insert[i]` (или на `common`, если вариантов несколько)."""
+    completion = await complete(manager, session_id, line, cursor)
+    return SSHCompletionResponse(**completion.as_dict())
 
 
 @router.get(

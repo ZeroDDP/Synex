@@ -1,5 +1,5 @@
-"""Терминал UI поверх команд сессии: защита от полноэкранных программ и история команд по
-серверам.
+"""Терминал UI поверх команд сессии: защита от полноэкранных программ, история команд по
+серверам и дополнение по Tab.
 
 Команда терминала выполняется без TTY и без ввода (wrapper.py), поэтому полноэкранные
 программы (vim, top, tmux) работать не могут: висят до таймаута или сразу падают, а их
@@ -9,6 +9,9 @@ escape-коды ломают экран xterm в UI. Такие команды b
 История (terminal_history.json рядом с keys.json) общая для всех сессий к одному серверу
 (user@host:port) и переживает перезапуск. Команда с пробелом в начале не запоминается,
 как в bash с HISTCONTROL=ignorespace: так вводят команды с паролями.
+
+Дополнение — служебная команда сессии: compgen из bash (команды из PATH, файлы и папки
+от текущей папки сессии), без bash — файлы через шаблон shell.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ import shlex
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Literal
 
 import structlog
 
@@ -243,6 +247,125 @@ def get_history() -> TerminalHistory:
     return _history
 
 
+# ----------------------------------------------------------------- completion
+
+CompletionKind = Literal["command", "path"]
+MAX_CANDIDATES = 200
+_WORD_BREAKS = " \t\n;|&<>()"
+
+
+@dataclass(frozen=True)
+class Word:
+    text: str  # что дополняем (без кавычек)
+    start: int  # где слово начинается в строке
+    kind: CompletionKind
+
+
+def current_word(line: str, cursor: int) -> Word:
+    """Слово под курсором и что в нём ждать: команду (первое слово команды) или путь."""
+    before = line[:cursor]
+    start = len(before)
+    while start > 0:
+        if before[start - 1] == " " and start > 1 and before[start - 2] == "\\":
+            start -= 2  # пробел в имени, экранированный "\ "
+            continue
+        if before[start - 1] in _WORD_BREAKS:
+            break
+        start -= 1
+    raw = before[start:]
+    text = raw.replace("\\ ", " ").strip("'\"")
+    # Слова текущей команды до дополняемого: если там только sudo, env, VAR=value и
+    # подобное, дополняется сама команда
+    head = re.split(r"\|\||&&|[;|&(\n]", before[:start])[-1]
+    first = all(_ASSIGNMENT.match(w) or w in _PREFIXES for w in head.split())
+    kind: CompletionKind = "command" if first and "/" not in text else "path"
+    return Word(text=text, start=start, kind=kind)
+
+
+def completion_command(word: Word, cwd: str | None) -> str:
+    """Скрипт дополнения: кандидаты по строке, у папок "/" в конце."""
+    prefix = shlex.quote(word.text)
+    go = f"cd -- {shlex.quote(cwd)} 2>/dev/null || cd\n" if cwd else ""
+    limit = MAX_CANDIDATES + 1
+    if word.kind == "command":
+        bash = f"compgen -c -- {prefix} | sort -u | head -n {limit}"
+        fallback = (
+            'IFS=:; for d in $PATH; do for f in "$d"/' + _glob(word.text) + "; do "
+            '[ -x "$f" ] && [ ! -d "$f" ] && printf "%s\\n" "${f##*/}"; done; done '
+            f"| sort -u | head -n {limit}"
+        )
+    else:
+        bash = (
+            f"compgen -f -- {prefix} | head -n {limit} | while IFS= read -r c; do "
+            'if [ -d "$c" ]; then printf "%s/\\n" "$c"; else printf "%s\\n" "$c"; fi; done'
+        )
+        fallback = (
+            "for c in " + _glob(word.text) + "; do "
+            '[ -e "$c" ] || continue; '
+            'if [ -d "$c" ]; then printf "%s/\\n" "$c"; else printf "%s\\n" "$c"; fi; done '
+            f"| head -n {limit}"
+        )
+    return (
+        f"{go}if command -v bash >/dev/null 2>&1; then bash -c {shlex.quote(bash)}; "
+        f"else {fallback}; fi"
+    )
+
+
+def _glob(text: str) -> str:
+    """Шаблон "text*" для shell: text в кавычках (его спецсимволы буквально)."""
+    if not text:
+        return "*"
+    directory, _, name = text.rpartition("/")
+    quoted = shlex.quote(name) + "*" if name else "*"
+    if directory or text.startswith("/"):
+        return shlex.quote(directory + "/") + quoted
+    return quoted
+
+
+@dataclass(frozen=True)
+class Completion:
+    word: Word
+    candidates: list[str]
+    truncated: bool
+
+    @property
+    def common(self) -> str:
+        """Общее начало всех кандидатов: его можно вставить сразу."""
+        if not self.candidates:
+            return self.word.text
+        first, last = min(self.candidates), max(self.candidates)
+        size = 0
+        while size < min(len(first), len(last)) and first[size] == last[size]:
+            size += 1
+        return first[:size]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "word": self.word.text,
+            "start": self.word.start,
+            "kind": self.word.kind,
+            "candidates": self.candidates,
+            "insert": [quote_word(item) for item in self.candidates],
+            "common": self.common,
+            "truncated": self.truncated,
+        }
+
+
+def quote_word(text: str) -> str:
+    """Как вставить кандидата в строку: спецсимволы shell экранируются."""
+    return re.sub(r"([\s'\"\\$`!*?&;|<>()\[\]{}#~])", r"\\\1", text)
+
+
+def parse_completion(word: Word, stdout: str) -> Completion:
+    lines = [line for line in stdout.splitlines() if line]
+    seen: dict[str, None] = {}
+    for line in lines:
+        seen.setdefault(line, None)
+    candidates = sorted(seen, key=lambda c: (c.casefold(), c))
+    truncated = len(candidates) > MAX_CANDIDATES
+    return Completion(word=word, candidates=candidates[:MAX_CANDIDATES], truncated=truncated)
+
+
 # ----------------------------------------------------------------- commands
 
 
@@ -279,3 +402,23 @@ async def run_user_command(
         source=source,
         request_id=request_id,
     )
+
+
+COMPLETION_TIMEOUT = 5.0
+COMPLETION_WAIT = 0.5  # занята командой: дополнять нечего ждать
+
+
+async def complete(
+    manager: SSHSessionManager, session_id: str, line: str, cursor: int | None
+) -> Completion:
+    session = manager.get(session_id)
+    position = len(line) if cursor is None else max(0, min(cursor, len(line)))
+    word = current_word(line, position)
+    result = await manager.run_service(
+        session.id,
+        completion_command(word, session.cwd),
+        timeout=COMPLETION_TIMEOUT,
+        wait=COMPLETION_WAIT,
+        name="terminal",
+    )
+    return parse_completion(word, result.stdout)
