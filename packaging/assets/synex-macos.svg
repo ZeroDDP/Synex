@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>Synex</title>
+  <!-- Иконка для macOS: логотип из макета на фоне приложения (#0E1117) в форме macOS -->
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="#0E1117"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="none" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="6"/>
+  <g transform="translate(272 264) scale(15.5)">
+    <path fill="#FF7B00" d="M15.5 0L31 7.15625V12L15.5 4.757812L5.378906 9.640625V13.515625L13.683594 17.179688L21.984375 20.84375L17.074219 24L0 16.125V7.15625Z"/>
+    <path fill="#FF7B00" d="M15.5 32L0 24.84375V20L15.5 27.242188L25.621094 22.359375V18.484375L9.015625 11.15625L13.925781 8L31 15.875V24.84375Z"/>
+  </g>
+</svg>

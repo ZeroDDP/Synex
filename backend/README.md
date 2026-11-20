@@ -103,6 +103,10 @@ servers through `fetch` and WebSocket.
   machine can open port 5173 here, and such a program can reach the API without a browser
   anyway. `UI_DEV_SERVER=false` turns this off (for example, in the packaged app).
 - Requests without `Origin` (curl, PowerShell, the desktop app, tests) pass.
+- `UI_DIR` (for example `../frontend/dist` after `npm run build`): the backend serves the
+  built UI on `/` for every path that is not an API route, so the app works without the dev
+  server and from the same origin. `/api/...` paths that do not exist still answer JSON 404.
+  The desktop launcher `python -m app.desktop` and the builds in `packaging/` set it.
 - The `Host` header must be `127.0.0.1`, `localhost`, `[::1]` or from `ALLOWED_HOSTS`.
   Otherwise 403 `forbidden_host`: this protects against DNS rebinding.
 - `HOST=0.0.0.0` exposes the API to the network without authentication. The backend logs a
@@ -999,6 +1003,7 @@ details, for example `host_key`); validation errors as 422:
 ```
 app/
   main.py              entry point (uvicorn)
+  desktop.py           the app: backend, worker and UI in a window (packaging/ builds it)
   core/                platform: config, app factory, errors, event bus, logging,
                        files (atomic writes of files with secrets)
     target/release/    synex_worker.exe (Windows), synex_worker (Linux x86_64)

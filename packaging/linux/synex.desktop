@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Synex
+GenericName=Server manager
+Comment=SSH terminal, live monitoring, Docker, SFTP and git deploys in one window
+Exec=@EXEC@
+Icon=@ICON@
+Terminal=false
+Categories=Development;Network;System;
+Keywords=ssh;server;docker;sftp;monitoring;
+StartupNotify=true
