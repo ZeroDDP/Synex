@@ -102,6 +102,10 @@ glibc 2.38 или новее (Ubuntu 24.04, Debian 13, Fedora 39 и новее).
   может только программа на ней же, а ей API доступен и без браузера.
   `UI_DEV_SERVER=false` это выключает (например, в собранном приложении).
 - Запросы без `Origin` (curl, PowerShell, настольное приложение, тесты) проходят.
+- `UI_DIR` (например, `../frontend/dist` после `npm run build`): backend отдаёт собранный UI
+  на `/` для любого пути, который не роут API, поэтому приложение работает без dev-сервера
+  и с того же origin. Несуществующие пути `/api/...` по-прежнему отвечают JSON 404.
+  Лаунчер `python -m app.desktop` и сборки из `packaging/` задают его сами.
 - Заголовок `Host` должен быть `127.0.0.1`, `localhost`, `[::1]` или из `ALLOWED_HOSTS`.
   Иначе 403 `forbidden_host`: это защита от DNS rebinding.
 - `HOST=0.0.0.0` открывает API в сеть без авторизации. При старте backend пишет
@@ -982,6 +986,7 @@ ws.onmessage = (e) => console.log(JSON.parse(e.data));
 ```
 app/
   main.py              точка входа (uvicorn)
+  desktop.py           приложение: backend, воркер и UI в окне (его собирает packaging/)
   core/                платформа: config, app factory, ошибки, шина событий, логи,
                        files (атомарная запись файлов с секретами)
     target/release/    synex_worker.exe (Windows), synex_worker (Linux x86_64)

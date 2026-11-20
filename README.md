@@ -148,14 +148,18 @@ cd frontend && npm run dev                # terminal 2: UI on http://localhost:5
 No server at hand? Set `WS_FAKE_METRICS=true` in `backend/.env` and the dashboard shows a demo server.
 Health check: http://127.0.0.1:8000/api/health. Step-by-step guide and troubleshooting: **[RUNNING.md](RUNNING.md)**.
 
-<!-- TODO(release): когда будет сборка приложения (SYN-73)
 ### Download
+
+Ready builds are on the [releases page](https://github.com/ZeroDDP/Synex/releases):
 
 | OS | File |
 |---|---|
-| Windows 10/11 x64 | [Synex-setup.exe](https://github.com/ZeroDDP/Synex/releases/latest) |
-| Linux x86_64 | [Synex.AppImage](https://github.com/ZeroDDP/Synex/releases/latest) |
--->
+| Windows 10/11 x64 | `Synex-<version>-windows-x64-setup.exe` (installer) or `…-windows-x64.zip` |
+| Linux x86_64 | `Synex-<version>-linux-x64.tar.gz`: unpack, run `Synex` (`sh install.sh` adds it to the menu) |
+| macOS (Apple Silicon / Intel) | `Synex-<version>-macos-arm64.zip` / `…-macos-x64.zip` with `Synex.app` |
+
+Builds are not signed yet: confirm the first start (Windows: More info → Run anyway; macOS:
+right click → Open). Building them yourself: [packaging/README.md](packaging/README.md).
 
 ## Configuration
 
@@ -178,6 +182,7 @@ Synex/
 ├── backend/        FastAPI app, plugins, tests (unit + integration with a real SSH server)
 ├── core/           Rust workspace: synex_core (SSH, SFTP, metrics) and synex_worker (IPC server)
 ├── frontend/       Svelte UI
+├── packaging/      App builders for Windows, Linux and macOS, icons, memory check
 └── .github/        CI workflows
 ```
 
@@ -222,7 +227,8 @@ into `main` with green checks. Details: [CONTRIBUTING.md](CONTRIBUTING.md).
 - [x] Git: pull and deploy
 - [x] Plugin manager: switch modules at runtime
 - [ ] UI: terminal, file manager, Docker and git screens
-- [ ] Desktop build for Windows and Linux (Release Candidate)
+- [x] Desktop builds for Windows, Linux and macOS (v0.1.0)
+- [ ] Release Candidate v1.0.0-rc1
 - [ ] Cancel running commands and transfers in the worker
 - [ ] macOS and Linux musl builds of the worker
 - [ ] AI assistant integration (v2.0)

@@ -104,6 +104,32 @@ accepts UI pages only from http://localhost:5173 and http://127.0.0.1:5173.
 To stop: Ctrl+C in both terminals. On shutdown the backend closes the SSH sessions and
 stops the worker.
 
+### As an app (one window, no dev server)
+
+Build the UI once and start the launcher: it runs the backend, which serves the built UI,
+and opens it in a window (with pywebview) or in the browser.
+
+**PowerShell** (Windows):
+
+```powershell
+cd frontend
+npm run build
+cd ..\backend
+uv run python -m app.desktop             # --browser: always the browser; --headless: no UI
+```
+
+**bash** (Linux, macOS):
+
+```bash
+cd frontend
+npm run build
+cd ../backend
+uv run python -m app.desktop             # --browser: always the browser; --headless: no UI
+```
+
+Ready-made builds for Windows, Linux and macOS and how to build them:
+[packaging/README.md](packaging/README.md).
+
 ## What already works
 
 The UI connects to the `/ws` stream and shows metrics on the Dashboard for servers with an

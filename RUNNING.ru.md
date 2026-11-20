@@ -103,6 +103,32 @@ backend пускает страницы UI только с http://localhost:5173
 Остановка: Ctrl+C в обоих терминалах. Backend при остановке закрывает SSH-сессии и
 останавливает воркер.
 
+### Как приложение (одно окно, без dev-сервера)
+
+Соберите UI один раз и запустите лаунчер: он запускает backend, backend отдаёт собранный
+UI, и тот открывается в окне (с pywebview) или в браузере.
+
+**PowerShell** (Windows):
+
+```powershell
+cd frontend
+npm run build
+cd ..\backend
+uv run python -m app.desktop             # --browser: всегда браузер; --headless: без UI
+```
+
+**bash** (Linux, macOS):
+
+```bash
+cd frontend
+npm run build
+cd ../backend
+uv run python -m app.desktop             # --browser: всегда браузер; --headless: без UI
+```
+
+Готовые сборки для Windows, Linux и macOS и как их собрать:
+[packaging/README.ru.md](packaging/README.ru.md).
+
 ## Что уже работает
 
 UI подключается к потоку `/ws` и показывает на Dashboard метрики серверов с открытой

@@ -151,14 +151,19 @@ cd frontend && npm run dev                # терминал 2: UI на http://l
 появится демо-сервер. Проверка: http://127.0.0.1:8000/api/health. Пошаговая инструкция и
 решение проблем: **[RUNNING.ru.md](RUNNING.ru.md)**.
 
-<!-- TODO(release): когда будет сборка приложения (SYN-73)
 ### Скачать
+
+Готовые сборки — на [странице выпусков](https://github.com/ZeroDDP/Synex/releases):
 
 | ОС | Файл |
 |---|---|
-| Windows 10/11 x64 | [Synex-setup.exe](https://github.com/ZeroDDP/Synex/releases/latest) |
-| Linux x86_64 | [Synex.AppImage](https://github.com/ZeroDDP/Synex/releases/latest) |
--->
+| Windows 10/11 x64 | `Synex-<версия>-windows-x64-setup.exe` (установщик) или `…-windows-x64.zip` |
+| Linux x86_64 | `Synex-<версия>-linux-x64.tar.gz`: распаковать, запустить `Synex` (`sh install.sh` добавит в меню) |
+| macOS (Apple Silicon / Intel) | `Synex-<версия>-macos-arm64.zip` / `…-macos-x64.zip` с `Synex.app` |
+
+Сборки пока не подписаны: подтвердите первый запуск (Windows: Подробнее → Выполнить в
+любом случае; macOS: правый клик → Открыть). Собрать самому:
+[packaging/README.ru.md](packaging/README.ru.md).
 
 ## Настройки
 
@@ -181,6 +186,7 @@ Synex/
 ├── backend/        FastAPI-приложение, плагины, тесты (unit и интеграционные с настоящим SSH-сервером)
 ├── core/           Rust workspace: synex_core (SSH, SFTP, метрики) и synex_worker (IPC-сервер)
 ├── frontend/       Svelte UI
+├── packaging/      Сборщики приложения для Windows, Linux и macOS, иконки, замер памяти
 └── .github/        CI workflows
 ```
 
@@ -225,7 +231,8 @@ pull request в `main` с зелёными проверками. Подробн�
 - [x] Git: pull и деплой
 - [x] Менеджер плагинов: модули переключаются на ходу
 - [ ] UI: терминал, файловый менеджер, экраны Docker и git
-- [ ] Desktop-сборка для Windows и Linux (Release Candidate)
+- [x] Desktop-сборки для Windows, Linux и macOS (v0.1.0)
+- [ ] Release Candidate v1.0.0-rc1
 - [ ] Отмена идущих команд и передач в воркере
 - [ ] Сборки воркера под macOS и Linux musl
 - [ ] Интеграция с AI-ассистентом (v2.0)
