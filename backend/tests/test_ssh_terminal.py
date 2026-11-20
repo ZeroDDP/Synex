@@ -1,5 +1,5 @@
 """Терминал поверх команд сессии: прерывание (Ctrl+C), защита от программ, которым нужен
-терминал, и лимит времени команд терминала.
+терминал, и история команд по серверам.
 
 Прерывание идёт в настоящем sh (Linux, macOS): сигналы получают настоящие процессы.
 Остальное идёт где угодно.
@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import shutil
 import sys
 from collections.abc import AsyncIterator
@@ -17,7 +18,7 @@ import pytest
 from websockets.asyncio.client import connect
 
 from app.core.config import settings
-from app.plugins.ssh.terminal import interactive_program
+from app.plugins.ssh.terminal import TerminalHistory, interactive_program
 from tests.conftest import needs_timeout_utility
 from tests.plugin_rig import PluginRig, plugin_rig
 from tests.ssh_helpers import recv_json, send_json, serve
@@ -105,6 +106,53 @@ async def test_interactive_command_is_refused_with_a_hint(rig: PluginRig):
         exec_url(rig), json={"command": "vim notes.txt", "allow_interactive": True}
     )
     assert forced.status_code == 200, forced.text
+
+
+# ----------------------------------------------------------------- history
+
+
+async def test_history_per_server(rig: PluginRig):
+    for command in ("ls", "ls", "pwd", " export TOKEN=secret", "echo done"):
+        assert (await rig.api.post(exec_url(rig), json={"command": command})).status_code == 200
+    url = f"/api/ssh/sessions/{rig.session_id}/history"
+    history = (await rig.api.get(url)).json()
+    assert history["server"] == "root@10.0.0.1:22"
+    # Повтор подряд не дублируется, команда с пробелом в начале не запоминается
+    assert history["commands"] == ["ls", "pwd", "echo done"]
+    assert (await rig.api.get(url, params={"limit": 1})).json()["commands"] == ["echo done"]
+
+    # Вторая сессия к тому же серверу видит ту же историю
+    second = await rig.api.post("/api/ssh/sessions", json=rig.connect_body)
+    other = second.json()["session_id"]
+    shared = await rig.api.get(f"/api/ssh/sessions/{other}/history")
+    assert shared.json()["commands"] == ["ls", "pwd", "echo done"]
+
+    # История на диске: новый процесс её прочитает
+    saved = TerminalHistory(settings.terminal_history_path)
+    assert saved.get("root@10.0.0.1:22") == ["ls", "pwd", "echo done"]
+
+    cleared = await rig.api.delete(url)
+    assert cleared.json() == {"server": "root@10.0.0.1:22", "removed": 3}
+    assert (await rig.api.get(url)).json()["commands"] == []
+
+
+def test_history_limits_and_damaged_file(tmp_path: Path, monkeypatch):
+    path = tmp_path / "history.json"
+    history = TerminalHistory(path)
+    monkeypatch.setattr(settings, "TERMINAL_HISTORY", 3)
+    for index in range(5):
+        history.add("u@h:22", f"cmd {index}")
+    assert history.get("u@h:22") == ["cmd 2", "cmd 3", "cmd 4"]
+    assert json.loads(path.read_text())["version"] == 1
+
+    monkeypatch.setattr(settings, "TERMINAL_HISTORY", 0)
+    assert history.add("u@h:22", "not saved") is False
+
+    path.write_text("{broken")
+    monkeypatch.setattr(settings, "TERMINAL_HISTORY", 10)
+    fresh = TerminalHistory(path)
+    assert fresh.get("u@h:22") == []
+    assert fresh.add("u@h:22", "works") is True
 
 
 # --------------------------------------------------------------- interrupt

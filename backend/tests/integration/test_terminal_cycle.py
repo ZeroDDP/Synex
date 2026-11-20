@@ -29,3 +29,6 @@ async def test_terminal_on_the_server(ui: UI, ssh_target: SSHTarget):
 
     refused = await ui.api.post(f"{base}/exec", json={"command": "top"})
     assert (refused.status_code, refused.json()["error"]) == (422, "ssh_interactive_command")
+
+    history = (await ui.api.get(f"{base}/history")).json()
+    assert history["commands"][-1] == "echo started; sleep 30; echo after"

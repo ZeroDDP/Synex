@@ -21,13 +21,15 @@ from app.plugins.ssh.schemas import (
     SSHDisconnectResponse,
     SSHExecRequest,
     SSHExecResponse,
+    SSHHistoryCleared,
+    SSHHistoryResponse,
     SSHInterruptResponse,
     SSHOutputResponse,
     SSHSessionInfo,
     SSHStatusResponse,
 )
 from app.plugins.ssh.session import SSHSession
-from app.plugins.ssh.terminal import run_user_command
+from app.plugins.ssh.terminal import get_history, history_key, run_user_command
 from app.plugins.ssh.ws import serve_session_socket
 
 logger = structlog.get_logger()
@@ -158,6 +160,36 @@ async def interrupt_session(session_id: SessionId, manager: Manager) -> SSHInter
         signal=result.signal,  # type: ignore[arg-type]
         command=result.command,
     )
+
+
+@router.get(
+    "/sessions/{session_id}/history",
+    response_model=SSHHistoryResponse,
+    summary="История команд сервера этой сессии (стрелка вверх в терминале)",
+    responses=NOT_FOUND,
+)
+async def session_history(
+    session_id: SessionId,
+    manager: Manager,
+    limit: Annotated[int | None, Query(ge=1, le=10_000)] = None,
+) -> SSHHistoryResponse:
+    session = manager.get(session_id)
+    key = history_key(session.username, session.host, session.port)
+    return SSHHistoryResponse(
+        session_id=session.id, server=key, commands=get_history().get(key, limit)
+    )
+
+
+@router.delete(
+    "/sessions/{session_id}/history",
+    response_model=SSHHistoryCleared,
+    summary="Очистить историю команд сервера этой сессии",
+    responses=NOT_FOUND,
+)
+async def clear_session_history(session_id: SessionId, manager: Manager) -> SSHHistoryCleared:
+    session = manager.get(session_id)
+    key = history_key(session.username, session.host, session.port)
+    return SSHHistoryCleared(server=key, removed=get_history().clear(key))
 
 
 @router.get(

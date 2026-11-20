@@ -192,6 +192,17 @@ class SSHInterruptResponse(BaseModel):
     command: str | None = Field(..., description="Какую команду прерывали")
 
 
+class SSHHistoryResponse(BaseModel):
+    session_id: str
+    server: str = Field(..., description="user@host:port: история общая для его сессий")
+    commands: list[str] = Field(..., description="Старые первыми")
+
+
+class SSHHistoryCleared(BaseModel):
+    server: str
+    removed: int
+
+
 class SSHDisconnectRequest(BaseModel):
     session_id: str | None = session_id_field()
 
