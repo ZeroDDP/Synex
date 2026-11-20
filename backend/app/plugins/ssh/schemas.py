@@ -152,6 +152,13 @@ class SSHCommandRequest(BaseModel):
             "Нужен POSIX shell (bash/zsh/sh). false: команда уходит воркеру как есть"
         ),
     )
+    allow_interactive: bool = Field(
+        default=False,
+        description=(
+            "Отправить, даже если программе нужен терминал (vim, top, tmux): без этого "
+            "такая команда отклоняется с 422 ssh_interactive_command и подсказкой"
+        ),
+    )
 
 
 class SSHExecRequest(SSHCommandRequest):

@@ -27,6 +27,7 @@ from app.plugins.ssh.schemas import (
     SSHStatusResponse,
 )
 from app.plugins.ssh.session import SSHSession
+from app.plugins.ssh.terminal import run_user_command
 from app.plugins.ssh.ws import serve_session_socket
 
 logger = structlog.get_logger()
@@ -63,6 +64,12 @@ CONNECT_ERRORS = {
 EXEC_ERRORS = {
     404: {"description": "Сессии session_id нет"},
     409: {"description": "Нет открытой сессии, или воркер её уже не знает"},
+    422: {
+        "description": (
+            "Программе нужен терминал (vim, top, tmux): ssh_interactive_command с program "
+            "и hint; allow_interactive=true отправит всё равно"
+        )
+    },
     502: {"description": "Ошибка воркера"},
     503: {"description": "Воркер не запущен или IPC недоступен"},
     504: {"description": "Воркер не вернул результат даже после лимита команды"},
@@ -343,9 +350,7 @@ async def _open(request: SSHConnectRequest, manager: SSHSessionManager, keys: Ke
 async def _execute(
     manager: SSHSessionManager, session_id: str | None, request: SSHCommandRequest
 ) -> ExecResult:
-    return await manager.execute(
-        session_id, request.command, timeout=request.timeout, track_cwd=request.track_cwd
-    )
+    return await run_user_command(manager, session_id, request, source="api")
 
 
 def _exec_response(result: ExecResult) -> SSHExecResponse:

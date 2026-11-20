@@ -10,12 +10,14 @@
   output  запись буфера {seq, ts, kind, ...}: сначала пропущенные после since, потом
           новые. kind: opened | command | result | error;
   closed  {reason}: сессию закрыли, после этого сервер закрывает подключение;
-  error   {error, detail, request_id?}: сообщение UI не разобрано или команда не
-          запустилась (например, сессия уже закрыта);
+  error   {error, detail, request_id?, ...}: сообщение UI не разобрано или команда не
+          запустилась (например, сессия уже закрыта; программе нужен терминал:
+          ssh_interactive_command с program и hint);
   interrupt {status, signal, command}: ответ на interrupt (как POST .../interrupt);
   pong    data из ping.
 UI → сервер:
-  exec    {command, timeout?, track_cwd?, id?}: id вернётся в записях как request_id;
+  exec    {command, timeout?, track_cwd?, allow_interactive?, id?}: id вернётся в записях
+          как request_id;
   interrupt  прервать идущую команду (Ctrl+C);
   close   закрыть сессию (для всех её подключений);
   ping    что угодно, вернётся в pong.
@@ -45,6 +47,7 @@ from app.plugins.ssh.errors import SSHExecTimeoutError, SSHSessionNotFoundError
 from app.plugins.ssh.manager import CLOSED_SHUTDOWN, SSHSessionManager
 from app.plugins.ssh.schemas import SSHCommandRequest
 from app.plugins.ssh.session import SSHSession
+from app.plugins.ssh.terminal import run_user_command
 from app.ws.hub import encode
 
 logger = structlog.get_logger()
@@ -150,26 +153,27 @@ class SessionSocket:
         else:
             self.error("unknown_type", f"Unknown message type: {kind}")
 
-    def error(self, code: str, detail: str, request_id: str | None = None) -> None:
-        data = {"error": code, "detail": detail}
+    def error(
+        self,
+        code: str,
+        detail: str,
+        request_id: str | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        data: dict[str, Any] = {"error": code, "detail": detail, **(extra or {})}
         if request_id is not None:
             data["request_id"] = request_id
         self.push("error", data)
 
     async def _execute(self, request: ExecMessage) -> None:
         try:
-            await self.manager.execute(
-                self.session.id,
-                request.command,
-                timeout=request.timeout,
-                track_cwd=request.track_cwd,
-                source="ws",
-                request_id=request.id,
+            await run_user_command(
+                self.manager, self.session.id, request, source="ws", request_id=request.id
             )
         except RECORDED_ERRORS:
             pass  # уже в буфере: подписчики получили запись kind=error
         except AppError as e:
-            self.error(e.code, e.detail, request.id)
+            self.error(e.code, e.detail, request.id, e.extra)
         except Exception as e:
             logger.exception("SSH exec from WebSocket failed", session_id=self.session.id)
             self.error("internal_error", repr(e), request.id)

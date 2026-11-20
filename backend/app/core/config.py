@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     # Сколько служебная команда плагина (docker, git) ждёт, пока сессия освободится от
     # команды пользователя, сек. Дольше: 409 ssh_session_busy.
     SSH_SERVICE_WAIT: float = Field(default=10.0, ge=0)
+    # Лимит команды из терминала UI (WebSocket), если UI не передал свой, сек. Больше
+    # SSH_EXEC_TIMEOUT: apt upgrade или сборка идут минутами, а остановить команду
+    # теперь можно Ctrl+C.
+    TERMINAL_TIMEOUT: float = Field(default=600.0, gt=0, le=3600)
 
     # Хранилище SSH-ключей. По умолчанию keys.json в папке данных пользователя:
     # Windows %LOCALAPPDATA%\Synex, macOS ~/Library/Application Support/Synex,

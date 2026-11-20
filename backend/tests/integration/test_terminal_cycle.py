@@ -26,3 +26,6 @@ async def test_terminal_on_the_server(ui: UI, ssh_target: SSHTarget):
     result = (await asyncio.wait_for(running, 15)).json()
     assert result["interrupted"] is True and result["exit_code"] == 130
     assert result["stdout"] == "started"
+
+    refused = await ui.api.post(f"{base}/exec", json={"command": "top"})
+    assert (refused.status_code, refused.json()["error"]) == (422, "ssh_interactive_command")
