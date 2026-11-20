@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import tempfile
 from pathlib import Path
@@ -10,7 +11,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from fastapi import Path as PathParam
 from fastapi.responses import FileResponse
 
-from app.plugins.sftp import local
+from app.core.config import settings
+from app.plugins.sftp import local, search
 from app.plugins.sftp.errors import SftpBadPathError, SftpLocalError
 from app.plugins.sftp.schemas import (
     PATH_DESCRIPTION,
@@ -21,6 +23,7 @@ from app.plugins.sftp.schemas import (
     MkdirRequest,
     MoveRequest,
     RemovedInfo,
+    SearchInfo,
     ServerInfoResponse,
     TransferInfo,
     TransferRequest,
@@ -306,6 +309,69 @@ async def local_list(
     ] = None,
 ) -> LocalListingInfo:
     return LocalListingInfo.from_local(local.list_dir(path))
+
+
+# ------------------------------------------------------------------- search
+
+
+def search_query(
+    name: Annotated[
+        str | None,
+        Query(
+            min_length=1,
+            max_length=255,
+            description='Текст в имени ("nginx") или шаблон ("*.log"), без учёта регистра',
+        ),
+    ] = None,
+    contains: Annotated[
+        str | None,
+        Query(min_length=1, max_length=200, description="Текст внутри файлов"),
+    ] = None,
+    type: Annotated[
+        search.SearchType, Query(description="Что искать: файлы, папки или всё")
+    ] = "any",
+    max_depth: Annotated[int, Query(ge=1, le=64, description="Уровней вглубь")] = 10,
+    hidden: Annotated[bool, Query(description="Искать и в скрытых папках (.git, .cache)")] = False,
+    limit: Annotated[int | None, Query(ge=1, description="Сколько найденных отдать")] = None,
+) -> search.SearchQuery:
+    most = settings.SFTP_SEARCH_LIMIT
+    return search.SearchQuery(
+        name=name,
+        contains=contains,
+        type=type,
+        max_depth=max_depth,
+        hidden=hidden,
+        limit=min(limit or most, most),
+    )
+
+
+SearchQueryDep = Annotated[search.SearchQuery, Depends(search_query)]
+SEARCH_DESCRIPTION = (
+    "Поиск вглубь папки (фильтр открытой папки UI делает сам). Нужен name или contains. "
+    "Через SFTP_SEARCH_TIMEOUT поиск останавливается и отдаёт найденное (timed_out)."
+)
+
+
+@router.get(
+    "/local/search",
+    response_model=SearchInfo,
+    summary="Найти файлы и папки на этом компьютере",
+    description=SEARCH_DESCRIPTION,
+    responses={
+        404: {"description": "Нет такой папки"},
+        409: {"description": "Это не папка"},
+        422: {"description": "Путь не абсолютный или не сказано, что искать"},
+    },
+)
+async def search_local(
+    query: SearchQueryDep,
+    path: Annotated[
+        str | None,
+        Query(max_length=4096, description="Абсолютный путь; без path домашняя папка"),
+    ] = None,
+) -> SearchInfo:
+    result = await asyncio.to_thread(search.search_local, path, query)
+    return SearchInfo.from_result(result)
 
 
 # ---------------------------------------------------------------- helpers
