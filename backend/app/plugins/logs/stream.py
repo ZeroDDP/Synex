@@ -47,6 +47,7 @@ from starlette.websockets import WebSocketState
 
 from app.core.config import settings
 from app.core.errors import AppError
+from app.plugins.logs import files as logfiles
 from app.plugins.logs import journal, service
 from app.plugins.logs.errors import (
     LogFileDeniedError,
@@ -157,12 +158,14 @@ class FileSource:
         grep: str | None,
         offset: int | None,
         inode: str | None,
+        severity: str | None = None,
     ) -> None:
         self.path = path
         self.lines = lines
         self.grep = grep
         self.offset = offset
         self.inode = inode
+        self.severity = severity
 
     async def first(self, runner: service.LogRunner) -> tuple[str, dict[str, Any]]:
         if self.offset is not None:
@@ -170,7 +173,7 @@ class FileSource:
             message = await self.next(runner, first=True)
             assert message is not None
             return message
-        chunk = await service.read_tail(runner, self.path, self.lines, self.grep)
+        chunk = await service.read_tail(runner, self.path, self.lines, self.grep, self.severity)
         self.offset = chunk.offset
         self.inode = chunk.inode
         lines = chunk.lines[-self.lines :] if self.lines else []
@@ -188,6 +191,8 @@ class FileSource:
         if self.grep:
             needle = self.grep.casefold()
             lines = [line for line in lines if needle in line.casefold()]
+        if self.severity is not None:
+            lines = [line for line in lines if logfiles.detect_severity(line) == self.severity]
         rotated = chunk.state == "rotated"
         self.offset = chunk.offset
         self.inode = chunk.inode
@@ -212,7 +217,7 @@ class FileSource:
         skipped: int = 0,
     ) -> dict[str, Any]:
         return {
-            "lines": lines,
+            "lines": logfiles.log_lines(lines),
             "offset": self.offset,
             "inode": self.inode,
             "size": chunk.size,

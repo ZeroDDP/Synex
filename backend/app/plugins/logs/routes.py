@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, Path, Query, WebSocket
 
 from app.core.config import settings
 from app.core.errors import AppError
+from app.plugins.logs import files as logfiles
 from app.plugins.logs import journal, service
 from app.plugins.logs.errors import LogsBadFilterError
 from app.plugins.logs.schemas import (
@@ -30,6 +31,7 @@ from app.plugins.logs.schemas import (
     Level,
     LogFileInfo,
     LogFiles,
+    LogLine,
     LogSources,
     Severity,
     priority_number,
@@ -58,6 +60,10 @@ Grep = Annotated[
     Query(min_length=1, max_length=GREP_MAX, description="Текст в строке (не регулярка)"),
 ]
 FilePath = Annotated[str, Query(pattern=PATH_PATTERN, description="Абсолютный путь на сервере")]
+SeverityQuery = Annotated[
+    Severity | None,
+    Query(description="Только строки этой вкладки UI (уровень по слову в начале строки)"),
+]
 
 ERRORS = {
     403: {"description": "Пользователь SSH не может читать файл (log_file_permission_denied)"},
@@ -264,15 +270,16 @@ async def file_tail(
     session_id: SessionQuery = None,
     lines: Lines = 200,
     grep: Grep = None,
+    severity: SeverityQuery = None,
 ) -> FileTail:
     runner = service.LogRunner(manager, server, session_id)
     count = _lines(lines)
-    chunk = await service.read_tail(runner, path, count, grep)
+    chunk = await service.read_tail(runner, path, count, grep, severity)
     return FileTail(
         server=server,
         session_id=runner.session_id,
         path=path,
-        lines=chunk.lines,
+        lines=[LogLine(**item) for item in logfiles.log_lines(chunk.lines)],
         size=chunk.size,
         offset=chunk.offset,
         inode=chunk.inode,
@@ -291,11 +298,12 @@ async def file_stream(
     grep: Grep = None,
     offset: Annotated[int | None, Query(ge=0, description="offset из прошлого подключения")] = None,
     inode: Annotated[str | None, Query(pattern=r"^\d{1,24}$")] = None,
+    severity: SeverityQuery = None,
 ) -> None:
     """Живой файл лога: последние `lines` строк и новые по мере записи. С offset и inode
     продолжает с того же места. Протокол в app/plugins/logs/stream.py."""
     count = _lines(lines)
-    source = FileSource(path, count, grep, offset, inode)
+    source = FileSource(path, count, grep, offset, inode, severity)
     await serve_stream(
         websocket,
         lambda: service.LogRunner(manager, server, session_id, companion=True, wait=_wait()),

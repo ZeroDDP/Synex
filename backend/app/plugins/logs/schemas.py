@@ -116,11 +116,18 @@ class JournalUnits(BaseModel):
     units: list[str] = Field(description="Юниты, которые писали в журнал")
 
 
+class LogLine(BaseModel):
+    text: str
+    severity: Severity = Field(
+        description="Уровень по слову в начале строки (ERROR, [warn], level=info); без него info"
+    )
+
+
 class FileTail(BaseModel):
     server: str
     session_id: str
     path: str
-    lines: list[str] = Field(description="Старые первыми")
+    lines: list[LogLine] = Field(description="Старые первыми")
     size: int = Field(description="Размер файла на момент чтения, байт")
     offset: int = Field(description="С какого байта живой лог (?offset=) продолжит")
     inode: str | None = Field(description="inode файла: с ним живой лог заметит logrotate")
