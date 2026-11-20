@@ -31,6 +31,7 @@ from app.plugins.logs.schemas import (
     LogFileInfo,
     LogFiles,
     LogSources,
+    Severity,
     priority_number,
 )
 from app.plugins.logs.stream import FileSource, JournalSource, serve_stream
@@ -95,6 +96,10 @@ def journal_query(
     priority: Annotated[
         Level | None, Query(description="Этот уровень и важнее: err = emerg ... err")
     ] = None,
+    severity: Annotated[
+        Severity | None,
+        Query(description="Вкладка UI: error (emerg..err), warn, info (notice, info), debug"),
+    ] = None,
     grep: Grep = None,
     since: Annotated[
         str | None,
@@ -105,9 +110,12 @@ def journal_query(
     ] = None,
     boot: Annotated[bool, Query(description="Только с последней загрузки сервера")] = False,
 ) -> journal.JournalQuery:
+    if priority is not None and severity is not None:
+        raise LogsBadFilterError("Pass either priority or severity, not both")
     return journal.JournalQuery(
         units=_units(unit),
         priority=priority_number(priority),
+        severity=severity,
         grep=grep,
         since=since,
         until=until,

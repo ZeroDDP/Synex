@@ -21,6 +21,8 @@ PATH_PATTERN = r"^/[^\x00\n\r]{0,4095}$"
 GREP_MAX = 200
 
 Level = Literal["emerg", "alert", "crit", "err", "warning", "notice", "info", "debug"]
+# Вкладки уровня в UI: error = emerg..err, warn = warning, info = notice и info, debug
+Severity = Literal["error", "warn", "info", "debug"]
 
 
 def priority_number(level: Level | None) -> int | None:
@@ -32,6 +34,7 @@ class JournalEntryInfo(BaseModel):
     time: int = Field(description="Время записи, мс Unix")
     priority: int | None = Field(description="0 (emerg) ... 7 (debug)")
     level: Level | None
+    severity: Severity = Field(description="Вкладка UI: error, warn, info или debug")
     unit: str | None = Field(description="Юнит systemd, например nginx.service")
     identifier: str | None = Field(description="Программа (SYSLOG_IDENTIFIER или имя процесса)")
     pid: int | None

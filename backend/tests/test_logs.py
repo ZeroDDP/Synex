@@ -108,6 +108,7 @@ def test_journal_entries_are_parsed_from_json_lines():
         "time": 1795000000123,
         "priority": 3,
         "level": "err",
+        "severity": "error",
         "unit": "nginx.service",
         "identifier": "nginx",
         "pid": 42,
@@ -531,3 +532,24 @@ async def test_live_file_grep_and_missing_file(shell_rig: PluginRig, tmp_path: P
             with pytest.raises(ConnectionClosed) as closed:
                 await asyncio.wait_for(ws.recv(), 5)
             assert closed.value.rcvd is not None and closed.value.rcvd.code == 4404
+
+
+# ---------------------------------------------------------------- severity
+
+
+async def test_journal_severity_tabs(rig):
+    r, _ = rig
+
+    async def messages(**params) -> list[str]:
+        response = await r.api.get(f"{BASE}/journal", params=params)
+        assert response.status_code == 200, response.text
+        return [e["message"] for e in response.json()["entries"]]
+
+    # Вкладки UI: ERROR = emerg..err, WARN = только warning, INFO = notice и info
+    assert await messages(severity="error") == ["upstream timed out"]
+    assert await messages(severity="warn") == ["Disk almost FULL"]
+    assert len(await messages(severity="info")) == 3
+    entries = (await r.api.get(f"{BASE}/journal")).json()["entries"]
+    assert [e["severity"] for e in entries] == ["info", "info", "error", "info", "warn"]
+    both = await r.api.get(f"{BASE}/journal", params={"severity": "warn", "priority": "err"})
+    assert (both.status_code, both.json()["error"]) == (422, "logs_bad_filter")

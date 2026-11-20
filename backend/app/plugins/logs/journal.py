@@ -25,6 +25,21 @@ from dataclasses import dataclass
 from typing import Any
 
 LEVELS = ("emerg", "alert", "crit", "err", "warning", "notice", "info", "debug")
+# Вкладки уровня в UI (ALL / INFO / WARN / ERROR): какие уровни syslog в них попадают
+SEVERITIES = ("error", "warn", "info", "debug")
+SEVERITY_RANGES = {"error": (0, 3), "warn": (4, 4), "info": (5, 6), "debug": (7, 7)}
+
+
+def severity_of(priority: int | None) -> str:
+    """Уровень syslog → вкладка UI. Без уровня запись считается info."""
+    if priority is None:
+        return "info"
+    for severity, (low, high) in SEVERITY_RANGES.items():
+        if low <= priority <= high:
+            return severity
+    return "info"
+
+
 FIELDS = (
     "MESSAGE",
     "PRIORITY",
@@ -53,6 +68,7 @@ class JournalQuery:
 
     units: tuple[str, ...] = ()
     priority: int | None = None  # 0 (emerg) ... 7 (debug): этот уровень и важнее
+    severity: str | None = None  # error | warn | info | debug: только эта вкладка UI
     grep: str | None = None
     since: str | None = None
     until: str | None = None
@@ -75,12 +91,17 @@ class JournalEntry:
     def level(self) -> str | None:
         return LEVELS[self.priority] if self.priority is not None else None
 
+    @property
+    def severity(self) -> str:
+        return severity_of(self.priority)
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "cursor": self.cursor,
             "time": self.time,
             "priority": self.priority,
             "level": self.level,
+            "severity": self.severity,
             "unit": self.unit,
             "identifier": self.identifier,
             "pid": self.pid,
@@ -110,7 +131,10 @@ def _filters(query: JournalQuery, *, grep: bool) -> list[str]:
     args: list[str] = []
     for unit in query.units:
         args += ["-u", unit]
-    if query.priority is not None:
+    if query.severity is not None:
+        low, high = SEVERITY_RANGES[query.severity]
+        args += ["-p", f"{low}..{high}"]
+    elif query.priority is not None:
         args += ["-p", str(query.priority)]
     if query.boot:
         args.append("-b")

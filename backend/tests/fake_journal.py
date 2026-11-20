@@ -88,9 +88,10 @@ class FakeJournal:
                 options.units.append(next(items))
             elif arg == "-p":
                 value = next(items)
-                if not value.isdigit():
+                low, _, high = value.partition("..")
+                if not low.isdigit() or (high and not high.isdigit()):
                     raise _Error(f"Unknown log level {value}")
-                options.priority = int(value)
+                options.priority = (int(low), int(high)) if high else (0, int(low))
             elif arg == "-b":
                 options.boot = True
             elif arg in ("-S", "-U"):
@@ -195,7 +196,7 @@ class _Options:
     output: str = "short"
     fields: list[str] | None = None
     units: list[str] = field(default_factory=list)
-    priority: int | None = None
+    priority: tuple[int, int] | None = None  # от и до включительно
     boot: bool = False
     since: int | None = None
     until: int | None = None
@@ -213,8 +214,10 @@ class _Options:
             for unit in self.units
         ):
             return False
-        if self.priority is not None and int(entry.get("PRIORITY", "6")) > self.priority:
-            return False
+        if self.priority is not None:
+            low, high = sorted(self.priority)
+            if not low <= int(entry.get("PRIORITY", "6")) <= high:
+                return False
         if self.since is not None and at < self.since:
             return False
         if self.until is not None and at > self.until:
