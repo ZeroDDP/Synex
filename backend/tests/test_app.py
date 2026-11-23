@@ -30,6 +30,14 @@ async def api(monkeypatch, worker_settings):
 async def test_only_ssh_api_is_exposed():
     paths = set(create_app().openapi()["paths"])
     assert paths == {
+        "/api/external-plugins",
+        "/api/external-plugins/inspect",
+        "/api/external-plugins/install",
+        "/api/external-plugins/{plugin}",
+        "/api/external-plugins/{plugin}/enable",
+        "/api/external-plugins/{plugin}/disable",
+        "/api/external-plugins/{plugin}/update",
+        "/api/external-plugins/{plugin}/rollback",
         "/api/health",
         "/api/plugins",
         "/api/plugins/{name}/enable",
