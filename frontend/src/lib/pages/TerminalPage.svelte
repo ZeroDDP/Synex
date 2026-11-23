@@ -1,12 +1,18 @@
 <script>
   import { onMount } from 'svelte';
   import { FitAddon } from '@xterm/addon-fit';
+  import { SearchAddon } from '@xterm/addon-search';
   import { Terminal } from '@xterm/xterm';
+  import { WebLinksAddon } from '@xterm/addon-web-links';
+  import { Unicode11Addon } from '@xterm/addon-unicode11';
+  import stringWidth from 'string-width';
   import '@xterm/xterm/css/xterm.css';
   import { BACKEND_URL } from '../api/config.js';
   import { onEvent } from '../ws.js';
 
   export let initialSessionId = '';
+  export let hidden = false;
+  export let onNewSession = () => {};
 
   let terminalHost;
   let terminal;
@@ -26,13 +32,34 @@
   let lastSeq = 0;
   let requestCounter = 0;
   let initialSessionApplied = false;
+  let lastInitialSessionId = '';
   let lineBuffer = '';
+  let cursor = 0;
+  let history = [];
+  let historyIndex = -1;
+  let draft = '';
+  let interactivePrompt = null;
+  let searchAddon;
+  let completionPending = false;
+  let lastCompletion = null;
+  let connectionNames = [];
   let sessionsLoading = false;
   let sessionListError = '';
   let terminalError = '';
   let terminalState = 'disconnected';
-  const pendingRequests = new Set();
+  const pendingRequests = new Map();
+  let pendingRequestCount = 0;
   const CONNECTION_TIMEOUT_MS = 10000;
+
+  function syncPendingRequestCount() {
+    pendingRequestCount = pendingRequests.size;
+  }
+
+  $: if (mounted && !hidden) {
+    requestAnimationFrame(() => {
+      if (mounted && !hidden && terminalHost && terminalHost.clientWidth > 0) fitAddon?.fit();
+    });
+  }
 
   function isRecord(value) {
     return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -40,9 +67,22 @@
 
   function promptPrefix(cwd = activeSession?.cwd) {
     const user = safePromptText(activeSession?.username || 'user');
-    const host = safePromptText(activeSession?.host || 'server');
+    const host = safePromptText(connectionName(activeSession) || activeSession?.host || 'server');
     const path = safePromptText(cwd || '~');
     return `\x1b[38;2;255;123;0m${user}@${host}\x1b[0m:\x1b[38;2;92;109;137m${path}\x1b[0m$ `;
+  }
+
+  function connectionName(session) {
+    if (!session) return '';
+    const saved = connectionNames.find((connection) =>
+      (session.connection_id && connection.id === session.connection_id) ||
+      (
+        connection.host === session.host &&
+        Number(connection.port || 22) === Number(session.port || 22) &&
+        connection.username === session.username
+      )
+    );
+    return saved?.name || '';
   }
 
   function safePromptText(value) {
@@ -52,9 +92,10 @@
   function writeTerminal(text) {
     const currentTerminal = terminal;
     if (!currentTerminal) return;
+    const shouldScroll = currentTerminal.buffer.active.viewportY === currentTerminal.buffer.active.baseY;
     currentTerminal.write(text, () => {
       requestAnimationFrame(() => {
-        if (mounted && terminal === currentTerminal) currentTerminal.scrollToBottom();
+        if (shouldScroll && mounted && terminal === currentTerminal) currentTerminal.scrollToBottom();
       });
     });
   }
@@ -70,12 +111,28 @@
 
   function writePrompt() {
     if (!terminal) return;
-    writeTerminal(promptPrefix());
+    redrawLine();
   }
 
   function setTerminalError(message) {
     terminalError = message;
-    writeBlock(message, '31');
+  }
+
+  function lineCharacters(value = lineBuffer) {
+    return Array.from(value);
+  }
+
+  function redrawLine() {
+    if (!terminal) return;
+    writeTerminal(`\r\x1b[2K${promptPrefix()}${lineBuffer}`);
+    const back = stringWidth(lineCharacters().slice(cursor).join(''));
+    if (back > 0) writeTerminal(`\x1b[${back}D`);
+  }
+
+  function setLine(value, nextCursor = lineCharacters(value).length) {
+    lineBuffer = value;
+    cursor = Math.max(0, Math.min(nextCursor, lineCharacters(value).length));
+    redrawLine();
   }
 
   function clearConnectionTimers() {
@@ -211,7 +268,32 @@
       const detail = typeof message.data?.detail === 'string'
         ? message.data.detail
         : 'The terminal backend returned an error.';
-      setTerminalError(detail);
+      const requestId = typeof message.data?.request_id === 'string' ? message.data.request_id : '';
+      if (message.data?.error === 'ssh_interactive_command' && requestId) {
+        interactivePrompt = {
+          command: pendingRequests.get(requestId) || '',
+          program: typeof message.data.program === 'string' ? message.data.program : '',
+          hint: typeof message.data.hint === 'string' ? message.data.hint : detail,
+          requestId
+        };
+        pendingRequests.delete(requestId);
+        syncPendingRequestCount();
+        writePrompt();
+      } else if (requestId && pendingRequests.has(requestId)) {
+        pendingRequests.delete(requestId);
+        syncPendingRequestCount();
+        writeBlock(detail, '31');
+        writePrompt();
+      } else {
+        setTerminalError(detail);
+      }
+      return;
+    }
+
+    if (message.type === 'interrupt') {
+      if (message.data?.status === 'idle') {
+        writeBlock('No command is running.', '33');
+      }
     }
   }
 
@@ -234,21 +316,27 @@
     if (entry.kind === 'command') {
       if (entry.request_id && pendingRequests.has(entry.request_id)) return;
       lineBuffer = '';
+      cursor = 0;
       writeTerminal(`\r\x1b[2K${promptPrefix(entry.cwd)}${entry.command || ''}\r\n`);
       return;
     }
 
     if (entry.kind === 'result') {
+      if (entry.interrupted) writeBlock('^C', '33');
       if (typeof entry.stdout === 'string') writeBlock(entry.stdout);
       if (typeof entry.stderr === 'string') writeBlock(entry.stderr, '31');
       if (entry.timed_out) writeBlock('Command timed out.', '33');
       else if (Number.isInteger(entry.exit_code) && entry.exit_code !== 0) {
         writeBlock(`Exit code: ${entry.exit_code}`, '31');
       }
+      if (Number.isFinite(entry.duration_ms) && entry.duration_ms >= 2000) {
+        writeBlock(`Duration: ${(entry.duration_ms / 1000).toFixed(1)} s`, '90');
+      }
       if (typeof entry.cwd === 'string' && activeSession) {
         activeSession = { ...activeSession, cwd: entry.cwd };
       }
       if (entry.request_id) pendingRequests.delete(entry.request_id);
+      syncPendingRequestCount();
       writePrompt();
       return;
     }
@@ -256,14 +344,22 @@
     if (entry.kind === 'error') {
       writeBlock(entry.detail || entry.error || 'Command failed.', '31');
       if (entry.request_id) pendingRequests.delete(entry.request_id);
+      syncPendingRequestCount();
       writePrompt();
     }
   }
 
-  function submitCommand() {
-    const command = lineBuffer;
-    lineBuffer = '';
+  function submitCommand(command = lineBuffer, allowInteractive = false) {
+    redrawLine();
+    const characters = lineCharacters();
+    const trailingWidth = stringWidth(characters.slice(cursor).join(''));
+    if (trailingWidth > 0) writeTerminal(`\x1b[${trailingWidth}C`);
     writeTerminal('\r\n');
+    lineBuffer = '';
+    cursor = 0;
+    historyIndex = -1;
+    draft = '';
+    interactivePrompt = null;
     if (!command.trim()) {
       writePrompt();
       return;
@@ -273,39 +369,253 @@
       writePrompt();
       return;
     }
-    if (command.length > 4096) {
+    if (lineCharacters(command).length > 4096) {
       setTerminalError('Command exceeds the 4096-character limit.');
       writePrompt();
       return;
     }
 
     const requestId = `ui-${Date.now()}-${++requestCounter}`;
-    pendingRequests.add(requestId);
+    pendingRequests.set(requestId, command);
+    syncPendingRequestCount();
+    if (!command.startsWith(' ') && history[history.length - 1] !== command) {
+      history = [...history, command].slice(-500);
+    }
     try {
       terminalSocket.send(JSON.stringify({
         type: 'exec',
-        data: { command, id: requestId }
+        data: { command, id: requestId, ...(allowInteractive ? { allow_interactive: true } : {}) }
       }));
     } catch (error) {
       pendingRequests.delete(requestId);
+      syncPendingRequestCount();
       setTerminalError(`Could not send command: ${error.message}`);
       writePrompt();
     }
   }
 
+  function handleInterrupt() {
+    if (!pendingRequests.size) {
+      lineBuffer = '';
+      cursor = 0;
+      historyIndex = -1;
+      draft = '';
+      writeTerminal('^C\r\n');
+      writePrompt();
+      return;
+    }
+    if (!terminalSocket || terminalSocket.readyState !== WebSocket.OPEN) {
+      setTerminalError('Cannot interrupt the command because the terminal is disconnected.');
+      return;
+    }
+    try {
+      terminalSocket.send(JSON.stringify({ type: 'interrupt' }));
+    } catch (error) {
+      setTerminalError(`Could not interrupt command: ${error.message}`);
+    }
+  }
+
+  function moveCursor(delta) {
+    cursor = Math.max(0, Math.min(lineCharacters().length, cursor + delta));
+    redrawLine();
+  }
+
+  function browseHistory(direction) {
+    if (history.length === 0) return;
+    if (historyIndex === -1) {
+      if (direction > 0) return;
+      draft = lineBuffer;
+      historyIndex = history.length;
+    }
+    const nextIndex = Math.max(-1, Math.min(history.length - 1, historyIndex + direction));
+    if (nextIndex === -1) {
+      historyIndex = -1;
+      setLine(draft);
+      return;
+    }
+    historyIndex = nextIndex;
+    setLine(history[historyIndex]);
+  }
+
+  async function completeLine() {
+    if (!selectedSessionId || pendingRequests.size || !terminalSocket || completionPending) return;
+    const currentLine = lineBuffer;
+    const currentCursor = cursor;
+    if (
+      lastCompletion &&
+      lastCompletion.line === currentLine &&
+      lastCompletion.cursor === currentCursor
+    ) {
+      writeTerminal('\r\n');
+      writeBlock(lastCompletion.candidates.join('  '));
+      lastCompletion = null;
+      writePrompt();
+      return;
+    }
+
+    completionPending = true;
+    try {
+      const query = new URLSearchParams({ line: currentLine, cursor: String(currentCursor) });
+      const response = await fetch(
+        `${BACKEND_URL}/api/ssh/sessions/${encodeURIComponent(selectedSessionId)}/complete?${query}`
+      );
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(typeof data?.detail === 'string' ? data.detail : `HTTP ${response.status}`);
+      }
+      if (
+        !Number.isInteger(data?.start) ||
+        data.start < 0 ||
+        data.start > currentCursor ||
+        !Array.isArray(data.candidates) ||
+        !Array.isArray(data.insert) ||
+        typeof data.common !== 'string' ||
+        data.insert.length !== data.candidates.length ||
+        data.insert.some((value) => typeof value !== 'string') ||
+        data.candidates.some((value) => typeof value !== 'string')
+      ) {
+        throw new Error('Backend returned invalid completion data.');
+      }
+      if (lineBuffer !== currentLine || cursor !== currentCursor) return;
+      if (data.candidates.length === 0) return;
+
+      const characters = lineCharacters();
+      const replacement = data.candidates.length === 1 ? data.insert[0] : data.common;
+      const next = characters.slice(0, data.start).join('') +
+        replacement +
+        characters.slice(currentCursor).join('');
+      setLine(next, data.start + lineCharacters(replacement).length);
+      lastCompletion = data.candidates.length > 1
+        ? { line: lineBuffer, cursor, candidates: data.candidates }
+        : null;
+    } catch (error) {
+      setTerminalError(`Could not complete command: ${errorMessage(error)}`);
+    } finally {
+      completionPending = false;
+    }
+  }
+
+  function insertCharacter(character) {
+    const characters = lineCharacters();
+    characters.splice(cursor, 0, character);
+    setLine(characters.join(''), cursor + 1);
+    historyIndex = -1;
+    lastCompletion = null;
+  }
+
   function handleInput(data) {
+    if (data.includes('\x03')) {
+      handleInterrupt();
+      return;
+    }
+    if (pendingRequests.size) return;
+    if (data.startsWith('\x1b')) {
+      const keyActions = {
+        '\x1b[D': () => moveCursor(-1),
+        '\x1b[C': () => moveCursor(1),
+        '\x1b[A': () => browseHistory(-1),
+        '\x1b[B': () => browseHistory(1),
+        '\x1b[H': () => moveCursor(-cursor),
+        '\x1bOH': () => moveCursor(-cursor),
+        '\x1b[F': () => moveCursor(lineCharacters().length - cursor),
+        '\x1bOF': () => moveCursor(lineCharacters().length - cursor),
+        '\x1b[3~': () => {
+          const characters = lineCharacters();
+          characters.splice(cursor, 1);
+          setLine(characters.join(''), cursor);
+        }
+      };
+      keyActions[data]?.();
+      return;
+    }
+
+    if (data.includes('\r') || data.includes('\n')) {
+      const pasted = data.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+      const lineCount = pasted.split('\n').length;
+      if (lineCount > 1) {
+        const characters = lineCharacters();
+        const combined = characters.slice(0, cursor).join('') +
+          pasted +
+          characters.slice(cursor).join('');
+        const commandLines = lineCount - (pasted.endsWith('\n') ? 1 : 0);
+        if (!window.confirm(`Paste ${commandLines} lines and execute them as one command?`)) return;
+        lineBuffer = combined;
+        cursor = lineCharacters(combined).length;
+        submitCommand(combined);
+        return;
+      }
+    }
+
     for (const character of data) {
       if (character === '\r' || character === '\n') {
         submitCommand();
       } else if (character === '\x7f' || character === '\b') {
-        if (lineBuffer.length > 0) {
-          lineBuffer = lineBuffer.slice(0, -1);
-          writeTerminal('\b \b');
+        if (cursor > 0) {
+          const characters = lineCharacters();
+          characters.splice(cursor - 1, 1);
+          setLine(characters.join(''), cursor - 1);
         }
+      } else if (character === '\t') {
+        void completeLine();
+      } else if (character === '\x01') {
+        moveCursor(-cursor);
+      } else if (character === '\x05') {
+        moveCursor(lineCharacters().length - cursor);
+      } else if (character === '\x15') {
+        const remaining = lineCharacters().slice(cursor).join('');
+        setLine(remaining, 0);
+      } else if (character === '\x17') {
+        const characters = lineCharacters();
+        let start = cursor;
+        while (start > 0 && /\s/u.test(characters[start - 1])) start -= 1;
+        while (start > 0 && !/\s/u.test(characters[start - 1])) start -= 1;
+        characters.splice(start, cursor - start);
+        setLine(characters.join(''), start);
+      } else if (character === '\x0c') {
+        terminal.clear();
+        redrawLine();
       } else if (character >= ' ' && character !== '\x7f') {
-        lineBuffer += character;
-        writeTerminal(character);
+        insertCharacter(character);
       }
+    }
+  }
+
+  async function loadHistory(sessionId) {
+    try {
+      const response = await fetch(
+        `${BACKEND_URL}/api/ssh/sessions/${encodeURIComponent(sessionId)}/history?limit=500`
+      );
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(typeof data?.detail === 'string' ? data.detail : `HTTP ${response.status}`);
+      }
+      if (!Array.isArray(data?.commands) || data.commands.some((command) => typeof command !== 'string')) {
+        throw new Error('Backend returned invalid command history.');
+      }
+      if (selectedSessionId === sessionId) history = data.commands;
+    } catch (error) {
+      if (selectedSessionId === sessionId) {
+        setTerminalError(`Could not load command history: ${errorMessage(error)}`);
+      }
+    }
+  }
+
+  async function loadConnectionNames() {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/connections`);
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(typeof data?.detail === 'string' ? data.detail : `HTTP ${response.status}`);
+      }
+      if (!Array.isArray(data)) throw new Error('Backend returned invalid saved connections.');
+      connectionNames = data.filter((connection) =>
+        typeof connection?.name === 'string' &&
+        typeof connection?.host === 'string' &&
+        typeof connection?.username === 'string'
+      );
+      if (activeSession && terminalHasStarted && !pendingRequests.size) redrawLine();
+    } catch (error) {
+      setTerminalError(`Could not load saved connection names: ${errorMessage(error)}`);
     }
   }
 
@@ -326,6 +636,16 @@
         throw new Error('Backend returned an invalid SSH session list.');
       }
       sessions = data;
+      if (
+        initialSessionId &&
+        initialSessionId !== lastInitialSessionId &&
+        sessions.some((session) => session.session_id === initialSessionId)
+      ) {
+        lastInitialSessionId = initialSessionId;
+        initialSessionApplied = true;
+        selectSession(initialSessionId);
+        return;
+      }
       if (!initialSessionApplied) {
         initialSessionApplied = true;
         if (sessions.some((session) => session.session_id === initialSessionId)) {
@@ -346,6 +666,10 @@
         closeTerminalSocket();
         terminal?.reset();
         terminalState = 'disconnected';
+        history = [];
+        pendingRequests.clear();
+        syncPendingRequestCount();
+        interactivePrompt = null;
       }
     } catch (error) {
       sessionListError = error.message || 'Could not load SSH sessions.';
@@ -361,13 +685,36 @@
     terminalHasStarted = false;
     lastSeq = 0;
     lineBuffer = '';
+    cursor = 0;
+    history = [];
     pendingRequests.clear();
+    syncPendingRequestCount();
+    interactivePrompt = null;
+    lastCompletion = null;
     activeSession = sessions.find((session) => session.session_id === sessionId) || null;
     terminalError = '';
     terminalState = 'connecting';
     terminal?.reset();
     reconnectDelay = 1000;
     connectTerminal(sessionId);
+    void loadHistory(sessionId);
+  }
+
+  async function closeSession() {
+    if (!selectedSessionId || sessionsLoading) return;
+    const sessionId = selectedSessionId;
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/ssh/sessions/${encodeURIComponent(sessionId)}`, {
+        method: 'DELETE'
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(typeof data?.detail === 'string' ? data.detail : `HTTP ${response.status}`);
+      }
+      await loadSessions();
+    } catch (error) {
+      setTerminalError(`Could not close SSH session: ${errorMessage(error)}`);
+    }
   }
 
   function stateLabel(state) {
@@ -382,7 +729,7 @@
   onMount(() => {
     mounted = true;
     terminal = new Terminal({
-      allowProposedApi: false,
+      allowProposedApi: true,
       cursorBlink: true,
       convertEol: true,
       fontFamily: 'JetBrains Mono, Consolas, monospace',
@@ -412,9 +759,36 @@
       }
     });
     fitAddon = new FitAddon();
+    searchAddon = new SearchAddon();
     terminal.loadAddon(fitAddon);
+    terminal.loadAddon(new WebLinksAddon());
+    terminal.loadAddon(searchAddon);
+    terminal.loadAddon(new Unicode11Addon());
+    terminal.unicode.activeVersion = '11';
     terminal.open(terminalHost);
     inputDisposable = terminal.onData(handleInput);
+    terminal.attachCustomKeyEventHandler((event) => {
+      if (event.type !== 'keydown') return true;
+      const key = event.key.toLowerCase();
+      if ((event.ctrlKey || event.metaKey) && key === 'c' && terminal.hasSelection()) {
+        if (navigator.clipboard?.writeText) {
+          navigator.clipboard.writeText(terminal.getSelection()).catch((error) => {
+            setTerminalError(`Could not copy terminal selection: ${errorMessage(error)}`);
+          });
+        } else {
+          setTerminalError('Clipboard access is unavailable in this browser.');
+        }
+        return false;
+      }
+      if ((event.ctrlKey || event.metaKey) && key === 'v') return false;
+      if (event.ctrlKey && key === 'f') {
+        const query = window.prompt('Search terminal output');
+        if (query) searchAddon.findNext(query);
+        else searchAddon.clearDecorations();
+        return false;
+      }
+      return true;
+    });
 
     const fitTerminal = () => {
       if (terminalHost.clientWidth > 0 && terminalHost.clientHeight > 0) fitAddon.fit();
@@ -426,6 +800,7 @@
     const unsubscribe = onEvent('ssh.session', () => {
       void loadSessions();
     });
+    void loadConnectionNames();
     void loadSessions();
 
     return () => {
@@ -439,7 +814,7 @@
   });
 </script>
 
-<div class="terminal-page">
+<div class="terminal-page" class:terminal-page--hidden={hidden}>
   {#if sessionListError || terminalError}
     <div class="terminal-error" role="alert">
       <span>{sessionListError || terminalError}</span>
@@ -460,6 +835,27 @@
     </div>
   {/if}
 
+  {#if interactivePrompt}
+    <div class="interactive-command" role="alert">
+      <div>
+        <strong>{interactivePrompt.program || 'Interactive command'}</strong>
+        <p>{interactivePrompt.hint}</p>
+      </div>
+      <div class="interactive-actions">
+        <button
+          type="button"
+          class="refresh-button"
+          on:click={() => submitCommand(interactivePrompt.command, true)}
+        >Run anyway</button>
+        <button
+          type="button"
+          class="refresh-button"
+          on:click={() => (interactivePrompt = null)}
+        >Cancel</button>
+      </div>
+    </div>
+  {/if}
+
   <section class="terminal-frame" aria-label="SSH terminal">
     <header class="terminal-titlebar">
       <div class="terminal-session-group">
@@ -474,17 +870,37 @@
           {#if sessions.length === 0}
             <option value="">No active sessions</option>
           {:else}
-            {#each sessions as session (session.session_id)}
-              <option value={session.session_id}>{session.host}</option>
+            {#each sessions as session, index (session.session_id)}
+              <option value={session.session_id}>
+                {session.username}@{connectionName(session) || session.host}:{session.port} · {index + 1}
+              </option>
             {/each}
           {/if}
         </select>
+        <span class="session-live-dot" aria-label="Session is active"></span>
         <span class="terminal-cwd" title={activeSession?.cwd || '/'}>
           {activeSession?.cwd || '/'}
         </span>
       </div>
       <div class="terminal-controls">
-        <span class="terminal-state" data-state={terminalState}>{stateLabel(terminalState)}</span>
+        <span class="terminal-state" data-state={terminalState}>
+          {pendingRequestCount ? 'Command running — Ctrl+C to interrupt' : stateLabel(terminalState)}
+        </span>
+        <button
+          type="button"
+          class="refresh-button"
+          aria-label="New SSH session"
+          title="New SSH session"
+          on:click={onNewSession}
+        >+</button>
+        <button
+          type="button"
+          class="refresh-button"
+          aria-label="Close SSH session"
+          title="Close SSH session"
+          on:click={closeSession}
+          disabled={!selectedSessionId || sessionsLoading}
+        >×</button>
         <button
           type="button"
           class="refresh-button"
@@ -507,6 +923,10 @@
     flex: 1 1 auto;
     min-height: 0;
     color: var(--synex-text-primary);
+  }
+
+  .terminal-page--hidden {
+    display: none;
   }
 
   .sr-only {
@@ -535,6 +955,14 @@
     display: flex;
     align-items: center;
     min-width: 0;
+  }
+
+  .session-live-dot {
+    flex: 0 0 auto;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--synex-ok);
   }
 
   .terminal-session-group {
@@ -582,6 +1010,11 @@
   }
 
   .refresh-button:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  .refresh-button:disabled {
     cursor: wait;
     opacity: 0.6;
   }
@@ -615,6 +1048,29 @@
     border-radius: var(--synex-radius-sm);
     background: var(--synex-danger-bg);
     color: var(--synex-danger-fg);
+  }
+
+  .interactive-command {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--synex-space-4);
+    padding: var(--synex-space-3) var(--synex-space-4);
+    border: 1px solid var(--synex-warning);
+    border-radius: var(--synex-radius-sm);
+    background: var(--synex-warning-bg);
+    color: var(--synex-text-primary);
+  }
+
+  .interactive-command p {
+    margin: var(--synex-space-1) 0 0;
+    color: var(--synex-text-secondary);
+  }
+
+  .interactive-actions {
+    display: flex;
+    gap: var(--synex-space-2);
+    flex: 0 0 auto;
   }
 
   .terminal-error > span {

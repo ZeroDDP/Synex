@@ -1,5 +1,3 @@
-<!-- Оптимизировать svg иконки -->
-
 <script>
   import { onMount } from 'svelte';
   import { BACKEND_URL } from './api/config.js';
@@ -9,14 +7,18 @@
   export let onConnected = () => {};
 
   let host = '';
-  let port = '22';
+  let port = '22';  
   let username = '';
   let passphrase = '';
-  let sshKey = '';
+  let keyId = '';
   let authMode = 'key';
   let search = '';
   let activeSessions = [];
+  let savedConnections = [];
+  let keys = [];
   let sessionsError = '';
+  let connectionsError = '';
+  let keysError = '';
   let requestError = '';
   let requestMessage = '';
   let pendingHostKey = null;
@@ -37,7 +39,7 @@
     port = '22';
     username = '';
     passphrase = '';
-    sshKey = '';
+    keyId = keys[0]?.id || '';
     requestError = '';
     requestMessage = '';
     pendingHostKey = null;
@@ -90,6 +92,33 @@
     }
   }
 
+  async function loadConnections() {
+    connectionsError = '';
+    try {
+      const connections = await backendRequest('/api/connections');
+      if (!Array.isArray(connections) || connections.some((connection) => typeof connection?.id !== 'string')) {
+        throw new Error('Backend returned an invalid saved connection list.');
+      }
+      savedConnections = connections;
+    } catch (error) {
+      connectionsError = errorMessage(error);
+    }
+  }
+
+  async function loadKeys() {
+    keysError = '';
+    try {
+      const savedKeys = await backendRequest('/api/keys');
+      if (!Array.isArray(savedKeys) || savedKeys.some((key) => typeof key?.id !== 'string')) {
+        throw new Error('Backend returned an invalid SSH key list.');
+      }
+      keys = savedKeys;
+      if (!keyId && keys.length > 0) keyId = keys[0].id;
+    } catch (error) {
+      keysError = errorMessage(error);
+    }
+  }
+
   function connectionPayload() {
     const numericPort = Number(port);
     if (!host.trim() || !username.trim()) {
@@ -104,9 +133,8 @@
       if (!passphrase) throw new Error('Password is required.');
       payload.password = passphrase;
     } else {
-      if (!sshKey.trim()) throw new Error('Enter the absolute path to the SSH private key.');
-      payload.key_path = sshKey.trim();
-      if (passphrase) payload.passphrase = passphrase;
+      if (!keyId) throw new Error('Select an SSH key from the key store.');
+      payload.key_id = keyId;
     }
     return payload;
   }
@@ -123,8 +151,25 @@
     return session;
   }
 
+  async function connectWithHostKey(requestFn, attempt) {
+    try {
+      return await requestFn();
+    } catch (error) {
+      if (showHostKeyPrompt(error, attempt)) return null;
+      throw error;
+    }
+  }
+
   async function performConnectionAttempt(attempt) {
-    const session = await openSession(attempt.payload);
+    const requestFn = () => attempt.connectionId
+      ? backendRequest(`/api/connections/${encodeURIComponent(attempt.connectionId)}/connect`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(attempt.credentials || {})
+        })
+      : openSession(attempt.payload);
+    const session = await connectWithHostKey(requestFn, attempt);
+    if (!session) return;
     if (attempt.action === 'test') {
       try {
         await backendRequest(`/api/ssh/sessions/${encodeURIComponent(session.session_id)}`, {
@@ -149,25 +194,38 @@
   function showHostKeyPrompt(error, attempt) {
     const data = error instanceof BackendRequestError ? error.data : null;
     const key = data?.host_key;
+    const expectedHost = attempt?.payload?.host || attempt?.connection?.host;
+    const expectedPort = attempt?.payload?.port || attempt?.connection?.port;
+    const kind = data?.error === 'ssh_host_key_unknown'
+      ? 'unknown'
+      : data?.error === 'ssh_host_key_mismatch'
+        ? 'mismatch'
+        : '';
     if (
       !(error instanceof BackendRequestError) ||
       error.status !== 409 ||
-      data?.error !== 'ssh_host_key_unknown' ||
+      !kind ||
       !attempt ||
       !key ||
       typeof key.host !== 'string' ||
-      key.host.toLowerCase() !== attempt.payload.host.toLowerCase() ||
-      key.port !== attempt.payload.port ||
+      typeof expectedHost !== 'string' ||
+      key.host.toLowerCase() !== expectedHost.toLowerCase() ||
+      key.port !== expectedPort ||
       typeof key.fingerprint !== 'string' ||
-      !/^SHA256:[A-Za-z0-9+/]{43}$/.test(key.fingerprint)
+      !/^SHA256:[A-Za-z0-9+/]{43}$/.test(key.fingerprint) ||
+      (kind === 'mismatch' &&
+        (typeof key.expected_fingerprint !== 'string' ||
+          !/^SHA256:[A-Za-z0-9+/]{43}$/.test(key.expected_fingerprint)))
     ) {
       return false;
     }
 
     pendingHostKey = {
+      kind,
       host: key.host,
       port: key.port,
       fingerprint: key.fingerprint,
+      expectedFingerprint: key.expected_fingerprint || '',
       keyType: typeof key.key_type === 'string' ? key.key_type : ''
     };
     pendingAttempt = attempt;
@@ -176,7 +234,7 @@
     return true;
   }
 
-  async function runConnection(action) {
+  async function runConnection(action, connection = null, credentials = {}) {
     working = true;
     requestError = '';
     requestMessage = '';
@@ -184,19 +242,29 @@
     pendingAttempt = null;
     let attempt = null;
     try {
-      attempt = { action, payload: connectionPayload() };
+      attempt = connection
+        ? { action, connectionId: connection.id, connection, credentials }
+        : { action, payload: connectionPayload() };
       await performConnectionAttempt(attempt);
     } catch (error) {
-      if (!showHostKeyPrompt(error, attempt)) requestError = errorMessage(error);
+      if (error instanceof BackendRequestError && error.data?.error === 'ssh_host_key_revoked') {
+        requestError = `The SSH host key was revoked by OpenSSH. Check the server's trusted keys. ${errorMessage(error)}`;
+      } else {
+        requestError = errorMessage(error);
+      }
     } finally {
       working = false;
     }
   }
 
-  async function acceptHostKey() {
+  async function acceptHostKey(replace = false) {
     if (working || !pendingHostKey || !pendingAttempt) return;
     const hostKey = pendingHostKey;
     const attempt = pendingAttempt;
+    if (hostKey.kind === 'mismatch' && !replace) return;
+    if (replace && !window.confirm('Replace the saved SSH host key? Verify the new fingerprint before continuing.')) {
+      return;
+    }
     working = true;
     requestError = '';
     requestMessage = '';
@@ -208,7 +276,8 @@
           host: hostKey.host,
           port: hostKey.port,
           fingerprint: hostKey.fingerprint,
-          key_type: hostKey.keyType || null
+          key_type: hostKey.keyType || null,
+          ...(replace ? { replace: true } : {})
         })
       });
       pendingHostKey = null;
@@ -223,6 +292,21 @@
     } finally {
       working = false;
     }
+  }
+
+  async function connectSavedConnection(connection) {
+    if (working) return;
+    const credentials = {};
+    if (connection.auth === 'password' && !connection.has_password) {
+      const password = window.prompt(`Password for ${connection.name}`);
+      if (password === null) return;
+      credentials.password = password;
+    } else if (connection.auth === 'key_path' && !connection.has_passphrase) {
+      const passphrase = window.prompt(`Passphrase for ${connection.name} (leave empty if none)`);
+      if (passphrase === null) return;
+      if (passphrase) credentials.passphrase = passphrase;
+    }
+    await runConnection('connect', connection, credentials);
   }
 
   function rejectHostKey() {
@@ -241,6 +325,8 @@
 
   onMount(() => {
     void loadSessions();
+    void loadConnections();
+    void loadKeys();
   });
 </script>
 
@@ -284,6 +370,34 @@
     {#if !sessionsError && filtered.length === 0}
       <p class="sessions-empty">No active SSH sessions.</p>
     {/if}
+
+    <header class="saved__head saved__head--connections">
+      <span class="saved__title">SAVED SERVERS</span>
+    </header>
+    {#if connectionsError}
+      <div class="sessions-error" role="alert">{connectionsError}</div>
+    {:else if savedConnections.length === 0}
+      <p class="sessions-empty">No saved servers.</p>
+    {:else}
+      <ul class="saved__list">
+        {#each savedConnections as connection (connection.id)}
+          <li>
+            <button
+              type="button"
+              class="srv"
+              on:click={() => connectSavedConnection(connection)}
+              disabled={working}
+            >
+              <span class="dot" data-status="online" aria-hidden="true"></span>
+              <span class="srv__body">
+                <span class="srv__name">{connection.name}</span>
+                <span class="srv__sub">{connection.username}@{connection.host}:{connection.port}</span>
+              </span>
+            </button>
+          </li>
+        {/each}
+      </ul>
+    {/if}
   </section>
 
    <!-- правая панель -->
@@ -292,11 +406,20 @@
     <p class="form__sub">Connect over SSH to a remote server</p>
 
     {#if pendingHostKey}
-      <div class="host-key-prompt" role="alert">
-        <strong>Unknown SSH host key</strong>
+      <div class:host-key-prompt--mismatch={pendingHostKey.kind === 'mismatch'} class="host-key-prompt" role="alert">
+        <strong>
+          {pendingHostKey.kind === 'mismatch' ? 'SSH host key changed' : 'Unknown SSH host key'}
+        </strong>
         <p>
-          Verify this fingerprint with the server administrator or another trusted source before
-          accepting. Synex will remember it for this host and port.
+          {#if pendingHostKey.kind === 'mismatch'}
+            The server key has changed. This may indicate server impersonation or a reinstall.
+            Verify the new fingerprint before replacing the saved key.
+          {:else}
+            Verify this fingerprint with the server administrator or another trusted source before
+            accepting. Compare it with the output of
+            <code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code>. Synex will remember it
+            for this host and port.
+          {/if}
         </p>
         <dl class="host-key-details">
           <div>
@@ -309,15 +432,30 @@
               <dd>{pendingHostKey.keyType}</dd>
             </div>
           {/if}
+          {#if pendingHostKey.expectedFingerprint}
+            <div>
+              <dt>Previously trusted fingerprint</dt>
+              <dd><code>{pendingHostKey.expectedFingerprint}</code></dd>
+            </div>
+          {/if}
           <div>
-            <dt>Fingerprint</dt>
+            <dt>{pendingHostKey.kind === 'mismatch' ? 'New fingerprint' : 'Fingerprint'}</dt>
             <dd><code>{pendingHostKey.fingerprint}</code></dd>
           </div>
         </dl>
         <div class="host-key-actions">
-          <button type="button" class="btn btn--primary" on:click={acceptHostKey} disabled={working}>
-            {working ? 'Connecting…' : 'Accept'}
-          </button>
+          {#if pendingHostKey.kind === 'mismatch'}
+            <button
+              type="button"
+              class="btn btn--primary"
+              on:click={() => acceptHostKey(true)}
+              disabled={working}
+            >{working ? 'Replacing…' : 'Replace key'}</button>
+          {:else}
+            <button type="button" class="btn btn--primary" on:click={() => acceptHostKey()} disabled={working}>
+              {working ? 'Connecting…' : 'Trust and connect'}
+            </button>
+          {/if}
           <button type="button" class="btn btn--ghost" on:click={rejectHostKey} disabled={working}>
             Cancel
           </button>
@@ -401,13 +539,20 @@
       </label>
     {:else}
       <label class="field">
-        <span class="field__label">Passphrase (optional)</span>
-        <input class="input" type="password" bind:value={passphrase} />
+        <span class="field__label">SSH key</span>
+        <select class="input" bind:value={keyId} disabled={keys.length === 0}>
+          {#if keys.length === 0}
+            <option value="">No keys in key store</option>
+          {:else}
+            {#each keys as key (key.id)}
+              <option value={key.id}>{key.name} · {key.fingerprint}</option>
+            {/each}
+          {/if}
+        </select>
       </label>
-      <label class="field">
-        <span class="field__label">SSH private key path</span>
-        <input class="input" type="text" bind:value={sshKey} placeholder="Absolute path on the backend host" />
-      </label>
+      {#if keysError}
+        <div class="sessions-error" role="alert">{keysError}</div>
+      {/if}
     {/if}
 
     <div class="actions">
@@ -448,6 +593,10 @@
     align-items: center;
     justify-content: space-between;
     margin-bottom: var(--synex-space-4);
+  }
+
+  .saved__head--connections {
+    margin-top: var(--synex-space-6);
   }
   .saved__title {
     font-family: var(--font-host);
@@ -563,6 +712,15 @@
 
   .host-key-prompt > strong {
     color: var(--synex-warning);
+  }
+
+  .host-key-prompt--mismatch {
+    border-color: var(--synex-danger);
+    background: var(--synex-danger-bg);
+  }
+
+  .host-key-prompt--mismatch > strong {
+    color: var(--synex-danger-fg);
   }
 
   .host-key-prompt p {
