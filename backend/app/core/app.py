@@ -20,6 +20,7 @@ from app.core.security import (
     allowed_origins,
     warn_if_exposed,
 )
+from app.external.lifecycle import external_plugins
 from app.plugins.choices import PluginChoices
 from app.plugins.manager import PLUGIN_STATUS_EVENT, PluginManager
 from app.worker import WORKER_STATUS_EVENT, worker_manager
@@ -56,7 +57,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         fake_metrics=fake_metrics is not None,
     )
     try:
-        yield
+        async with external_plugins(app):
+            yield
     finally:
         logger.info("Shutting down...")
         if fake_metrics is not None:
