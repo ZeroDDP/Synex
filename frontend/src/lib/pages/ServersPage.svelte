@@ -3,18 +3,27 @@
   import { servers } from '../stores.js';
 
   export let onConnected = () => {};
+  export let showConnectForm = false;
 
-  let showConnect = false;
+  function meterWidth(value) {
+    return typeof value === 'number' && Number.isFinite(value)
+      ? Math.max(0, Math.min(100, value))
+      : 0;
+  }
+
+  function meterLabel(value) {
+    return typeof value === 'number' && Number.isFinite(value) ? `${Math.round(value)}%` : '—';
+  }
 </script>
-
+<!-- Rename objects in coloumn NAME to server name -->
 <div class="page-servers">
-  {#if showConnect}
-    <SshConnect onClose={() => (showConnect = false)} {onConnected} />
+  {#if showConnectForm}
+    <SshConnect onClose={() => (showConnectForm = false)} {onConnected} />
   {:else}
     <section class="panel">
       <header class="panel-head">
         <span class="panel-title">ALL SERVERS</span>
-        <button type="button" class="add-server" on:click={() => (showConnect = true)}>
+        <button type="button" class="add-server" on:click={() => (showConnectForm = true)}>
           Add new server
         </button>
       </header>
@@ -35,21 +44,21 @@
             <span class="cell cell-host">{server.host}</span>
             <span class="cell cell-meter">
               <span class="bar">
-                <span class="bar-fill" style="width: {server.cpu}%"></span>
+                <span class="bar-fill" style="width: {meterWidth(server.cpu)}%"></span>
               </span>
-              <span class="bar-value">%{server.cpu}</span>
+              <span class="bar-value">{meterLabel(server.cpu)}</span>
             </span>
             <span class="cell cell-meter">
               <span class="bar">
-                <span class="bar-fill" style="width: {server.ram}%"></span>
+                <span class="bar-fill" style="width: {meterWidth(server.ram)}%"></span>
               </span>
-              <span class="bar-value">%{server.ram}</span>
+              <span class="bar-value">{meterLabel(server.ram)}</span>
             </span>
             <span class="cell cell-meter">
               <span class="bar">
-                <span class="bar-fill" style="width: {server.disk}%"></span>
+                <span class="bar-fill" style="width: {meterWidth(server.disk)}%"></span>
               </span>
-              <span class="bar-value">%{server.disk}</span>
+              <span class="bar-value">{meterLabel(server.disk)}</span>
             </span>
             <span class="cell cell-status">
               <span class="status-dot" data-status={server.status}></span>

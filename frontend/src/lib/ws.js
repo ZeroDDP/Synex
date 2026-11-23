@@ -278,7 +278,7 @@ function applyMetrics(snapshot) {
   const network =
     networkRx === null && networkTx === null
       ? null
-      : ((networkRx ?? 0) + (networkTx ?? 0)) / (1024 * 1024);
+      : ((networkRx ?? 0) + (networkTx ?? 0)) * 8 / 1e6;
   const networkChartValue =
     network === null ? null : Math.max(0, Math.min(100, (network / NETWORK_MAX_MBPS) * 100));
 
