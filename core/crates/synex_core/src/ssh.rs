@@ -256,6 +256,20 @@ impl SshSession {
         Ok(channel)
     }
 
+    // Открываем канал к Unix-сокету на сервере (direct-streamlocal@openssh.com).
+    // Возвращаемый канал — обычный поток: по нему говорят HTTP с Docker-демоном.
+    // Берёт &self: канал можно открыть, не держа сессию занятой на всё время работы.
+    pub async fn open_streamlocal_channel(
+        &self,
+        socket_path: &str,
+    ) -> Result<russh::Channel<client::Msg>> {
+        let channel = self
+            .session
+            .channel_open_direct_streamlocal(socket_path.to_string())
+            .await?;
+        Ok(channel)
+    }
+
     pub async fn close_sftp_channel(&mut self, channel: russh::Channel<client::Msg>) -> Result<()> {
         channel.close().await.map_err(SynexError::Ssh)?;
         Ok(())

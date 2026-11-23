@@ -1,4 +1,5 @@
 // Объявляем модули. Каждый файл в src/ становится модулем.
+pub mod docker;
 pub mod errors;
 pub mod mon;
 pub mod sftp;

@@ -66,6 +66,10 @@ pub enum SynexError {
     // 9. Операцию остановили через действие cancel: это не сбой, а штатная отмена.
     #[error("cancelled")]
     Cancelled,
+
+    // 10. Ошибка Docker. Первый элемент — код из docker_* (он же в начале stderr).
+    #[error("{0}: {1}")]
+    Docker(&'static str, String),
 }
 
 pub type Result<T> = std::result::Result<T, SynexError>;

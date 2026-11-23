@@ -21,10 +21,10 @@ Not implemented yet (SFTP progress frames, SFTP channel reuse, folder transfer, 
 
 The binary picks the transport automatically, based on the OS:
 
-| Platform          | Primary transport  | Environment variable   | Fallback                             |
-| ----------------- | ------------------ | ---------------------- | ------------------------------------ |
-| **Windows**       | Named Pipe         | `RUST_IPC_PIPE_NAME`   | TCP on `RUST_IPC_TCP_FALLBACK_PORT`  |
-| **Linux / macOS** | Unix Domain Socket | `RUST_IPC_SOCKET_PATH` | TCP on `RUST_IPC_TCP_FALLBACK_PORT`  |
+| Platform          | Primary transport  | Environment variable   | Fallback                            |
+| ----------------- | ------------------ | ---------------------- | ----------------------------------- |
+| **Windows**       | Named Pipe         | `RUST_IPC_PIPE_NAME`   | TCP on `RUST_IPC_TCP_FALLBACK_PORT` |
+| **Linux / macOS** | Unix Domain Socket | `RUST_IPC_SOCKET_PATH` | TCP on `RUST_IPC_TCP_FALLBACK_PORT` |
 
 **Initialization order:**
 
@@ -38,14 +38,14 @@ The Unix socket is created with `0600` permissions: only the owner can connect.
 
 All variables are **optional**. Defaults are used when a variable is not set.
 
-| Variable                     | Description                     | Default                                      |
-| ---------------------------- | ------------------------------- | -------------------------------------------- |
-| `RUST_BRIDGE_MODE`           | Operation mode (always `ipc`)    | `ipc`                                        |
-| `RUST_IPC_SOCKET_PATH`       | Unix socket path (Linux/macOS)  | `/tmp/synex_worker.sock`                     |
-| `RUST_IPC_PIPE_NAME`         | Named Pipe name (Windows)       | `\\.\pipe\synex_worker`                      |
-| `RUST_IPC_TCP_FALLBACK_PORT` | TCP fallback port               | `9100`                                       |
-| `RUST_EXECUTABLE_PATH_UNIX`  | Binary path on Unix             | `./app/core/target/release/synex_worker`     |
-| `RUST_EXECUTABLE_PATH_WIN32` | Binary path on Windows          | `./app/core/target/release/synex_worker.exe` |
+| Variable                     | Description                    | Default                                      |
+| ---------------------------- | ------------------------------ | -------------------------------------------- |
+| `RUST_BRIDGE_MODE`           | Operation mode (always `ipc`)  | `ipc`                                        |
+| `RUST_IPC_SOCKET_PATH`       | Unix socket path (Linux/macOS) | `/tmp/synex_worker.sock`                     |
+| `RUST_IPC_PIPE_NAME`         | Named Pipe name (Windows)      | `\\.\pipe\synex_worker`                      |
+| `RUST_IPC_TCP_FALLBACK_PORT` | TCP fallback port              | `9100`                                       |
+| `RUST_EXECUTABLE_PATH_UNIX`  | Binary path on Unix            | `./app/core/target/release/synex_worker`     |
+| `RUST_EXECUTABLE_PATH_WIN32` | Binary path on Windows         | `./app/core/target/release/synex_worker.exe` |
 
 **Example setup in Python:**
 
@@ -150,25 +150,25 @@ The single success status across all actions (including SFTP) is `"ok"`.
 
 **`connection` fields:**
 
-| Field                  | Type        | Description                                                                                     |
-| ---------------------- | ----------- | ----------------------------------------------------------------------------------------------- |
-| `host`                 | string      | Server IP or domain name                                                                        |
-| `port`                 | int         | SSH port (usually 22)                                                                           |
-| `username`             | string      | User name                                                                                       |
-| `key_path`             | string/null | Path to the **private** key on the worker's machine. Used instead of the password when set      |
-| `passphrase`           | string/null | Passphrase for the private key (only with `key_path`)                                           |
-| `password`             | string/null | User password. Used when `key_path` is not set. Never logged                                    |
-| `host_key_fingerprint` | string/null | Trusted server key fingerprint as `SHA256:<base64>`. Optional, see the TOFU part below         |
+| Field                  | Type        | Description                                                                                |
+| ---------------------- | ----------- | ------------------------------------------------------------------------------------------ |
+| `host`                 | string      | Server IP or domain name                                                                   |
+| `port`                 | int         | SSH port (usually 22)                                                                      |
+| `username`             | string      | User name                                                                                  |
+| `key_path`             | string/null | Path to the **private** key on the worker's machine. Used instead of the password when set |
+| `passphrase`           | string/null | Passphrase for the private key (only with `key_path`)                                      |
+| `password`             | string/null | User password. Used when `key_path` is not set. Never logged                               |
+| `host_key_fingerprint` | string/null | Trusted server key fingerprint as `SHA256:<base64>`. Optional, see the TOFU part below     |
 
 If neither `key_path` nor `password` is set, the reply is `status: "error"` with `stderr` set to `Connection failed: SSH internal error: No authentication method provided`.
 
 **Server key verification (TOFU).** The worker keeps no `known_hosts`; trusted fingerprints are stored by the backend and passed in `host_key_fingerprint`:
 
-| Situation                             | Response                                                                                                                                                                     |
-| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `host_key_fingerprint` is not passed  | `status: "error"`, `stderr: "host_key_unknown: unknown host key SHA256:..."`, `payload` contains `fingerprint` and `key_type`. The connection is not continued                  |
-| Passed and matches the server key     | The connection continues and `status: "ok"` is returned                                                                                                                        |
-| Passed but does not match             | `status: "error"`, `stderr: "host_key_mismatch: expected X, got Y"`, `payload` contains `fingerprint` (received) and `expected_fingerprint` (expected). The connection is not continued |
+| Situation                            | Response                                                                                                                                                                                |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `host_key_fingerprint` is not passed | `status: "error"`, `stderr: "host_key_unknown: unknown host key SHA256:..."`, `payload` contains `fingerprint` and `key_type`. The connection is not continued                          |
+| Passed and matches the server key    | The connection continues and `status: "ok"` is returned                                                                                                                                 |
+| Passed but does not match            | `status: "error"`, `stderr: "host_key_mismatch: expected X, got Y"`, `payload` contains `fingerprint` (received) and `expected_fingerprint` (expected). The connection is not continued |
 
 Backend flow:
 
@@ -308,23 +308,23 @@ The worker runs a metrics-collection command on the server and parses its output
 
 JSON fields in `stdout`:
 
-| Field                  | Type        | Description                                                                                       |
-| ---------------------- | ----------- | ------------------------------------------------------------------------------------------------- |
-| `ok`                   | bool        | `true` if the metrics were parsed                                                                 |
-| `cpu_usage_percent`    | float       | CPU load in percent. `0.0` on the first call in a session, because there is no previous sample    |
-| `mem_total_kb`         | int         | Total memory, KiB                                                                                 |
-| `mem_available_kb`     | int         | Available memory, KiB                                                                             |
-| `mem_used_kb`          | int         | Used memory, KiB                                                                                  |
-| `mem_usage_percent`    | float       | Memory usage in percent                                                                           |
-| `net_rx_bytes_total`   | int/null    | Bytes received on all interfaces except `lo` (counter from `/proc/net/dev`)                       |
-| `net_tx_bytes_total`   | int/null    | Bytes sent on all interfaces except `lo`                                                          |
-| `net_rx_bytes_per_sec` | float/null  | Receive rate, bytes/s. Delta since the previous call in this session. `null` on the first call    |
-| `net_tx_bytes_per_sec` | float/null  | Send rate, bytes/s. Same rules, `null` on the first call                                          |
-| `disk_total_kb`        | int/null    | Size of the root filesystem `/`, KiB (`df -P -k /`)                                               |
-| `disk_used_kb`         | int/null    | Used space on `/`, KiB                                                                            |
-| `disk_available_kb`    | int/null    | Available space on `/`, KiB                                                                       |
-| `disk_usage_percent`   | float/null  | `/` usage in percent: `used / (used + available) * 100`, like the Capacity column in `df`         |
-| `error`                | string/null | Parse error text when `ok` is `false`                                                             |
+| Field                  | Type        | Description                                                                                    |
+| ---------------------- | ----------- | ---------------------------------------------------------------------------------------------- |
+| `ok`                   | bool        | `true` if the metrics were parsed                                                              |
+| `cpu_usage_percent`    | float       | CPU load in percent. `0.0` on the first call in a session, because there is no previous sample |
+| `mem_total_kb`         | int         | Total memory, KiB                                                                              |
+| `mem_available_kb`     | int         | Available memory, KiB                                                                          |
+| `mem_used_kb`          | int         | Used memory, KiB                                                                               |
+| `mem_usage_percent`    | float       | Memory usage in percent                                                                        |
+| `net_rx_bytes_total`   | int/null    | Bytes received on all interfaces except `lo` (counter from `/proc/net/dev`)                    |
+| `net_tx_bytes_total`   | int/null    | Bytes sent on all interfaces except `lo`                                                       |
+| `net_rx_bytes_per_sec` | float/null  | Receive rate, bytes/s. Delta since the previous call in this session. `null` on the first call |
+| `net_tx_bytes_per_sec` | float/null  | Send rate, bytes/s. Same rules, `null` on the first call                                       |
+| `disk_total_kb`        | int/null    | Size of the root filesystem `/`, KiB (`df -P -k /`)                                            |
+| `disk_used_kb`         | int/null    | Used space on `/`, KiB                                                                         |
+| `disk_available_kb`    | int/null    | Available space on `/`, KiB                                                                    |
+| `disk_usage_percent`   | float/null  | `/` usage in percent: `used / (used + available) * 100`, like the Capacity column in `df`      |
+| `error`                | string/null | Parse error text when `ok` is `false`                                                          |
 
 Notes:
 
@@ -397,9 +397,9 @@ Stops the action currently running on a session: `ssh_exec`, `sftp_upload_file` 
 
 What cancellation actually does:
 
-| Action                                    | What happens                                                                 |
-| ----------------------------------------- | ---------------------------------------------------------------------------- |
-| `ssh_exec`                                | `TERM` is sent to the remote process, `KILL` 3 seconds later. `exit_code: 143` |
+| Action                                    | What happens                                                                        |
+| ----------------------------------------- | ----------------------------------------------------------------------------------- |
+| `ssh_exec`                                | `TERM` is sent to the remote process, `KILL` 3 seconds later. `exit_code: 143`      |
 | `sftp_upload_file` / `sftp_download_file` | Copying stops immediately and the files are closed. The partial file is not deleted |
 
 Ordering matters: if cancellation arrives before the command starts (while it waits for the session), the command is not started at all. The worker reads IPC separately from actions, so `cancel` is received while a command or transfer is still running.
@@ -508,25 +508,25 @@ All errors are returned in a response with `status: "error"`; the reason is in `
 
 ### IPC-level errors
 
-| Message                           | Cause                                                        | What to do                                |
-| --------------------------------- | ------------------------------------------------------------ | ----------------------------------------- |
-| `frame too large: N bytes`        | Frame header exceeds `16 MiB`. The worker closes the connection | Reconnect, send a smaller request      |
-| `Unknown action: <name>`          | Unknown `action` value                                        | Check the action name in sections 5 and 8.4 |
-| `Missing 'connection' in payload` | `ssh_connect` has no `connection`                             | Pass `connection`                         |
+| Message                           | Cause                                                           | What to do                                  |
+| --------------------------------- | --------------------------------------------------------------- | ------------------------------------------- |
+| `frame too large: N bytes`        | Frame header exceeds `16 MiB`. The worker closes the connection | Reconnect, send a smaller request           |
+| `Unknown action: <name>`          | Unknown `action` value                                          | Check the action name in sections 5 and 8.4 |
+| `Missing 'connection' in payload` | `ssh_connect` has no `connection`                               | Pass `connection`                           |
 
 If a frame cannot be unpacked as MessagePack, the worker replies with `id: "bad_msgpack"` and `stderr: "Failed to unpack: ..."`; the connection stays open and the worker continues with the next frame.
 
 ### SSH errors
 
-| Message (stderr)                                                           | Cause                                                            | What to do                                                      |
-| -------------------------------------------------------------------------- | ---------------------------------------------------------------- | --------------------------------------------------------------- |
-| `Session dont founded by key. Create session first!`                       | No session with this `id` (no `ssh_connect`, or it failed)       | Run `ssh_connect` with this `id`                                |
-| `host_key_unknown: unknown host key SHA256:...`                            | `host_key_fingerprint` was not passed                            | Show the fingerprint to the user, retry with it                 |
-| `host_key_mismatch: expected X, got Y`                                     | The server key does not match the stored one                     | Do not connect. Check whether the server changed or is being attacked |
-| `Connection failed: SSH authentication failed: access denied`              | The server rejected the key or password                          | Check the login, password, key and `passphrase`                 |
-| `Connection failed: SSH internal error: No authentication method provided` | Neither `key_path` nor `password` was passed                     | Pass one of them                                                |
-| `Connection failed: ...`                                                   | Network, port, SSH timeout                                       | Check `host`, `port` and server reachability                    |
-| `Session not found`                                                        | `ssh_disconnect` for an unknown `id`                             | Nothing, the session is already closed                          |
+| Message (stderr)                                                           | Cause                                                      | What to do                                                            |
+| -------------------------------------------------------------------------- | ---------------------------------------------------------- | --------------------------------------------------------------------- |
+| `Session dont founded by key. Create session first!`                       | No session with this `id` (no `ssh_connect`, or it failed) | Run `ssh_connect` with this `id`                                      |
+| `host_key_unknown: unknown host key SHA256:...`                            | `host_key_fingerprint` was not passed                      | Show the fingerprint to the user, retry with it                       |
+| `host_key_mismatch: expected X, got Y`                                     | The server key does not match the stored one               | Do not connect. Check whether the server changed or is being attacked |
+| `Connection failed: SSH authentication failed: access denied`              | The server rejected the key or password                    | Check the login, password, key and `passphrase`                       |
+| `Connection failed: SSH internal error: No authentication method provided` | Neither `key_path` nor `password` was passed               | Pass one of them                                                      |
+| `Connection failed: ...`                                                   | Network, port, SSH timeout                                 | Check `host`, `port` and server reachability                          |
+| `Session not found`                                                        | `ssh_disconnect` for an unknown `id`                       | Nothing, the session is already closed                                |
 
 `ssh_connect` errors not listed in the table come with the `Connection failed: ` prefix (network, port, timeout). `ssh_exec` and SFTP errors come as `SSH protocol error: ...` (a russh error) or `SSH internal error: ...`. SFTP errors additionally start with an `sftp_*` code.
 
@@ -622,31 +622,31 @@ Example:
 
 ### 8.4. SFTP action table
 
-| Action               | Payload                                          | Successful `stdout`  |
-| -------------------- | ------------------------------------------------ | -------------------- |
-| `sftp_list_dir`      | `remote_path`                                    | JSON array of entries |
-| `sftp_stat`          | `remote_path`                                    | JSON for one entry    |
-| `sftp_create_dir`    | `remote_path`                                    | empty                 |
-| `sftp_remove_file`   | `remote_path`                                    | empty                 |
-| `sftp_remove_dir`    | `remote_path` (empty directory only)             | empty                 |
-| `sftp_upload_file`   | `local_path`, `remote_path`                      | empty                 |
-| `sftp_download_file` | `remote_path`, `local_path`                      | empty                 |
-| `sftp_move_file`     | `remote_path` (source), `destination_path`       | empty                 |
-| `sftp_move_dir`      | `remote_path` (source directory), `destination_path` | empty             |
-| `sftp_copy_file`     | `remote_path` (source), `destination_path`       | empty                 |
+| Action               | Payload                                              | Successful `stdout`   |
+| -------------------- | ---------------------------------------------------- | --------------------- |
+| `sftp_list_dir`      | `remote_path`                                        | JSON array of entries |
+| `sftp_stat`          | `remote_path`                                        | JSON for one entry    |
+| `sftp_create_dir`    | `remote_path`                                        | empty                 |
+| `sftp_remove_file`   | `remote_path`                                        | empty                 |
+| `sftp_remove_dir`    | `remote_path` (empty directory only)                 | empty                 |
+| `sftp_upload_file`   | `local_path`, `remote_path`                          | empty                 |
+| `sftp_download_file` | `remote_path`, `local_path`                          | empty                 |
+| `sftp_move_file`     | `remote_path` (source), `destination_path`           | empty                 |
+| `sftp_move_dir`      | `remote_path` (source directory), `destination_path` | empty                 |
+| `sftp_copy_file`     | `remote_path` (source), `destination_path`           | empty                 |
 
 Entry fields in `sftp_list_dir` and `sftp_stat`:
 
-| Field         | Type        | Description                                            |
-| ------------- | ----------- | ------------------------------------------------------ |
-| `Type`        | string      | `folder`, `file` or `symlink`                          |
-| `name`        | string      | File or directory name                                 |
-| `size`        | int         | Size in bytes                                          |
-| `rights`      | string      | Permissions as `rwxr-xr-x` (9 characters)               |
-| `mtime`       | int/null    | Modification time, Unix seconds                        |
-| `uid`         | int/null    | Owner (numeric ID)                                     |
-| `gid`         | int/null    | Group (numeric ID)                                     |
-| `link_target` | string/null | Symlink target; `null` for all other entries           |
+| Field         | Type        | Description                                  |
+| ------------- | ----------- | -------------------------------------------- |
+| `Type`        | string      | `folder`, `file` or `symlink`                |
+| `name`        | string      | File or directory name                       |
+| `size`        | int         | Size in bytes                                |
+| `rights`      | string      | Permissions as `rwxr-xr-x` (9 characters)    |
+| `mtime`       | int/null    | Modification time, Unix seconds              |
+| `uid`         | int/null    | Owner (numeric ID)                           |
+| `gid`         | int/null    | Group (numeric ID)                           |
+| `link_target` | string/null | Symlink target; `null` for all other entries |
 
 All fields are always present; missing values are `null`. The success status for every SFTP action is `"ok"`.
 
@@ -654,14 +654,14 @@ All fields are always present; missing values are `null`. The success status for
 
 SFTP errors start with a code from `SftpErrorKind`:
 
-| Code                     | When it happens                                                 | What to do                              |
-| ------------------------ | --------------------------------------------------------------- | --------------------------------------- |
-| `sftp_unavailable`       | The server refused the `sftp` subsystem or did not answer       | Check whether SFTP is enabled on the server |
-| `sftp_not_found`         | The path does not exist                                         | Check the path                          |
-| `sftp_permission_denied` | No rights to read, write or delete                              | Check the user's permissions on the server |
-| `sftp_exists`            | The target already exists (`create_dir`, `move`)                | Pick another name or delete the target  |
-| `sftp_not_a_directory`   | A directory was expected but the path is a file                 | Check the path type                     |
-| `sftp_failed`            | Other SFTP server errors                                        | Read the text after the code            |
+| Code                     | When it happens                                           | What to do                                  |
+| ------------------------ | --------------------------------------------------------- | ------------------------------------------- |
+| `sftp_unavailable`       | The server refused the `sftp` subsystem or did not answer | Check whether SFTP is enabled on the server |
+| `sftp_not_found`         | The path does not exist                                   | Check the path                              |
+| `sftp_permission_denied` | No rights to read, write or delete                        | Check the user's permissions on the server  |
+| `sftp_exists`            | The target already exists (`create_dir`, `move`)          | Pick another name or delete the target      |
+| `sftp_not_a_directory`   | A directory was expected but the path is a file           | Check the path type                         |
+| `sftp_failed`            | Other SFTP server errors                                  | Read the text after the code                |
 
 Example: `stderr: "sftp_not_found: Failed to read remote directory: No such file"`.
 
@@ -669,7 +669,7 @@ Errors that occur before SFTP is involved (for example, a local file cannot be o
 
 ### 8.6. The client in `rust_tests.py`
 
-`core/rust_tests.py` contains a `SynexClient` class with: `connect_ssh` (with `host_key_fingerprint`), `ssh_exec`, `monitor`, `cancel`, `send_only`/`recv_frame` (for concurrent cancellation), `list_dir`, `sftp_stat`, `sftp_create_dir`, `sftp_remove_file`, `sftp_remove_dir`, `sftp_download_file`, `sftp_upload_file`, `sftp_move_file`, `sftp_move_dir`, `sftp_copy_file`, `disconnect_ssh`, `close_ssh`. The client supports Named Pipe, Unix socket and TCP fallback.
+`core/rust_tests.py` contains a `SynexClient` class with: `connect_ssh` (with `host_key_fingerprint`), `ssh_exec`, `monitor`, `cancel`, `send_only`/`recv_frame` (for concurrent cancellation), `docker_info`, `docker_containers`, `docker_images`, `docker_stats`, `docker_logs`, `docker_container_action`, `docker_container_remove`, `list_dir`, `sftp_stat`, `sftp_create_dir`, `sftp_remove_file`, `sftp_remove_dir`, `sftp_download_file`, `sftp_upload_file`, `sftp_move_file`, `sftp_move_dir`, `sftp_copy_file`, `disconnect_ssh`, `close_ssh`. The client supports Named Pipe, Unix socket and TCP fallback.
 
 Test groups:
 
@@ -679,6 +679,7 @@ Test groups:
 - `run_sftp_tests`: create, upload, download, move files, move a directory (`sftp_move_dir`: contents move with the directory, codes `sftp_not_found`, `sftp_not_a_directory`, `sftp_exists`), copy, remove;
 - `run_sftp_error_tests`: SFTP error codes, `sftp_stat` (file, directory, symlink), `list_dir` fields;
 - `run_cancel_tests`: `cancel` without `target_id` and against a non-existent target — errors; `sleep 100` is cancelled (`status: "cancelled"`, reply within seconds); a file upload is cancelled and answers `cancelled`;
+- `run_docker_tests`: `docker_info` (envelope `ok`, status from the allowed set), `docker_containers`/`docker_images` (arrays, `ContainerInfo` fields), `docker_stats`. When Docker is unavailable on the server, the remaining Docker checks are skipped;
 - `run_socket_permission_test`: `0600` permissions on the Unix socket (unix only);
 - `run_frame_limit_test`: a frame above `16 MiB`.
 
@@ -690,20 +691,20 @@ All remote paths live under `/root/synex_test_<random>`. Deletion checks the pre
 2. Start the worker separately. `__main__` uses `SynexClient(spawn_worker=False)`, so the tests do not spawn it.
 3. Set the environment variables:
 
-| Variable                  | Required    | Default | Description                                    |
-| ------------------------- | ----------- | ------- | ---------------------------------------------- |
-| `SSH_TEST_HOST`           | —           | —       | Not read: the address is hardcoded in `load_config()` |
-| `SSH_TEST_PORT`           | no          | `22`    | SSH port                                       |
-| `SSH_TEST_USER`           | no          | `root`  | User name                                      |
-| `SSH_TEST_PASS`           | —           | —       | Not read: the password is hardcoded in `load_config()` |
-| `SSH_TEST_KEY`            | one of two  | —       | Path to the private key                        |
-| `SSH_TEST_KEY_PASSPHRASE` | no          | —       | Key passphrase                                  |
+| Variable                  | Required   | Default | Description                                            |
+| ------------------------- | ---------- | ------- | ------------------------------------------------------ |
+| `SSH_TEST_HOST`           | —          | —       | Not read: the address is hardcoded in `load_config()`  |
+| `SSH_TEST_PORT`           | no         | `22`    | SSH port                                               |
+| `SSH_TEST_USER`           | no         | `root`  | User name                                              |
+| `SSH_TEST_PASS`           | —          | —       | Not read: the password is hardcoded in `load_config()` |
+| `SSH_TEST_KEY`            | one of two | —       | Path to the private key                                |
+| `SSH_TEST_KEY_PASSPHRASE` | no         | —       | Key passphrase                                         |
 
 If `load_config()` has neither a password nor a key, the script exits with code `2`.
 
 4. Run from the `core` directory: `python rust_tests.py`. Exit code `0` means all checks passed, `1` means some failed.
 
-Order: TOFU → exec → SFTP → SFTP errors → cancel → disconnect → socket permissions → frame limit. The frame limit check goes last, because the connection is unusable afterwards.
+Order: TOFU → exec → SFTP → SFTP errors → cancel → Docker → disconnect → socket permissions → frame limit. The frame limit check goes last, because the connection is unusable afterwards.
 
 **Important:** the tests run against a real server and create/remove files under `/root/synex_test_*`. Run them only against a test server.
 
@@ -728,14 +729,111 @@ The tests do not cover this scenario automatically.
 - `0600` permissions on the Unix socket;
 - SFTP error codes, `sftp_stat`, `list_dir` entry fields, unified `ok` status;
 - directory move (`sftp_move_dir`);
-- action cancellation: `cancel` with `target_id`, `status: "cancelled"`, `ssh_exec` — TERM → KILL after 3 s, SFTP transfers stop immediately; IPC is read concurrently with actions (responses are written under a shared `Mutex`); on IPC disconnect all actions are cancelled.
+- action cancellation: `cancel` with `target_id`, `status: "cancelled"`, `ssh_exec` — TERM → KILL after 3 s, SFTP transfers stop immediately; IPC is read concurrently with actions (responses are written under a shared `Mutex`); on IPC disconnect all actions are cancelled;
+- Docker over an SSH tunnel to `/var/run/docker.sock` (bollard, `direct-streamlocal@openssh.com`), `docker_*` actions and error codes, live logs via `docker_logs` with `follow`.
 
 **Not done:**
 
 - **SFTP progress** (intermediate frames with `status: "progress"`).
 - **SFTP channel reuse** within a session.
 - **Folder transfer** (`sftp_upload_dir`, `sftp_download_dir`).
-- **Docker** (via bollard and an SSH tunnel to `docker.sock`).
 - **musl and macOS builds**, Windows exe build with SFTP.
 
-**Out of the worker's scope:** the backend does not pass `host_key_fingerprint` yet, so TOFU only works end to end once the backend is updated.
+**Out of the worker's scope:** the backend does not pass `host_key_fingerprint` yet (TOFU), and it still manages Docker through the `docker` CLI.
+
+## 10. Docker
+
+Docker runs on the remote server. The worker does not expose any port: it opens a `direct-streamlocal@openssh.com` channel to `/var/run/docker.sock` inside the same SSH session and speaks plain HTTP over it (client: `bollard` with a custom transport).
+
+How it works:
+
+- Every HTTP request opens its own channel to the socket, so the session is busy only while the channel opens, not for the whole action. A long `docker_logs -f` therefore does not block `monitor` or `ssh_exec`.
+- The request `id` is the session `id` from `ssh_connect`.
+- Successful `stdout` is JSON shaped like the backend models (`backend/app/plugins/docker/schemas.py`).
+- Errors: envelope `status: "error"` with a `docker_*` code at the start of `stderr` (see 10.5).
+- Socket path is `/var/run/docker.sock` (the `DEFAULT_SOCKET` constant).
+
+### 10.1. Actions
+
+| Action                    | Payload                                | Successful `stdout`                                                                               |
+| ------------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `docker_info`             | —                                      | `DockerInfo`: `status`, `detail`, `client_version`, `server_version`, `api_version`, `os`, `arch` |
+| `docker_containers`       | `all` (bool)                           | array of `ContainerInfo`                                                                          |
+| `docker_container_action` | `container`, `action`, `timeout`       | `{container, action, output}` where `container` is the state after the action                     |
+| `docker_container_remove` | `container`, `force`, `volumes`        | empty                                                                                             |
+| `docker_logs`             | `container`, `tail`, `since`, `follow` | `{lines, next_since}`                                                                             |
+| `docker_stats`            | `container` (optional)                 | array of `ContainerStatsInfo`                                                                     |
+| `docker_images`           | —                                      | array of `ImageInfo`                                                                              |
+
+`action` for `docker_container_action`: `start`, `stop`, `restart`, `pause`, `unpause`, `kill`. `timeout` is Docker's grace period for `stop`/`restart` (seconds), not a request timeout: the request itself is bounded separately (60 s, exceeding it gives `docker_timeout`).
+
+`docker_stats` without `container` covers all running containers.
+
+### 10.2. Response fields
+
+`ContainerInfo` (same as the backend):
+
+| Field             | Type        | Description                                                                |
+| ----------------- | ----------- | -------------------------------------------------------------------------- |
+| `id`              | string      | Full container ID (64 chars)                                               |
+| `name`            | string      | Name without the leading `/`                                               |
+| `names`           | string[]    | All names                                                                  |
+| `image`           | string      | Image                                                                      |
+| `command`         | string      | Startup command                                                            |
+| `created_at`      | string/null | RFC3339, UTC                                                               |
+| `state`           | string      | `created`, `running`, `paused`, `restarting`, `removing`, `exited`, `dead` |
+| `status`          | string      | As in `docker ps`: `Up 5 minutes (healthy)`                                |
+| `health`          | string/null | `healthy`, `unhealthy`, `starting`                                         |
+| `exit_code`       | int/null    | Exit code of a stopped container                                           |
+| `ports`           | object[]    | `{container_port, protocol, host_ip, host_port}`, all strings              |
+| `labels`          | object      | Container labels                                                           |
+| `networks`        | string[]    | Network names                                                              |
+| `compose_project` | string/null | `com.docker.compose.project` label                                         |
+| `compose_service` | string/null | `com.docker.compose.service` label                                         |
+
+`LogLineInfo`: `{time, stream, text}`, where `time` is RFC3339 with nanoseconds (UTC) and `stream` is `stdout` or `stderr`. `next_since` is the time of the last line; pass it back as `since` in the next request.
+
+`since` accepts Unix seconds (`1700000000`), RFC3339 (`2026-11-06T12:00:00Z`) and durations (`30s`, `10m`, `1h30m`). `tail` is a line count (all lines by default).
+
+`ContainerStatsInfo`: `id`, `name`, `cpu_percent` (100 = one full core), `memory_used`, `memory_limit`, `memory_percent`, `net_rx`, `net_tx`, `block_read`, `block_write`, `pids`. Byte values are numbers.
+
+CPU is computed from two consecutive Docker samples (about one second apart); if the second sample does not arrive, `cpu_percent` is `null`.
+
+`ImageInfo`: `id` (without the `sha256:` prefix), `repository`, `tag`, `digest`, `created_at`, `size` (bytes).
+
+### 10.3. `docker_info` and its statuses
+
+This is an answer to a question, not a failure, so the envelope is always `status: "ok"` and the result is the `status` field inside the JSON:
+
+| `status`             | When                                                                       |
+| -------------------- | -------------------------------------------------------------------------- |
+| `ok`                 | The daemon answered; `server_version`/`api_version` are filled             |
+| `not_installed`      | No `/var/run/docker.sock` and no `docker` binary on the server             |
+| `permission_denied`  | The socket exists but the SSH user has no access (`test -w`)               |
+| `daemon_unavailable` | The socket exists (or `docker` is installed) but the daemon did not answer |
+
+The probe runs through `ssh_exec` (`test -S`, `test -w`, `command -v docker`), because an SSH channel-open failure carries no errno text.
+
+### 10.4. Live logs (`docker_logs` with `follow: true`)
+
+- Intermediate frames: `status: "progress"` with `stdout` set to JSON `{lines, next_since}` (new lines only).
+- Final frame: `status: "cancelled"` (stopped by `cancel` with `target_id` equal to the session id) or `status: "ok"` (the daemon closed the stream, e.g. the container stopped).
+- The client must accept several frames with the same `id`.
+
+### 10.5. Error codes
+
+| Code                         | When                                                                        |
+| ---------------------------- | --------------------------------------------------------------------------- |
+| `docker_not_installed`       | Docker is not installed                                                     |
+| `docker_permission_denied`   | No access to the socket/daemon                                              |
+| `docker_daemon_unavailable`  | The daemon is unavailable                                                   |
+| `docker_container_not_found` | No such container                                                           |
+| `docker_container_conflict`  | The action does not fit the state (`is not running`, `already paused`, ...) |
+| `docker_timeout`             | The action exceeded its limit                                               |
+| `docker_command_failed`      | Other daemon errors                                                         |
+
+Example: `stderr: "docker_container_not_found: No such container: web"`.
+
+### 10.6. Limitations
+
+Not implemented (out of scope for this task): a `docker_logs` follow stream does not survive an SSH reconnect, and `docker_stats` polls containers one by one (the Docker API has no bulk `stats`).

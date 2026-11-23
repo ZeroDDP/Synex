@@ -667,7 +667,7 @@ SFTP-действия используют ту же SSH-сессию, что и
 
 ### 8.6. Клиент из `rust_tests.py`
 
-`core/rust_tests.py` содержит класс `SynexClient` с методами: `connect_ssh` (с `host_key_fingerprint`), `ssh_exec`, `monitor`, `cancel`, `send_only`/`recv_frame` (для параллельной отмены), `list_dir`, `sftp_stat`, `sftp_create_dir`, `sftp_remove_file`, `sftp_remove_dir`, `sftp_download_file`, `sftp_upload_file`, `sftp_move_file`, `sftp_move_dir`, `sftp_copy_file`, `disconnect_ssh`, `close_ssh`. Клиент поддерживает Named Pipe, Unix-сокет и TCP fallback. Документация протокола: [README.ru.md](README.ru.md) (рус.), [README.md](README.md) (англ.).
+`core/rust_tests.py` содержит класс `SynexClient` с методами: `connect_ssh` (с `host_key_fingerprint`), `ssh_exec`, `monitor`, `cancel`, `send_only`/`recv_frame` (для параллельной отмены), `docker_info`, `docker_containers`, `docker_images`, `docker_stats`, `docker_logs`, `docker_container_action`, `docker_container_remove`, `list_dir`, `sftp_stat`, `sftp_create_dir`, `sftp_remove_file`, `sftp_remove_dir`, `sftp_download_file`, `sftp_upload_file`, `sftp_move_file`, `sftp_move_dir`, `sftp_copy_file`, `disconnect_ssh`, `close_ssh`. Клиент поддерживает Named Pipe, Unix-сокет и TCP fallback. Документация протокола: [README.ru.md](README.ru.md) (рус.), [README.md](README.md) (англ.).
 
 Наборы проверок:
 
@@ -677,6 +677,7 @@ SFTP-действия используют ту же SSH-сессию, что и
 - `run_sftp_tests`: создание, загрузка, скачивание, перемещение файлов, перемещение папки (`sftp_move_dir`: содержимое едет вместе с папкой, коды `sftp_not_found`, `sftp_not_a_directory`, `sftp_exists`), копирование, удаление;
 - `run_sftp_error_tests`: коды ошибок SFTP, `sftp_stat` (файл, папка, симлинк), поля `list_dir`;
 - `run_cancel_tests`: `cancel` без `target_id` и по несуществующей цели — ошибки; `sleep 100` отменяется (`status: "cancelled"`, ответ за секунды); загрузка файла отменяется, ответ `cancelled`;
+- `run_docker_tests`: `docker_info` (конверт `ok`, статус из допустимых), `docker_containers`/`docker_images` (массивы, поля `ContainerInfo`), `docker_stats`. Если Docker на сервере недоступен, остальные Docker-проверки пропускаются;
 - `run_socket_permission_test`: права `0600` у Unix-сокета (только unix);
 - `run_frame_limit_test`: кадр сверх `16 MiB`.
 
@@ -701,7 +702,7 @@ SFTP-действия используют ту же SSH-сессию, что и
 
 4. Запустить из папки `core`: `python rust_tests.py`. Код выхода `0` — все проверки прошли, `1` — есть провалы.
 
-Порядок: TOFU → exec → SFTP → SFTP-ошибки → отмена → disconnect → права сокета → лимит кадра. Проверка лимита кадра последняя, потому что после неё соединение уже закрыто.
+Порядок: TOFU → exec → SFTP → SFTP-ошибки → отмена → Docker → disconnect → права сокета → лимит кадра. Проверка лимита кадра последняя, потому что после неё соединение уже закрыто.
 
 **Важно:** тесты работают на реальном сервере и создают/удаляют файлы в `/root/synex_test_*`. Запускайте их только на тестовом сервере.
 
@@ -726,14 +727,111 @@ SFTP-действия используют ту же SSH-сессию, что и
 - права `0600` у Unix-сокета;
 - коды ошибок SFTP, `sftp_stat`, поля записей `list_dir`, единый статус `ok`;
 - перемещение папки (`sftp_move_dir`);
-- отмена действий: `cancel` с `target_id`, `status: "cancelled"`, `ssh_exec` — TERM → KILL через 3 с, SFTP-передачи обрываются сразу; IPC читается параллельно с выполнением действий (запись ответов под общим `Mutex`); при обрыве IPC все действия отменяются.
+- отмена действий: `cancel` с `target_id`, `status: "cancelled"`, `ssh_exec` — TERM → KILL через 3 с, SFTP-передачи обрываются сразу; IPC читается параллельно с выполнением действий (запись ответов под общим `Mutex`); при обрыве IPC все действия отменяются;
+- Docker через SSH-туннель к `/var/run/docker.sock` (bollard, `direct-streamlocal@openssh.com`), действия `docker_*`, коды `docker_*`, живой лог через `docker_logs` с `follow`.
 
 **Не сделано:**
 
 - **Прогресс SFTP** (промежуточные кадры `status: "progress"`).
 - **Переиспользование SFTP-канала** в рамках сессии.
 - **Передача папок** (`sftp_upload_dir`, `sftp_download_dir`).
-- **Docker** (через bollard и SSH-туннель к `docker.sock`).
 - **Сборки под musl и macOS**, сборка Windows-exe с SFTP.
 
-**Вне зоны воркера:** backend пока не передаёт `host_key_fingerprint`, поэтому TOFU полностью работает только при доработке backend.
+**Вне зоны воркера:** backend пока не передаёт `host_key_fingerprint` (TOFU) и пока управляет Docker через `docker` CLI.
+
+## 10. Docker
+
+Docker работает на удалённом сервере. Воркер не открывает порт наружу: в той же SSH-сессии открывается канал `direct-streamlocal@openssh.com` к `/var/run/docker.sock`, и по нему идёт обычный HTTP (клиент — `bollard`, custom transport).
+
+Как устроено:
+
+- На каждый HTTP-запрос открывается свой канал к сокету: сессия занята только на время открытия, а не на всё действие. Поэтому долгий `docker_logs -f` не блокирует `monitor` и `ssh_exec`.
+- `id` запроса — тот же `id` сессии, что в `ssh_connect`.
+- Успешный `stdout` — JSON по форме backend (`backend/app/plugins/docker/schemas.py`).
+- Ошибки: конверт `status: "error"`, в начале `stderr` — код `docker_*` (см. 10.5).
+- Путь сокета — `/var/run/docker.sock` (константа `DEFAULT_SOCKET`).
+
+### 10.1. Действия
+
+| Действие                  | Payload                                | Успешный `stdout`                                                                                        |
+| ------------------------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `docker_info`             | —                                      | объект `DockerInfo`: `status`, `detail`, `client_version`, `server_version`, `api_version`, `os`, `arch` |
+| `docker_containers`       | `all` (bool)                           | массив `ContainerInfo`                                                                                   |
+| `docker_container_action` | `container`, `action`, `timeout`       | объект `{container, action, output}` — `container` это состояние после действия                          |
+| `docker_container_remove` | `container`, `force`, `volumes`        | пусто                                                                                                    |
+| `docker_logs`             | `container`, `tail`, `since`, `follow` | объект `{lines, next_since}`                                                                             |
+| `docker_stats`            | `container` (опционально)              | массив `ContainerStatsInfo`                                                                              |
+| `docker_images`           | —                                      | массив `ImageInfo`                                                                                       |
+
+`action` у `docker_container_action`: `start`, `stop`, `restart`, `pause`, `unpause`, `kill`. `timeout` — это grace-период Docker для `stop`/`restart` (секунды), а не таймаут запроса: сам запрос ограничен сверху (60 с, а `docker_timeout` — когда превышен).
+
+`docker_stats` без `container` берёт все запущенные контейнеры.
+
+### 10.2. Поля ответов
+
+`ContainerInfo` (как в backend):
+
+| Поле              | Тип         | Описание                                                                   |
+| ----------------- | ----------- | -------------------------------------------------------------------------- |
+| `id`              | string      | Полный ID контейнера (64 символа)                                          |
+| `name`            | string      | Имя без ведущего `/`                                                       |
+| `names`           | string[]    | Все имена                                                                  |
+| `image`           | string      | Образ                                                                      |
+| `command`         | string      | Команда запуска                                                            |
+| `created_at`      | string/null | RFC3339, UTC                                                               |
+| `state`           | string      | `created`, `running`, `paused`, `restarting`, `removing`, `exited`, `dead` |
+| `status`          | string      | Как в `docker ps`: `Up 5 minutes (healthy)`                                |
+| `health`          | string/null | `healthy`, `unhealthy`, `starting`                                         |
+| `exit_code`       | int/null    | Код выхода остановленного контейнера                                       |
+| `ports`           | object[]    | `{container_port, protocol, host_ip, host_port}`, все строки               |
+| `labels`          | object      | Метки контейнера                                                           |
+| `networks`        | string[]    | Имена сетей                                                                |
+| `compose_project` | string/null | Метка `com.docker.compose.project`                                         |
+| `compose_service` | string/null | Метка `com.docker.compose.service`                                         |
+
+`LogLineInfo`: `{time, stream, text}`, где `time` — RFC3339 с наносекундами (UTC), `stream` — `stdout` или `stderr`. `next_since` — время последней строки, его передают в `since` следующего запроса.
+
+`since` принимает unix-секунды (`1700000000`), RFC3339 (`2026-11-06T12:00:00Z`) и длительность (`30s`, `10m`, `1h30m`). `tail` — число строк (по умолчанию все).
+
+`ContainerStatsInfo`: `id`, `name`, `cpu_percent` (100 = одно ядро), `memory_used`, `memory_limit`, `memory_percent`, `net_rx`, `net_tx`, `block_read`, `block_write`, `pids`. Байты — числа.
+
+CPU считается по двум замерам Docker подряд (около секунды): если второй замер не пришёл, `cpu_percent` будет `null`.
+
+`ImageInfo`: `id` (без `sha256:`), `repository`, `tag`, `digest`, `created_at`, `size` (байты).
+
+### 10.3. `docker_info` и его статусы
+
+Это ответ на вопрос, а не сбой, поэтому конверт всегда `status: "ok"`, а результат — в `status` внутри JSON:
+
+| `status`             | Когда                                                     |
+| -------------------- | --------------------------------------------------------- |
+| `ok`                 | Демон ответил, `server_version`/`api_version` заполнены   |
+| `not_installed`      | Нет `/var/run/docker.sock` и нет `docker` на сервере      |
+| `permission_denied`  | Сокет есть, но у пользователя SSH нет прав (`test -w`)    |
+| `daemon_unavailable` | Сокет есть (или `docker` установлен), но демон не ответил |
+
+Проверка делается через `ssh_exec` (`test -S`, `test -w`, `command -v docker`), потому что ошибка открытия канала SSH не несёт текста с errno.
+
+### 10.4. Живой лог (`docker_logs` с `follow: true`)
+
+- Промежуточные кадры: `status: "progress"`, `stdout` — JSON `{lines, next_since}` (только новые строки).
+- Финал: `status: "cancelled"` (если остановили через `cancel` с `target_id` = id сессии) или `status: "ok"` (поток закрыл сам демон, например контейнер остановился).
+- Заказчик должен уметь принимать кадры с одинаковым `id` много раз.
+
+### 10.5. Коды ошибок
+
+| Код                          | Когда                                                                    |
+| ---------------------------- | ------------------------------------------------------------------------ |
+| `docker_not_installed`       | Docker не установлен                                                     |
+| `docker_permission_denied`   | Нет доступа к сокету/демону                                              |
+| `docker_daemon_unavailable`  | Демон недоступен                                                         |
+| `docker_container_not_found` | Нет такого контейнера                                                    |
+| `docker_container_conflict`  | Действие не подходит к состоянию (`is not running`, `already paused`...) |
+| `docker_timeout`             | Действие не уложилось в лимит                                            |
+| `docker_command_failed`      | Прочие ошибки демона                                                     |
+
+Пример: `stderr: "docker_container_not_found: No such container: web"`.
+
+### 10.6. Сокращения
+
+Пока не сделано (задача не требует): `docker_logs` с `follow` не переживает переподключение SSH-сессии, а `docker_stats` опрашивает контейнеры по одному (у Docker API нет массового `stats`).

@@ -8,6 +8,7 @@ use std::time::Instant;
 use synex_core::errors::{Result as SynexResult, SynexError};
 use synex_core::sftp::Sftp;
 use synex_core::ssh::SshSession;
+use synex_core::docker;
 // use tokio::fs::OpenOptions;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, WriteHalf};
@@ -33,6 +34,9 @@ fn ok_payload(stdout: String) -> ResponsePayload {
         exit_code: 0,
     }
 }
+
+// Сообщение про отсутствующую сессию (повторяется во многих действиях).
+const SESSION_NOT_FOUND: &str = "Session dont founded by key. Create session first!";
 // use uuid::Uuid;
 // use serde::Serialize;
 // use tokio::net::TcpListener;
@@ -54,6 +58,17 @@ struct RequestPayload {
     destination_path: Option<String>,
     // Для действия "cancel": id сессии, чью текущую операцию надо остановить.
     target_id: Option<String>,
+
+    // Docker
+    all: Option<bool>,
+    container: Option<String>,
+    action: Option<String>,
+    timeout: Option<i32>,
+    tail: Option<u32>,
+    since: Option<String>,
+    follow: Option<bool>,
+    force: Option<bool>,
+    volumes: Option<bool>,
 }
 
 #[derive(Serialize, Debug)]
@@ -877,6 +892,235 @@ where
                 })
                 .await;
             }
+            "docker_info" => {
+                let session_arc = match get_session(&sessions, &req.id).await {
+                    Some(session) => session,
+                    None => {
+                        send_error(&writer, &req.id, SESSION_NOT_FOUND).await;
+                        continue;
+                    }
+                };
+                let writer = writer.clone();
+                let req_id = req.id.clone();
+                tokio::spawn(async move {
+                    let result = docker::info(&session_arc, docker::DEFAULT_SOCKET).await;
+                    send_docker_result(&writer, req_id, result).await;
+                });
+            }
+            "docker_containers" => {
+                let session_arc = match get_session(&sessions, &req.id).await {
+                    Some(session) => session,
+                    None => {
+                        send_error(&writer, &req.id, SESSION_NOT_FOUND).await;
+                        continue;
+                    }
+                };
+                let all = req.payload.all.unwrap_or(false);
+                let writer = writer.clone();
+                let req_id = req.id.clone();
+                tokio::spawn(async move {
+                    let result =
+                        docker::containers(&session_arc, docker::DEFAULT_SOCKET, all).await;
+                    send_docker_result(&writer, req_id, result).await;
+                });
+            }
+            "docker_images" => {
+                let session_arc = match get_session(&sessions, &req.id).await {
+                    Some(session) => session,
+                    None => {
+                        send_error(&writer, &req.id, SESSION_NOT_FOUND).await;
+                        continue;
+                    }
+                };
+                let writer = writer.clone();
+                let req_id = req.id.clone();
+                tokio::spawn(async move {
+                    let result = docker::images(&session_arc, docker::DEFAULT_SOCKET).await;
+                    send_docker_result(&writer, req_id, result).await;
+                });
+            }
+            "docker_stats" => {
+                let session_arc = match get_session(&sessions, &req.id).await {
+                    Some(session) => session,
+                    None => {
+                        send_error(&writer, &req.id, SESSION_NOT_FOUND).await;
+                        continue;
+                    }
+                };
+                let container = req.payload.container.clone();
+                let writer = writer.clone();
+                let req_id = req.id.clone();
+                tokio::spawn(async move {
+                    let result =
+                        docker::stats(&session_arc, docker::DEFAULT_SOCKET, container).await;
+                    send_docker_result(&writer, req_id, result).await;
+                });
+            }
+            "docker_container_action" => {
+                let session_arc = match get_session(&sessions, &req.id).await {
+                    Some(session) => session,
+                    None => {
+                        send_error(&writer, &req.id, SESSION_NOT_FOUND).await;
+                        continue;
+                    }
+                };
+                let container = match req.payload.container.clone() {
+                    Some(container) if !container.is_empty() => container,
+                    _ => {
+                        send_error(&writer, &req.id, "Missing 'container' in payload").await;
+                        continue;
+                    }
+                };
+                let action = match req.payload.action.clone() {
+                    Some(action) if !action.is_empty() => action,
+                    _ => {
+                        send_error(&writer, &req.id, "Missing 'action' in payload").await;
+                        continue;
+                    }
+                };
+                let timeout = req.payload.timeout;
+                let writer = writer.clone();
+                let req_id = req.id.clone();
+                tokio::spawn(async move {
+                    let result = docker::container_action(
+                        &session_arc,
+                        docker::DEFAULT_SOCKET,
+                        &container,
+                        &action,
+                        timeout,
+                    )
+                    .await;
+                    send_docker_result(&writer, req_id, result).await;
+                });
+            }
+            "docker_container_remove" => {
+                let session_arc = match get_session(&sessions, &req.id).await {
+                    Some(session) => session,
+                    None => {
+                        send_error(&writer, &req.id, SESSION_NOT_FOUND).await;
+                        continue;
+                    }
+                };
+                let container = match req.payload.container.clone() {
+                    Some(container) if !container.is_empty() => container,
+                    _ => {
+                        send_error(&writer, &req.id, "Missing 'container' in payload").await;
+                        continue;
+                    }
+                };
+                let force = req.payload.force.unwrap_or(false);
+                let volumes = req.payload.volumes.unwrap_or(false);
+                let writer = writer.clone();
+                let req_id = req.id.clone();
+                tokio::spawn(async move {
+                    let result = docker::container_remove(
+                        &session_arc,
+                        docker::DEFAULT_SOCKET,
+                        &container,
+                        force,
+                        volumes,
+                    )
+                    .await;
+                    match result {
+                        Ok(()) => send_response(&writer, Response { id: req_id, status: "ok".to_string(), payload: ok_payload(String::new()) }).await,
+                        Err(err) => send_error(&writer, &req_id, &err.to_string()).await,
+                    }
+                });
+            }
+            "docker_logs" => {
+                let session_arc = match get_session(&sessions, &req.id).await {
+                    Some(session) => session,
+                    None => {
+                        send_error(&writer, &req.id, SESSION_NOT_FOUND).await;
+                        continue;
+                    }
+                };
+                let container = match req.payload.container.clone() {
+                    Some(container) if !container.is_empty() => container,
+                    _ => {
+                        send_error(&writer, &req.id, "Missing 'container' in payload").await;
+                        continue;
+                    }
+                };
+
+                let logs_request = docker::LogsRequest {
+                    container,
+                    tail: req.payload.tail.map(|tail| tail.to_string()),
+                    since: req.payload.since.clone(),
+                    follow: req.payload.follow.unwrap_or(false),
+                };
+
+                if !logs_request.follow {
+                    let writer = writer.clone();
+                    let req_id = req.id.clone();
+                    tokio::spawn(async move {
+                        let result =
+                            docker::logs(&session_arc, docker::DEFAULT_SOCKET, &logs_request)
+                                .await;
+                        send_docker_result(&writer, req_id, result).await;
+                    });
+                    continue;
+                }
+
+                // follow: промежуточные кадры status="progress", пока не отменят.
+                let token = CancellationToken::new();
+                cancel_tokens
+                    .lock()
+                    .await
+                    .insert(req.id.clone(), token.clone());
+
+                let writer = writer.clone();
+                let cancel_tokens = cancel_tokens.clone();
+                let req_id = req.id.clone();
+                tokio::spawn(async move {
+                    let mut batches = docker::logs_follow(
+                        session_arc,
+                        docker::DEFAULT_SOCKET.to_string(),
+                        logs_request,
+                        token,
+                    );
+
+                    let mut cancelled = false;
+                    while let Some(item) = batches.recv().await {
+                        match item {
+                            Ok(batch) => {
+                                let stdout = serde_json::to_string(&batch)
+                                    .unwrap_or_else(|_| "{}".to_string());
+                                send_response(
+                                    &writer,
+                                    Response {
+                                        id: req_id.clone(),
+                                        status: "progress".to_string(),
+                                        payload: ok_payload(stdout),
+                                    },
+                                )
+                                .await;
+                            }
+                            Err(SynexError::Cancelled) => {
+                                cancelled = true;
+                                break;
+                            }
+                            Err(err) => {
+                                cancel_tokens.lock().await.remove(&req_id);
+                                send_error(&writer, &req_id, &err.to_string()).await;
+                                return;
+                            }
+                        }
+                    }
+
+                    cancel_tokens.lock().await.remove(&req_id);
+                    let status = if cancelled { "cancelled" } else { "ok" };
+                    send_response(
+                        &writer,
+                        Response {
+                            id: req_id,
+                            status: status.to_string(),
+                            payload: ok_payload(String::new()),
+                        },
+                    )
+                    .await;
+                });
+            }
             "cancel" => {
                 // Отмена текущей операции на сессии target_id (ssh_exec или SFTP-передача).
                 // Сама отменяемая операция ответит отдельно, своим исходным id, со status: "cancelled".
@@ -964,6 +1208,29 @@ async fn send_response<T: AsyncWrite + Unpin, R: Serialize>(writer: &SharedWrite
         let _ = stream.write_all(&len).await;
         let _ = stream.write_all(&packed).await;
         let _ = stream.flush().await;
+    }
+}
+
+// Ответ Docker-действия: JSON в stdout или код docker_* в stderr.
+async fn send_docker_result<T, R>(writer: &SharedWriter<T>, req_id: String, result: SynexResult<R>)
+where
+    T: AsyncWrite + Unpin,
+    R: Serialize,
+{
+    match result {
+        Ok(value) => {
+            let stdout = serde_json::to_string(&value).unwrap_or_else(|_| "null".to_string());
+            send_response(
+                writer,
+                Response {
+                    id: req_id,
+                    status: "ok".to_string(),
+                    payload: ok_payload(stdout),
+                },
+            )
+            .await;
+        }
+        Err(err) => send_error(writer, &req_id, &err.to_string()).await,
     }
 }
 
