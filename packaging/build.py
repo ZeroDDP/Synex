@@ -7,7 +7,7 @@
 
 Шаги:
 1. UI: `npm ci` (если нет node_modules) и `npm run build` во frontend с
-   VITE_BACKEND_URL=http://127.0.0.1:<порт>, результат в packaging/work/stage/ui.
+   адресами API относительно окна приложения, результат в packaging/work/stage/ui.
 2. Воркер: проверка, что он для этой ОС (PE, ELF, Mach-O), копия в stage/worker.
 3. PyInstaller (packaging/synex.spec): папка packaging/dist/Synex (на macOS Synex.app).
    PyInstaller и pywebview ставятся только на время сборки (`uv run --with`), в
@@ -43,7 +43,6 @@ BACKEND = ROOT / "backend"
 PACKAGING = ROOT / "packaging"
 WORK = PACKAGING / "work"
 DIST = PACKAGING / "dist"
-DEFAULT_PORT = 8000
 PYINSTALLER = "pyinstaller>=6.11,<7"
 PYWEBVIEW = "pywebview>=5.3,<6"
 
@@ -79,14 +78,16 @@ def version() -> str:
 # --------------------------------------------------------------------- UI
 
 
-def build_ui(stage: Path, port: int, *, clean: bool) -> None:
+def build_ui(stage: Path, *, clean: bool) -> None:
     log("UI: frontend/dist")
     npm = shutil.which("npm") or shutil.which("npm.cmd")
     if npm is None:
         raise SystemExit("npm not found: install Node.js 22")
     if clean or not (FRONTEND / "node_modules").is_dir():
         run([npm, "ci"], cwd=FRONTEND)
-    env = {**os.environ, "VITE_BACKEND_URL": f"http://127.0.0.1:{port}"}
+    # config.js strips the trailing slash: fetch and WebSocket resolve against
+    # the document, even on port 5173 or when a developer has a local Vite .env.
+    env = {**os.environ, "VITE_BACKEND_URL": "/"}
     run([npm, "run", "build"], cwd=FRONTEND, env=env)
     target = stage / "ui"
     shutil.copytree(FRONTEND / "dist", target)
@@ -250,12 +251,14 @@ def _wait_health(port: int, process: subprocess.Popen[bytes]) -> dict:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build Synex for this OS")
     parser.add_argument("--worker", type=Path, required=True, help="synex_worker for this OS")
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="backend port in the UI")
+    parser.add_argument("--port", type=int, help="deprecated: set PORT when starting Synex")
     parser.add_argument("--no-window", action="store_true", help="no pywebview: browser UI")
     parser.add_argument("--clean", action="store_true", help="npm ci even with node_modules")
     parser.add_argument("--no-smoke", action="store_true", help="skip the smoke test")
     parser.add_argument("--smoke-port", type=int, default=18765)
     args = parser.parse_args(argv)
+    if args.port is not None:
+        log("--port is deprecated; set PORT in synex.env at runtime")
 
     log(f"Synex {version()} for {target_os()}-{target_arch()}")
     shutil.rmtree(WORK, ignore_errors=True)
@@ -266,7 +269,7 @@ def main(argv: list[str] | None = None) -> int:
     stage.mkdir(parents=True)
     shutil.copy2(ROOT / "VERSION", stage / "VERSION")
 
-    build_ui(stage, args.port, clean=args.clean)
+    build_ui(stage, clean=args.clean)
     stage_worker(stage, args.worker.resolve())
     window = not args.no_window and target_os() in ("windows", "macos")
     built = build_app(stage, window=window)
