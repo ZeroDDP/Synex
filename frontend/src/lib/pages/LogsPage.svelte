@@ -1,7 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { BACKEND_URL } from '../api/config.js';
-  import { selectedServerId, servers } from '../stores.js';
+  import { selectedServerId, servers, serverUsernames } from '../stores.js';
 
   export let onAddServer = () => {};
 
@@ -34,7 +34,9 @@
 
   $: currentServerId = $selectedServerId || $servers[0]?.id || '';
   $: currentServer = $servers.find((server) => server.id === currentServerId) || null;
-  $: serverLabel = currentServer?.host || currentServerId;
+  $: serverLabel = currentServer
+    ? [$serverUsernames[currentServer.id], currentServer.name].filter(Boolean).join('@')
+    : currentServerId;
 
   $: if (currentServerId !== requestedServerId) {
     requestedServerId = currentServerId;
@@ -501,7 +503,7 @@
     min-width: 60px;
     padding: 5px 8px;
     border: 1px solid var(--synex-border-default);
-    border-radius: 8px;
+    border-radius: var(--synex-radius-full);
     color: var(--synex-text-muted);
     font-family: var(--font-host);
     font-size: 13px;
