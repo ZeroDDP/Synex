@@ -5,6 +5,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Path, Query, Request
 from pydantic import BaseModel
 
+from app.external.actions import router as action_router
 from app.external.routes import router as external_router
 from app.plugins.manager import PluginManager, PluginNotFoundError, PluginStatus
 from app.worker import worker_manager
@@ -31,6 +32,7 @@ def build_api_router() -> APIRouter:
     """Корневой роутер /api. Плагины добавляют сюда свои роутеры (/api/<plugin>)."""
     router = APIRouter(prefix=API_PREFIX)
     router.include_router(external_router)
+    router.include_router(action_router)
 
     @router.get("/health", response_model=HealthResponse, tags=["system"])
     async def health(request: Request) -> HealthResponse:
