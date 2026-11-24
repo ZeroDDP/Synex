@@ -17,4 +17,14 @@ echo "==> Worker: cargo build --release in core/ ($(uname -m))"
 WORKER="$ROOT/core/target/release/synex_worker"
 
 cd "$ROOT"
+if [[ "$(uname -m)" == "x86_64" ]]; then
+    # cryptography ships no Intel Mac wheel. Link its extension statically so
+    # the app cannot load Python's different libssl from the bundle at startup.
+    openssl_prefix="$(brew --prefix openssl@3)"
+    export OPENSSL_DIR="$openssl_prefix" OPENSSL_STATIC=1
+    # Keep wheels and environments from earlier dynamic builds out of this bundle.
+    cache_dir="$(uv cache dir)"
+    export UV_CACHE_DIR="${cache_dir}-synex-intel-static"
+    export UV_PROJECT_ENVIRONMENT="$ROOT/packaging/.venv/macos-intel-static"
+fi
 uv run --project backend python packaging/build.py --worker "$WORKER" "$@"
