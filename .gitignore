@@ -57,6 +57,7 @@ synex_worker.exe
 *.tmp
 *.log
 *.sock
+_docker_run.py
 
 RustDocumentation.md
 rust_tests.py
