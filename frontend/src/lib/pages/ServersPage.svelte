@@ -3,6 +3,7 @@
   import { servers, serverUsernames } from '../stores.js';
 
   export let onConnected = () => {};
+  export let onSessionSelected = () => {};
   export let showConnectForm = false;
 
   function meterWidth(value) {
@@ -18,7 +19,11 @@
 <!-- Rename objects in coloumn NAME to server name -->
 <div class="page-servers">
   {#if showConnectForm}
-    <SshConnect onClose={() => (showConnectForm = false)} {onConnected} />
+    <SshConnect
+      onClose={() => (showConnectForm = false)}
+      {onConnected}
+      {onSessionSelected}
+    />
   {:else}
     <section class="panel">
       <header class="panel-head">
