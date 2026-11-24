@@ -142,6 +142,18 @@ def candidates(configured: str, base_dir: Path, *, include_core: bool = True) ->
             for triple in target_triples():
                 paths.append(target_dir / triple / path.parent.name / path.name)
     if include_core:
+        names = {
+            ("windows", "x86_64"): "synex_worker_windows.exe",
+            ("linux", "x86_64"): "synex_worker_linux",
+            ("macos", "x86_64"): "synex_worker_x84_64-apple-darwin",
+            ("macos", "aarch64"): "synex_worker_aarch64-apple-darwin",
+        }
+        bundled = base_dir / "app/core/target/release"
+        name = names.get((host_os(), host_arch()))
+        if name:
+            paths.append(bundled / name)
+        if host_os() == "macos":
+            paths.append(bundled / "synex_worker_macOs")
         core_target = base_dir.parent / "core" / "target"
         paths.append(core_target / "release" / raw.name)
         paths.extend(core_target / triple / "release" / raw.name for triple in target_triples())

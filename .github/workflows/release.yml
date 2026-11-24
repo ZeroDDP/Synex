@@ -1,7 +1,6 @@
 # Сборка Synex для Windows, Linux и macOS. У каждой ОС свой сборщик и свой воркер
-# (packaging/<ос>/build.*): Windows берёт готовый synex_worker.exe из репозитория, Linux и
-# macOS собирают воркер из core/ (Linux — на Ubuntu 22.04: готовый воркер из репозитория
-# собран на 24.04 и требует glibc 2.38, а так сборка запустится и на 22.04, Debian 12).
+# Windows и macOS используют готовые воркеры из backend/app/core/target/release.
+# Linux собирает Core на Ubuntu 22.04 для совместимости с этой версией glibc.
 # Каждый сборщик проверяет сборку: запускает её без окна и ждёт ответа /api/health с
 # запущенным воркером.
 #
@@ -70,10 +69,10 @@ jobs:
           node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - name: Rust (Linux and macOS build the worker from core/)
-        if: runner.os != 'Windows'
+      - name: Rust (Linux builds the worker from core/)
+        if: runner.os == 'Linux'
         uses: dtolnay/rust-toolchain@stable
-      - if: runner.os != 'Windows'
+      - if: runner.os == 'Linux'
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: core

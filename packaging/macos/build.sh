@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Сборщик Synex для macOS. Готового воркера для macOS в репозитории нет: он всегда
-# собирается из core/ под архитектуру этого Mac (Apple Silicon или Intel). Нужен Rust
-# (https://rustup.rs) и Xcode Command Line Tools.
+# Берёт готовый воркер Core для процессора этого Mac.
 #
 #   bash packaging/macos/build.sh [параметры build.py]
 #
@@ -10,11 +8,12 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 
-echo "==> Worker: cargo build --release in core/ ($(uname -m))"
-# Воркер для macOS 11 и новее на любом Mac сборки: цель отсюда берут и Rust, и C-части (cc)
-(cd "$ROOT/core" && MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}" \
-    cargo build --release -p synex_worker)
-WORKER="$ROOT/core/target/release/synex_worker"
+case "$(uname -m)" in
+    arm64) worker_name=synex_worker_aarch64-apple-darwin ;;
+    x86_64) worker_name=synex_worker_x84_64-apple-darwin ;;
+    *) echo "Unsupported macOS architecture" >&2; exit 1 ;;
+esac
+WORKER="$ROOT/backend/app/core/target/release/$worker_name"
 
 cd "$ROOT"
 if [[ "$(uname -m)" == "x86_64" ]]; then

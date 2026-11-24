@@ -8,9 +8,9 @@ runs the shared steps in [`build.py`](build.py).
 
 | OS | Builder | Worker | Result in `packaging/dist` |
 |---|---|---|---|
-| Windows x64 | [`windows/build.ps1`](windows/build.ps1) | `synex_worker.exe` from the repo (`-FromCore` builds it from `core\`) | `Synex-<v>-windows-x64.zip`, `Synex-<v>-windows-x64-setup.exe` (with Inno Setup 6) |
-| Linux x86_64 | [`linux/build.sh`](linux/build.sh) | `synex_worker` from the repo (`--from-core` builds it; arm64 always does) | `Synex-<v>-linux-x64.tar.gz` |
-| macOS | [`macos/build.sh`](macos/build.sh) | always built from `core/` for this Mac (Apple Silicon or Intel) | `Synex-<v>-macos-<arch>.zip` with `Synex.app` |
+| Windows x64 | [`windows/build.ps1`](windows/build.ps1) | `synex_worker_windows.exe` from the repo (`-FromCore` builds it from `core\`) | `Synex-<v>-windows-x64.zip`, `Synex-<v>-windows-x64-setup.exe` (with Inno Setup 6) |
+| Linux x86_64 | [`linux/build.sh`](linux/build.sh) | `synex_worker_linux` from the repo (`--from-core` builds it; arm64 always does) | `Synex-<v>-linux-x64.tar.gz` |
+| macOS | [`macos/build.sh`](macos/build.sh) | bundled worker for this Mac (Apple Silicon or Intel) | `Synex-<v>-macos-<arch>.zip` with `Synex.app` |
 
 The version comes from [`VERSION`](../VERSION). Next to the archives: `SHA256SUMS.txt`.
 
@@ -21,7 +21,7 @@ also runs on Ubuntu 22.04 and Debian 12.
 ## What you need
 
 - Python 3.12 and [uv](https://docs.astral.sh/uv/), Node.js 22 (as for development).
-- macOS, or `-FromCore` / `--from-core`: Rust ([rustup](https://rustup.rs)); macOS also the
+- `-FromCore` / `--from-core`: Rust ([rustup](https://rustup.rs)); macOS also the
   Xcode Command Line Tools.
 - Windows installer (optional): [Inno Setup 6](https://jrsoftware.org/isinfo.php).
 
@@ -44,7 +44,7 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build.ps1 -FromCore  
 ```bash
 bash packaging/linux/build.sh               # Linux: worker from the repo
 bash packaging/linux/build.sh --from-core   # Linux: worker built from core/
-bash packaging/macos/build.sh               # macOS: the worker is always built from core/
+bash packaging/macos/build.sh               # macOS: bundled worker for the host CPU
 ```
 
 With PowerShell 7 `pwsh packaging\windows\build.ps1` works too. `-NoInstaller` skips the
