@@ -5,9 +5,15 @@ use russh::{
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 
 use crate::errors::{Result, SftpErrorKind, SynexError}; // файл ошибок
+
+// Сколько ждать между TERM и KILL при отмене команды.
+const KILL_GRACE: Duration = Duration::from_secs(3);
+// Сколько ещё ждать закрытия канала после KILL, прежде чем бросить его.
+const AFTER_KILL_WAIT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SshOutput {
@@ -133,46 +139,97 @@ impl SshSession {
 
     // exec in session using
     pub async fn execute_command(&mut self, command: &str) -> Result<SshOutput> {
+        // Обычный вызов — это отменяемый с токеном, который никто не отменит.
+        let cancel = CancellationToken::new();
+        self.execute_command_cancellable(command, &cancel).await
+    }
+
+    // exec с возможностью отмены. При отмене: шлём удалённому процессу TERM,
+    // даём KILL_GRACE на завершение, если не уложился — добиваем KILL.
+    // В любом случае возвращаем SynexError::Cancelled, а не частичный вывод.
+    pub async fn execute_command_cancellable(
+        &mut self,
+        command: &str,
+        cancel: &CancellationToken,
+    ) -> Result<SshOutput> {
+        // Отмену могли прислать пока запрос ждал сессию: тогда ничего не запускаем.
+        if cancel.is_cancelled() {
+            return Err(SynexError::Cancelled);
+        }
+
         let mut channel = self.session.channel_open_session().await?;
         channel.exec(true, command).await?;
 
         let mut stdout = String::new();
         let mut stderr = String::new();
         let mut exit_code = 0;
+        let mut was_cancelled = false;
+        let mut killed = false;
+        let mut kill_at: Option<tokio::time::Instant> = None;
 
         // Выходим только на Close: ExitStatus приходит после Eof, и на Eof выход потерял бы код.
-        while let Some(msg) = channel.wait().await {
-            match msg {
-                russh::ChannelMsg::Data { data } => {
-                    stdout.push_str(&String::from_utf8_lossy(&data));
+        loop {
+            tokio::select! {
+                biased;
+
+                // Пришла отмена: просим процесс завершиться сам, ставим таймер на KILL.
+                _ = cancel.cancelled(), if !was_cancelled => {
+                    was_cancelled = true;
+                    let _ = channel.signal(russh::Sig::TERM).await;
+                    kill_at = Some(tokio::time::Instant::now() + KILL_GRACE);
                 }
-                russh::ChannelMsg::ExtendedData { data, ext } => {
-                    if ext == 1 {
-                        stderr.push_str(&String::from_utf8_lossy(&data));
+
+                // За KILL_GRACE процесс не закрыл канал — добиваем. Если и после KILL
+                // канал не закрылся, не висим на нём: отдаём отмену и отпускаем канал.
+                _ = sleep_until_opt(kill_at), if kill_at.is_some() => {
+                    if killed {
+                        break;
+                    }
+                    let _ = channel.signal(russh::Sig::KILL).await;
+                    killed = true;
+                    kill_at = Some(tokio::time::Instant::now() + AFTER_KILL_WAIT);
+                }
+
+                msg = channel.wait() => {
+                    match msg {
+                        Some(russh::ChannelMsg::Data { data }) => {
+                            stdout.push_str(&String::from_utf8_lossy(&data));
+                        }
+                        Some(russh::ChannelMsg::ExtendedData { data, ext }) => {
+                            if ext == 1 {
+                                stderr.push_str(&String::from_utf8_lossy(&data));
+                            }
+                        }
+                        Some(russh::ChannelMsg::ExitStatus { exit_status }) => {
+                            exit_code = exit_status as i32;
+                        }
+                        Some(russh::ChannelMsg::ExitSignal {
+                            signal_name,
+                            error_message,
+                            ..
+                        }) => {
+                            stderr.push_str(&error_message);
+                            // По POSIX процесс, убитый сигналом N, возвращает 128 + N
+                            exit_code = 128 + signal_number(&signal_name);
+                        }
+                        Some(russh::ChannelMsg::Close) | None => break,
+                        _ => {}
                     }
                 }
-                russh::ChannelMsg::ExitStatus { exit_status } => {
-                    exit_code = exit_status as i32;
-                }
-                russh::ChannelMsg::ExitSignal {
-                    signal_name,
-                    error_message,
-                    ..
-                } => {
-                    stderr.push_str(&error_message);
-                    // По POSIX процесс, убитый сигналом N, возвращает 128 + N
-                    exit_code = 128 + signal_number(&signal_name);
-                }
-                russh::ChannelMsg::Close => break,
-                _ => {}
             }
         }
 
-        Ok(SshOutput {
-            stdout,
-            stderr,
-            exit_code,
-        })
+        let _ = channel.close().await;
+
+        if was_cancelled {
+            Err(SynexError::Cancelled)
+        } else {
+            Ok(SshOutput {
+                stdout,
+                stderr,
+                exit_code,
+            })
+        }
     }
     pub async fn close(&mut self) -> Result<()> {
         self.session
@@ -199,6 +256,20 @@ impl SshSession {
         Ok(channel)
     }
 
+    // Открываем канал к Unix-сокету на сервере (direct-streamlocal@openssh.com).
+    // Возвращаемый канал — обычный поток: по нему говорят HTTP с Docker-демоном.
+    // Берёт &self: канал можно открыть, не держа сессию занятой на всё время работы.
+    pub async fn open_streamlocal_channel(
+        &self,
+        socket_path: &str,
+    ) -> Result<russh::Channel<client::Msg>> {
+        let channel = self
+            .session
+            .channel_open_direct_streamlocal(socket_path.to_string())
+            .await?;
+        Ok(channel)
+    }
+
     pub async fn close_sftp_channel(&mut self, channel: russh::Channel<client::Msg>) -> Result<()> {
         channel.close().await.map_err(SynexError::Ssh)?;
         Ok(())
@@ -222,5 +293,13 @@ fn signal_number(sig: &russh::Sig) -> i32 {
         Sig::TERM => 15,
         // Неизвестный сигнал: номер не знаем, отдаём 0, тогда код будет 128
         Sig::Custom(_) => 0,
+    }
+}
+
+// Ждём до deadline, если он задан; иначе никогда не завершаемся (select просто не выберет эту ветку).
+async fn sleep_until_opt(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(instant) => tokio::time::sleep_until(instant).await,
+        None => std::future::pending().await,
     }
 }
