@@ -78,16 +78,23 @@ jobs:
         with:
           workspaces: core
 
+      - name: Install Chromium for the packaged UI smoke test
+        shell: bash
+        run: |
+          npm install --prefix "$RUNNER_TEMP/synex-smoke" --ignore-scripts --no-audit --no-fund playwright-core@1.62.1
+          node "$RUNNER_TEMP/synex-smoke/node_modules/playwright-core/cli.js" install --with-deps --only-shell chromium
+          echo "NODE_PATH=$RUNNER_TEMP/synex-smoke/node_modules" >> "$GITHUB_ENV"
+
       - name: Build (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./packaging/windows/build.ps1 --clean
+        run: ./packaging/windows/build.ps1 --clean --browser-smoke
       - name: Build (Linux)
         if: runner.os == 'Linux'
-        run: bash packaging/linux/build.sh --from-core --clean
+        run: bash packaging/linux/build.sh --from-core --clean --browser-smoke
       - name: Build (macOS)
         if: runner.os == 'macOS'
-        run: bash packaging/macos/build.sh --clean
+        run: bash packaging/macos/build.sh --clean --browser-smoke
 
       - name: Memory (without the window)
         shell: bash

@@ -58,6 +58,8 @@ Windows installer.
    `Synex.app`. Icons: [`assets/`](assets) (the logo from the Figma design).
 4. **Smoke test**: starts the build without a window and with an empty data folder, waits
    for `/api/health` with the bundled worker running and checks that `/` serves the UI.
+   Release builds also run Chromium against the same bundle on two ports. The check waits for
+   the UI's alerts response and WebSocket greeting, then reads `/api/health` in the page.
 5. Packs the archive and its SHA-256.
 
 Options of `build.py` go after the builder's own ones: `--clean` (fresh `npm ci`),

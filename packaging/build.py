@@ -193,7 +193,7 @@ def archive(built: Path) -> Path:
 # ------------------------------------------------------------------- smoke
 
 
-def smoke_test(built: Path, port: int) -> None:
+def smoke_test(built: Path, port: int, *, browser: bool = False) -> None:
     """Запустить сборку без окна с пустой папкой данных и проверить, что всё на месте."""
     log("Smoke test")
     program = executable(built)
@@ -217,13 +217,19 @@ def smoke_test(built: Path, port: int) -> None:
                 page = response.read().decode("utf-8", "replace")
             if '<div id="app">' not in page:
                 raise SystemExit("the build does not serve the UI on /")
+            if browser:
+                run(["node", str(PACKAGING / "browser-smoke.cjs"), f"http://127.0.0.1:{port}"])
             log(f"OK: plugins {health.get('plugins')}, worker pid {worker.get('worker_pid')}")
         finally:
-            process.terminate()
+            if os.name == "nt" and process.poll() is None:
+                subprocess.run(["taskkill", "/pid", str(process.pid), "/t", "/f"], check=False)
+            else:
+                process.terminate()
             try:
                 process.wait(timeout=20)
             except subprocess.TimeoutExpired:
                 process.kill()
+                process.wait()
 
 
 def _wait_health(port: int, process: subprocess.Popen[bytes]) -> dict:
@@ -256,7 +262,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--clean", action="store_true", help="npm ci even with node_modules")
     parser.add_argument("--no-smoke", action="store_true", help="skip the smoke test")
     parser.add_argument("--smoke-port", type=int, default=18765)
+    parser.add_argument("--browser-smoke", action="store_true",
+                        help="check the same build in Chromium on two consecutive ports")
     args = parser.parse_args(argv)
+    if args.browser_smoke and (args.no_smoke or not 1 <= args.smoke_port <= 65534):
+        parser.error("--browser-smoke requires smoke tests and two valid consecutive ports")
     if args.port is not None:
         log("--port is deprecated; set PORT in synex.env at runtime")
 
@@ -275,7 +285,9 @@ def main(argv: list[str] | None = None) -> int:
     built = build_app(stage, window=window)
     add_extras(built)
     if not args.no_smoke:
-        smoke_test(built, args.smoke_port)
+        smoke_test(built, args.smoke_port, browser=args.browser_smoke)
+        if args.browser_smoke:
+            smoke_test(built, args.smoke_port + 1, browser=True)
     archive(built)
     log(f"Done: {DIST}")
     return 0
