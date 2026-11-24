@@ -49,8 +49,7 @@ pnpm-debug.log*
 
 #Rust
 
-target/
-synex_worker.exe
+/core/target/
 # ...но папка крейта с тем же именем не игнорируется: иначе git не видит новые файлы в ней
 !core/crates/synex_worker/
 *.pdb
@@ -59,5 +58,4 @@ synex_worker.exe
 *.sock
 _docker_run.py
 
-RustDocumentation.md
 rust_tests.py

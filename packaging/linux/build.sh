@@ -17,7 +17,7 @@ if [ "$FROM_CORE" = 1 ]; then
   (cd "$ROOT/core" && cargo build --release -p synex_worker)
   WORKER="$ROOT/core/target/release/synex_worker"
 else
-  WORKER="$ROOT/backend/app/core/target/release/synex_worker"
+  WORKER="$ROOT/backend/app/core/target/release/synex_worker_linux"
 fi
 
 cd "$ROOT"

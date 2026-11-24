@@ -86,7 +86,7 @@ jobs:
         run: uv run pytest -m integration -ra
         env:
           # Путь не по умолчанию: бэкенд берёт ровно этот файл, без сборки из core/
-          RUST_EXECUTABLE_PATH_UNIX: ${{ github.workspace }}/backend/app/core/target/release/synex_worker
+          RUST_EXECUTABLE_PATH_UNIX: ${{ github.workspace }}/backend/app/core/target/release/synex_worker_linux
       - name: Build the worker from core/
         run: cargo build --release --locked
         working-directory: core

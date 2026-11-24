@@ -110,6 +110,8 @@ async def test_real_worker_roundtrip(real_worker):
 
     with pytest.raises(WorkerCommandError, match="Unknown action"):
         await client.request("docker_list", {"path": "/"}, timeout=5)
+    with pytest.raises(WorkerCommandError, match="Session dont founded"):
+        await client.request("docker_info", {}, request_id="no-session")
     # SFTP-действия (сборка 2026-11-12) требуют сессию; в старой сборке их нет вовсе
     with pytest.raises(WorkerCommandError, match="Session dont founded|Unknown action"):
         await client.request("sftp_list_dir", {"remote_path": "/"}, request_id="no-session")

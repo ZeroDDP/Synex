@@ -22,7 +22,7 @@ if ($FromCore) {
     } finally { Pop-Location }
     $Worker = Join-Path $Root 'core\target\release\synex_worker.exe'
 } else {
-    $Worker = Join-Path $Root 'backend\app\core\target\release\synex_worker.exe'
+    $Worker = Join-Path $Root 'backend\app\core\target\release\synex_worker_windows.exe'
 }
 
 Push-Location $Root

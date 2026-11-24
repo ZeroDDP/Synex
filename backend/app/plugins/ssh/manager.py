@@ -433,6 +433,14 @@ class SSHSessionManager:
                     "the server does not answer (wrong address or port, firewall, or it is "
                     "down). The limit is SSH_CONNECT_TIMEOUT"
                 ) from e
+            if channel.native_cancel is None:
+                # An empty payload probes the action without targeting a running session.
+                try:
+                    await channel.client.request("cancel", {}, timeout=timeout)
+                except WorkerCommandError as exc:
+                    channel.native_cancel = "Missing 'target_id'" in exc.stderr
+                else:
+                    channel.native_cancel = False
         key = body.get("fingerprint")
         if not isinstance(key, str) or not key:
             return None
@@ -545,7 +553,7 @@ class SSHSessionManager:
         finally:
             session.running = None
             session.running_marker = None
-        interrupted = session.interrupt_requested
+        interrupted = session.interrupt_requested or response.get("cancelled") is True
         session.interrupt_requested = False
         duration_ms = round((time.monotonic() - started) * 1000)
 
@@ -878,6 +886,16 @@ class SSHSessionManager:
         command, marker = session.running, session.running_marker
         if command is None:
             return InterruptResult(session.id, "idle", None, None)
+        if session.channel.native_cancel:
+            try:
+                await session.channel.client.request(
+                    "cancel", {"target_id": session.id}, timeout=INTERRUPT_TIMEOUT
+                )
+            except WorkerCommandError as exc:
+                if "No cancellable operation" in exc.stderr:
+                    return InterruptResult(session.id, "finished", None, command)
+                raise
+            return InterruptResult(session.id, "interrupted", "TERM", command)
         if marker is None:
             raise SSHInterruptUnavailableError(
                 "The command was sent without the wrapper (track_cwd=false): it cannot be "

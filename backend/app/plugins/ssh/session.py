@@ -52,6 +52,7 @@ class WorkerChannel:
 
     client: WorkerClient
     dedicated: bool
+    native_cancel: bool | None = None
     lock: LoopLock = field(default_factory=LoopLock)
 
 

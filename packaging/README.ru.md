@@ -8,9 +8,9 @@ Synex поставляется как desktop-приложение: одна п�
 
 | ОС | Сборщик | Воркер | Результат в `packaging/dist` |
 |---|---|---|---|
-| Windows x64 | [`windows/build.ps1`](windows/build.ps1) | `synex_worker.exe` из репозитория (`-FromCore` собирает его из `core\`) | `Synex-<v>-windows-x64.zip`, `Synex-<v>-windows-x64-setup.exe` (с Inno Setup 6) |
-| Linux x86_64 | [`linux/build.sh`](linux/build.sh) | `synex_worker` из репозитория (`--from-core` собирает его; на arm64 всегда так) | `Synex-<v>-linux-x64.tar.gz` |
-| macOS | [`macos/build.sh`](macos/build.sh) | всегда собирается из `core/` под этот Mac (Apple Silicon или Intel) | `Synex-<v>-macos-<арх>.zip` с `Synex.app` |
+| Windows x64 | [`windows/build.ps1`](windows/build.ps1) | `synex_worker_windows.exe` из репозитория (`-FromCore` собирает его из `core\`) | `Synex-<v>-windows-x64.zip`, `Synex-<v>-windows-x64-setup.exe` (с Inno Setup 6) |
+| Linux x86_64 | [`linux/build.sh`](linux/build.sh) | `synex_worker_linux` из репозитория (`--from-core` собирает его; на arm64 всегда так) | `Synex-<v>-linux-x64.tar.gz` |
+| macOS | [`macos/build.sh`](macos/build.sh) | готовый воркер под этот Mac (Apple Silicon или Intel) | `Synex-<v>-macos-<арх>.zip` с `Synex.app` |
 
 Версия берётся из [`VERSION`](../VERSION). Рядом с архивами — `SHA256SUMS.txt`.
 
@@ -21,7 +21,7 @@ Synex поставляется как desktop-приложение: одна п�
 ## Что нужно
 
 - Python 3.12 и [uv](https://docs.astral.sh/uv/), Node.js 22 (как для разработки).
-- macOS или `-FromCore` / `--from-core`: Rust ([rustup](https://rustup.rs)); на macOS ещё
+- `-FromCore` / `--from-core`: Rust ([rustup](https://rustup.rs)); на macOS ещё
   Xcode Command Line Tools.
 - Установщик для Windows (по желанию): [Inno Setup 6](https://jrsoftware.org/isinfo.php).
 
@@ -44,7 +44,7 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\build.ps1 -FromCore  
 ```bash
 bash packaging/linux/build.sh               # Linux: воркер из репозитория
 bash packaging/linux/build.sh --from-core   # Linux: воркер собирается из core/
-bash packaging/macos/build.sh               # macOS: воркер всегда собирается из core/
+bash packaging/macos/build.sh               # macOS: готовый воркер для архитектуры Mac
 ```
 
 В PowerShell 7 можно и `pwsh packaging\windows\build.ps1`. `-NoInstaller` пропускает

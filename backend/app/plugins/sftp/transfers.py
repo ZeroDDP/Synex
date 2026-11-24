@@ -316,8 +316,16 @@ class TransferManager:
         if transfer.status == "queued" and transfer.task is not None:
             transfer.task.cancel()
         elif transfer.companion is not None:
-            # Воркер не умеет прерывать передачу: закрываем её служебную сессию
-            await self.remote.manager.close_companion(transfer.companion)
+            companion = transfer.companion
+            if companion.channel.native_cancel:
+                try:
+                    await companion.channel.client.request(
+                        "cancel", {"target_id": companion.id}, timeout=5
+                    )
+                except AppError:
+                    await self.remote.manager.close_companion(companion)
+            else:
+                await self.remote.manager.close_companion(companion)
         if transfer.task is not None:
             with contextlib.suppress(BaseException):
                 await asyncio.wait_for(asyncio.shield(transfer.task), timeout=5)

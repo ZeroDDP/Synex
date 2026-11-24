@@ -84,7 +84,7 @@ async def test_connect_opens_session(api, fake_worker, connect_body):
     }
 
     # Сессия в воркере называется id запроса
-    request = fake_worker.requests[-1]
+    request = next(r for r in reversed(fake_worker.requests) if r["action"] == "ssh_connect")
     assert (request["action"], request["id"]) == ("ssh_connect", session_id)
     assert request["payload"] == {"connection": connect_body}
     assert fake_worker.sessions == {session_id}
@@ -95,7 +95,11 @@ async def test_connect_with_password(api, fake_worker):
     response = await api.post("/api/ssh/connect", json=body)
     assert response.status_code == 201, response.text
     assert response.json()["auth"] == "password"
-    assert fake_worker.requests[-1]["payload"]["connection"] == {
+    assert next(
+        r["payload"]["connection"]
+        for r in reversed(fake_worker.requests)
+        if r["action"] == "ssh_connect"
+    ) == {
         "host": "10.0.0.1",
         "port": 22,
         "username": "root",
@@ -126,7 +130,14 @@ async def test_connect_with_passphrase(ssh, api, fake_worker, encrypted_key_file
     ok = await api.post("/api/ssh/connect", json={**body, "passphrase": PASSPHRASE})
     assert ok.status_code == 201, ok.text
     assert ok.json()["auth"] == "key_path"
-    assert fake_worker.requests[-1]["payload"]["connection"]["passphrase"] == PASSPHRASE
+    assert (
+        next(
+            r["payload"]["connection"]
+            for r in reversed(fake_worker.requests)
+            if r["action"] == "ssh_connect"
+        )["passphrase"]
+        == PASSPHRASE
+    )
     assert len(ssh.manager) == 1
 
 
@@ -163,7 +174,11 @@ async def test_connect_expands_home(api, fake_worker, monkeypatch, tmp_path):
     response = await api.post("/api/ssh/connect", json=body)
 
     assert response.status_code == 201
-    sent = fake_worker.requests[-1]["payload"]["connection"]["key_path"]
+    sent = next(
+        r["payload"]["connection"]
+        for r in reversed(fake_worker.requests)
+        if r["action"] == "ssh_connect"
+    )["key_path"]
     assert Path(sent) == home / ".ssh" / "id_ed25519"
 
 
@@ -506,7 +521,13 @@ async def test_connect_with_stored_key(api, fake_worker):
     assert response.json()["auth"] == status["auth"] == "key_id"
     # Воркер получил путь к файлу с расшифрованным ключом...
     assert fake_worker.connect_key_files == [secret]
-    sent_path = Path(fake_worker.requests[-1]["payload"]["connection"]["key_path"])
+    sent_path = Path(
+        next(
+            r["payload"]["connection"]
+            for r in reversed(fake_worker.requests)
+            if r["action"] == "ssh_connect"
+        )["key_path"]
+    )
     assert sent_path.parent == keystore.runtime_dir
     # ...и файл удалён сразу после подключения
     assert not sent_path.exists()
