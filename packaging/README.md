@@ -52,17 +52,18 @@ Windows installer.
 
 ## What a build does
 
-1. Builds the UI (`npm ci` if needed, `npm run build`) with
-   `VITE_BACKEND_URL=http://127.0.0.1:8000` (`--port` changes it).
+1. Builds the UI with same-origin API and WebSocket URLs (`npm ci` if needed, `npm run build`).
 2. Checks that the worker is an executable of this OS and copies it into the build.
 3. Runs PyInstaller with [`synex.spec`](synex.spec): `Synex/` (onedir, starts fast) or
    `Synex.app`. Icons: [`assets/`](assets) (the logo from the Figma design).
 4. **Smoke test**: starts the build without a window and with an empty data folder, waits
    for `/api/health` with the bundled worker running and checks that `/` serves the UI.
+   Release builds also run Chromium against the same bundle on two ports. The check waits for
+   the UI's alerts response and WebSocket greeting, then reads `/api/health` in the page.
 5. Packs the archive and its SHA-256.
 
 Options of `build.py` go after the builder's own ones: `--clean` (fresh `npm ci`),
-`--no-window` (no pywebview: the UI opens in the browser), `--no-smoke`, `--port N`.
+`--no-window` (no pywebview: the UI opens in the browser), `--no-smoke`. Set `PORT` in `synex.env` at runtime.
 
 ## How the app runs
 
