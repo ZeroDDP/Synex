@@ -677,7 +677,7 @@ SFTP-действия используют ту же SSH-сессию, что и
 - `run_sftp_tests`: создание, загрузка, скачивание, перемещение файлов, перемещение папки (`sftp_move_dir`: содержимое едет вместе с папкой, коды `sftp_not_found`, `sftp_not_a_directory`, `sftp_exists`), копирование, удаление;
 - `run_sftp_error_tests`: коды ошибок SFTP, `sftp_stat` (файл, папка, симлинк), поля `list_dir`;
 - `run_cancel_tests`: `cancel` без `target_id` и по несуществующей цели — ошибки; `sleep 100` отменяется (`status: "cancelled"`, ответ за секунды); загрузка файла отменяется, ответ `cancelled`;
-- `run_docker_tests`: `docker_info` (конверт `ok`, статус из допустимых), `docker_containers`/`docker_images` (массивы, поля `ContainerInfo`), `docker_stats`. Если Docker на сервере недоступен, остальные Docker-проверки пропускаются;
+- `run_docker_tests`: `docker_info` (конверт `ok`, статус из допустимых), `docker_images` (массив, поля `ImageInfo`, `id` без `sha256:`), `docker_containers` (`all=true`/`false`, поля `ContainerInfo`), `docker_logs` (`tail`, `since`/`next_since`, follow + `cancel`), `docker_stats` (по контейнеру и по всем), все `docker_container_action` (`pause`/`unpause`/`restart`/`stop`/`start`/`kill`), `docker_container_remove` (`force`, `volumes`), коды ошибок (`docker_container_conflict`, `docker_container_not_found`, `docker_command_failed`) и проверка обязательных полей payload. Контейнеры создаются из busybox/alpine (при отсутствии — `docker pull busybox`) и удаляются в конце; остатки прошлых прогонов (`synex-test-*`) убираются перед началом. Если Docker на сервере недоступен — проверки пропускаются;
 - `run_socket_permission_test`: права `0600` у Unix-сокета (только unix);
 - `run_frame_limit_test`: кадр сверх `16 MiB`.
 
@@ -701,6 +701,8 @@ SFTP-действия используют ту же SSH-сессию, что и
 Если в `load_config()` не задан ни пароль, ни ключ, скрипт выходит с кодом `2`.
 
 4. Запустить из папки `core`: `python rust_tests.py`. Код выхода `0` — все проверки прошли, `1` — есть провалы.
+
+Фильтр групп: `SYNEX_TEST_ONLY=docker python rust_tests.py` — только Docker; несколько групп — через запятую (`exec,sftp`); пусто или `all` — всё подряд. Группы: `exec`, `sftp`, `cancel`, `docker`.
 
 Порядок: TOFU → exec → SFTP → SFTP-ошибки → отмена → Docker → disconnect → права сокета → лимит кадра. Проверка лимита кадра последняя, потому что после неё соединение уже закрыто.
 
@@ -791,7 +793,7 @@ Docker работает на удалённом сервере. Воркер н�
 
 `LogLineInfo`: `{time, stream, text}`, где `time` — RFC3339 с наносекундами (UTC), `stream` — `stdout` или `stderr`. `next_since` — время последней строки, его передают в `since` следующего запроса.
 
-`since` принимает unix-секунды (`1700000000`), RFC3339 (`2026-11-06T12:00:00Z`) и длительность (`30s`, `10m`, `1h30m`). `tail` — число строк (по умолчанию все).
+`since` принимает unix-секунды (`1700000000`), RFC3339 (`2026-11-06T12:00:00Z`) и длительность (`30s`, `10m`, `1h30m`). `tail` — число строк (по умолчанию все). Если `since` задан временем, воркер отбрасывает строки не новее него: Docker API принимает только целые секунды и вернул бы граничную строку повторно.
 
 `ContainerStatsInfo`: `id`, `name`, `cpu_percent` (100 = одно ядро), `memory_used`, `memory_limit`, `memory_percent`, `net_rx`, `net_tx`, `block_read`, `block_write`, `pids`. Байты — числа.
 

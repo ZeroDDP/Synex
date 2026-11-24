@@ -224,6 +224,14 @@ fn make_client(session: SessionHandle, socket: &str) -> Result<Docker> {
                 let _ = conn.await;
             });
 
+            // Docker отвергает запрос без Host (400 missing required Host header):
+            // bollard ставит его только для своего HTTP-транспорта.
+            let (mut parts, body) = req.into_parts();
+            parts
+                .headers
+                .insert(hyper::header::HOST, hyper::header::HeaderValue::from_static("localhost"));
+            let req = hyper::Request::from_parts(parts, body);
+
             sender
                 .send_request(req)
                 .await
@@ -408,6 +416,35 @@ fn is_log_time(value: &str) -> bool {
         && bytes[13] == b':'
         && bytes[16] == b':'
         && value.ends_with('Z')
+}
+
+// Docker: "2026-11-06T16:05:18.637602832Z", доли секунды могут быть короче.
+// Возвращаем (секунды, наносекунды) — для точного сравнения строк лога.
+fn parse_log_time(value: &str) -> Option<(i64, u32)> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|dt| (dt.timestamp(), dt.timestamp_subsec_nanos()))
+}
+
+// `since` в Docker API — целые секунды, поэтому строка, уже показанная клиенту,
+// приходит снова. Отбрасываем строки не новее since, если он задан как время.
+fn trim_since(mut batch: LogsBatch, since: Option<&str>) -> LogsBatch {
+    let Some(since) = since else {
+        return batch;
+    };
+    let Some(key) = parse_log_time(since) else {
+        return batch;
+    };
+
+    batch
+        .lines
+        .retain(|line| parse_log_time(&line.time).is_some_and(|time| time > key));
+    batch.next_since = batch
+        .lines
+        .last()
+        .map(|line| line.time.clone())
+        .or_else(|| Some(since.to_string()));
+    batch
 }
 
 #[derive(Default)]
@@ -793,7 +830,7 @@ pub async fn logs(session: &SessionHandle, socket: &str, request: &LogsRequest) 
     .map_err(|_| timed_out("docker logs", REQUEST_TIMEOUT))?;
 
     read?;
-    Ok(parser.into_batch())
+    Ok(trim_since(parser.into_batch(), request.since.as_deref()))
 }
 
 // Логи с follow: строки уезжают пачками, пока не отменят.
@@ -818,6 +855,7 @@ pub fn logs_follow(
 
         let mut stream = client.logs(&request.container, Some(logs_options(&request)));
         let mut parser = LogParser::default();
+        let since = request.since.clone();
 
         loop {
             tokio::select! {
@@ -848,11 +886,14 @@ pub fn logs_follow(
                     }
 
                     // Отдаём накопленное, начиная новый парсер с хвостом.
-                    let batch = std::mem::take(&mut parser).into_batch();
+                    let batch = trim_since(std::mem::take(&mut parser).into_batch(), since.as_deref());
                     parser = LogParser {
                         lines: Vec::new(),
                         leftover: String::new(),
                     };
+                    if batch.lines.is_empty() {
+                        continue;
+                    }
                     if tx.send(Ok(batch)).await.is_err() {
                         return;
                     }
@@ -860,7 +901,7 @@ pub fn logs_follow(
             }
         }
 
-        let batch = parser.into_batch();
+        let batch = trim_since(parser.into_batch(), since.as_deref());
         if !batch.lines.is_empty() {
             let _ = tx.send(Ok(batch)).await;
         }
@@ -1059,6 +1100,48 @@ mod tests {
 
         assert_eq!(batch.lines.len(), 1);
         assert_eq!(batch.lines[0].text, "hello");
+    }
+
+    #[test]
+    fn since_trims_the_boundary_line() {
+        let batch = LogsBatch {
+            lines: vec![
+                LogLineInfo {
+                    time: "2026-11-06T16:05:18.000000000Z".to_string(),
+                    stream: "stdout",
+                    text: "old".to_string(),
+                },
+                LogLineInfo {
+                    time: "2026-11-06T16:05:19.000000000Z".to_string(),
+                    stream: "stdout",
+                    text: "new".to_string(),
+                },
+            ],
+            next_since: Some("2026-11-06T16:05:19.000000000Z".to_string()),
+        };
+
+        let trimmed = trim_since(batch, Some("2026-11-06T16:05:18.000000000Z"));
+        assert_eq!(trimmed.lines.len(), 1);
+        assert_eq!(trimmed.lines[0].text, "new");
+        assert_eq!(
+            trimmed.next_since.as_deref(),
+            Some("2026-11-06T16:05:19.000000000Z")
+        );
+    }
+
+    #[test]
+    fn since_keeps_previous_value_when_nothing_new() {
+        let batch = LogsBatch {
+            lines: Vec::new(),
+            next_since: None,
+        };
+
+        let trimmed = trim_since(batch, Some("2026-11-06T16:05:18.000000000Z"));
+        assert!(trimmed.lines.is_empty());
+        assert_eq!(
+            trimmed.next_since.as_deref(),
+            Some("2026-11-06T16:05:18.000000000Z")
+        );
     }
 
     #[test]

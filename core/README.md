@@ -679,7 +679,7 @@ Test groups:
 - `run_sftp_tests`: create, upload, download, move files, move a directory (`sftp_move_dir`: contents move with the directory, codes `sftp_not_found`, `sftp_not_a_directory`, `sftp_exists`), copy, remove;
 - `run_sftp_error_tests`: SFTP error codes, `sftp_stat` (file, directory, symlink), `list_dir` fields;
 - `run_cancel_tests`: `cancel` without `target_id` and against a non-existent target — errors; `sleep 100` is cancelled (`status: "cancelled"`, reply within seconds); a file upload is cancelled and answers `cancelled`;
-- `run_docker_tests`: `docker_info` (envelope `ok`, status from the allowed set), `docker_containers`/`docker_images` (arrays, `ContainerInfo` fields), `docker_stats`. When Docker is unavailable on the server, the remaining Docker checks are skipped;
+- `run_docker_tests`: `docker_info` (envelope `ok`, status from the allowed set), `docker_images` (array, `ImageInfo` fields, `id` without `sha256:`), `docker_containers` (`all=true`/`false`, `ContainerInfo` fields), `docker_logs` (`tail`, `since`/`next_since`, follow + `cancel`), `docker_stats` (single container and all), every `docker_container_action` (`pause`/`unpause`/`restart`/`stop`/`start`/`kill`), `docker_container_remove` (`force`, `volumes`), error codes (`docker_container_conflict`, `docker_container_not_found`, `docker_command_failed`) and payload validation. Containers are created from busybox/alpine (pulling busybox when missing) and removed at the end; leftovers from interrupted runs (`synex-test-*`) are cleaned up first. When Docker is unavailable on the server, the checks are skipped;
 - `run_socket_permission_test`: `0600` permissions on the Unix socket (unix only);
 - `run_frame_limit_test`: a frame above `16 MiB`.
 
@@ -703,6 +703,8 @@ All remote paths live under `/root/synex_test_<random>`. Deletion checks the pre
 If `load_config()` has neither a password nor a key, the script exits with code `2`.
 
 4. Run from the `core` directory: `python rust_tests.py`. Exit code `0` means all checks passed, `1` means some failed.
+
+Group filter: `SYNEX_TEST_ONLY=docker python rust_tests.py` runs Docker checks only; several groups go comma-separated (`exec,sftp`); empty or `all` runs everything. Groups: `exec`, `sftp`, `cancel`, `docker`.
 
 Order: TOFU → exec → SFTP → SFTP errors → cancel → Docker → disconnect → socket permissions → frame limit. The frame limit check goes last, because the connection is unusable afterwards.
 
@@ -793,7 +795,7 @@ How it works:
 
 `LogLineInfo`: `{time, stream, text}`, where `time` is RFC3339 with nanoseconds (UTC) and `stream` is `stdout` or `stderr`. `next_since` is the time of the last line; pass it back as `since` in the next request.
 
-`since` accepts Unix seconds (`1700000000`), RFC3339 (`2026-11-06T12:00:00Z`) and durations (`30s`, `10m`, `1h30m`). `tail` is a line count (all lines by default).
+`since` accepts Unix seconds (`1700000000`), RFC3339 (`2026-11-06T12:00:00Z`) and durations (`30s`, `10m`, `1h30m`). `tail` is a line count (all lines by default). When `since` is given as a timestamp, the worker drops lines that are not newer: the Docker API only accepts whole seconds and would return the boundary line again.
 
 `ContainerStatsInfo`: `id`, `name`, `cpu_percent` (100 = one full core), `memory_used`, `memory_limit`, `memory_percent`, `net_rx`, `net_tx`, `block_read`, `block_write`, `pids`. Byte values are numbers.
 
