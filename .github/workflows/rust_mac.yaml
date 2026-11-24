@@ -1,0 +1,65 @@
+name: Rust macOS
+
+on:
+  push:
+    branches: [ "core", "core/**", "core-ipc-worker" ]
+  pull_request:
+    branches: [ "core", "core/**" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    runs-on: macos-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust targets
+      run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+    # aws-lc-rs (крипто-бэкенд russh) собирается через CMake.
+    # На раннерах macOS он есть, но пусть шаг будет идемпотентным.
+    - name: Ensure cmake
+      run: command -v cmake || brew install cmake
+
+    - name: Build (Apple Silicon)
+      run: cargo build --verbose --release --target aarch64-apple-darwin
+      working-directory: ./core
+
+    - name: Build (Intel)
+      run: cargo build --verbose --release --target x86_64-apple-darwin
+      working-directory: ./core
+
+    # Тесты гоняем на нативной архитектуре раннера: кросс-таргет под Intel
+    # на Apple Silicon требует Rosetta, и это лишняя точка отказа.
+    - name: Run tests
+      run: cargo test --verbose
+      working-directory: ./core
+
+    - name: Make universal binary
+      run: |
+        mkdir -p core/target/universal-apple-darwin/release
+        lipo -create \
+          core/target/aarch64-apple-darwin/release/synex_worker \
+          core/target/x86_64-apple-darwin/release/synex_worker \
+          -output core/target/universal-apple-darwin/release/synex_worker
+        chmod +x core/target/universal-apple-darwin/release/synex_worker
+        file core/target/universal-apple-darwin/release/synex_worker
+        lipo -info core/target/universal-apple-darwin/release/synex_worker
+
+    - name: Upload universal binary
+      uses: actions/upload-artifact@v4
+      with:
+        name: synex-worker-macos-universal
+        path: core/target/universal-apple-darwin/release/synex_worker
+
+    - name: Upload per-arch binaries
+      uses: actions/upload-artifact@v4
+      with:
+        name: synex-worker-macos-per-arch
+        path: |
+          core/target/aarch64-apple-darwin/release/synex_worker
+          core/target/x86_64-apple-darwin/release/synex_worker
