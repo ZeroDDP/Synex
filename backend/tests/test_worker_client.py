@@ -356,3 +356,24 @@ async def test_named_pipe_transport_does_not_deadlock():
         state.close_all()
         for server in servers:
             server.close()
+
+
+async def test_progress_frames_and_final_response(fake_worker, missing_socket_path, monkeypatch):
+    from tests.fake_worker import reply
+
+    async def batches(protocol, body):
+        import msgpack
+
+        request = msgpack.unpackb(body, raw=False)
+        for n in range(12):
+            protocol.send(reply(request["id"], "progress", stdout=str(n)))
+        protocol.send(reply(request["id"], "ok"))
+
+    monkeypatch.setattr(FakeWorkerProtocol, "_handle", batches)
+    client = await make_client(fake_worker.port, missing_socket_path)
+    try:
+        lines = [p["stdout"] async for p in client.progress("docker_logs", {}, request_id="stream")]
+        assert lines == [str(n) for n in range(12)]
+        assert client.status()["pending_requests"] == 0
+    finally:
+        await client.disconnect()

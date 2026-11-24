@@ -104,6 +104,7 @@ class WorkerClient:
         self._write_lock = asyncio.Lock()
         self._connect_lock = asyncio.Lock()
         # id -> ожидающие ответа запросы в порядке отправки (см. docstring модуля)
+        self._progress: dict[str, asyncio.Queue] = {}
         self._pending: dict[str, deque[asyncio.Future[dict[str, Any]]]] = {}
         self._disconnect_listeners: list[DisconnectListener] = []
         self._background: set[asyncio.Task] = set()
@@ -273,6 +274,10 @@ class WorkerClient:
         if not isinstance(body, dict):
             body = {}
 
+        if response.get("status") == "cancelled" and action == "ssh_exec":
+            return {**body, "cancelled": True}
+        if response.get("status") == "cancelled":
+            raise WorkerCommandError(action, "cancelled", payload=body)
         if response.get("status") in OK_STATUSES:
             return body
 
@@ -335,6 +340,37 @@ class WorkerClient:
             # очереди своего id и заберёт этот поздний ответ на себя.
             future.cancel()
 
+    async def progress(self, action: str, payload: dict, *, request_id: str):
+        """Intermediate replies on a dedicated channel. The caller owns its lifetime."""
+        queue = asyncio.Queue(maxsize=8)
+        self._progress[request_id] = queue
+        request = asyncio.create_task(
+            self.request(action, payload, timeout=float("inf"), request_id=request_id)
+        )
+        item = None
+        try:
+            while True:
+                if not queue.empty():
+                    yield queue.get_nowait()
+                    continue
+                if request.done():
+                    await request
+                    return
+                item = asyncio.create_task(queue.get())
+                await asyncio.wait((item, request), return_when=asyncio.FIRST_COMPLETED)
+                if item.done():
+                    yield item.result()
+                else:
+                    item.cancel()
+                    await asyncio.gather(item, return_exceptions=True)
+        finally:
+            self._progress.pop(request_id, None)
+            request.cancel()
+            if item is not None:
+                item.cancel()
+                await asyncio.gather(item, return_exceptions=True)
+            await asyncio.gather(request, return_exceptions=True)
+
     # ------------------------------------------------------------------- status
 
     async def is_connected(self) -> bool:
@@ -370,7 +406,11 @@ class WorkerClient:
                     logger.error("IPC protocol error", reason=reason)
                     return
                 body = await reader.readexactly(length)
-                self._dispatch(body)
+                message = self._dispatch(body)
+                if message is not None:
+                    queue = self._progress.get(message["id"])
+                    if queue is not None:
+                        await queue.put(message["payload"])
         except asyncio.IncompleteReadError:
             pass
         except ConnectionError as e:
@@ -386,7 +426,7 @@ class WorkerClient:
         finally:
             self._on_connection_lost(reader, reason)
 
-    def _dispatch(self, body: bytes) -> None:
+    def _dispatch(self, body: bytes) -> dict | None:
         try:
             message = msgpack.unpackb(body, raw=False)
         except Exception as e:
@@ -401,6 +441,8 @@ class WorkerClient:
             return
 
         msg_id = message.get("id")
+        if message.get("status") == "progress":
+            return message
         queue = self._pending.get(msg_id) if isinstance(msg_id, str) else None
         if queue:
             future = queue.popleft()

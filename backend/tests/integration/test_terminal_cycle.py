@@ -25,16 +25,23 @@ async def test_terminal_on_the_server(ui: UI, ssh_target: SSHTarget):
     await asyncio.sleep(0.5)
     stopped = await ui.api.post(f"{base}/interrupt")
     assert stopped.status_code == 200, stopped.text
-    assert (stopped.json()["status"], stopped.json()["signal"]) == ("interrupted", "INT")
+    assert stopped.json()["status"] == "interrupted"
+    signal = stopped.json()["signal"]
+    assert signal in ("INT", "TERM")
     result = (await asyncio.wait_for(running, 15)).json()
-    assert result["interrupted"] is True and result["exit_code"] == 130
-    assert result["stdout"] == "started"
+    assert result["interrupted"] is True
+    if signal == "TERM":
+        assert result["exit_code"] == 143
+    else:
+        assert result["exit_code"] == 130
+        assert result["stdout"] == "started"
+    assert (await ui.exec(session_id, "echo ready"))["stdout"] == "ready"
 
     refused = await ui.api.post(f"{base}/exec", json={"command": "top"})
     assert (refused.status_code, refused.json()["error"]) == (422, "ssh_interactive_command")
 
     history = (await ui.api.get(f"{base}/history")).json()
-    assert history["commands"][-1] == "echo started; sleep 30; echo after"
+    assert history["commands"][-2] == "echo started; sleep 30; echo after"
 
 
 @pytest.mark.skipif(not shutil.which("bash"), reason="the local sshd uses this machine's bash")

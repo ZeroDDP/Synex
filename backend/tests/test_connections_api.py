@@ -204,7 +204,14 @@ async def test_connect_with_saved_password(ssh_api, fake_worker, events):
     listed = (await ssh_api.get("/api/ssh/sessions")).json()
     assert [s["connection_id"] for s in listed] == [saved["id"]]
     assert events[0]["connection_id"] == saved["id"]
-    assert fake_worker.requests[-1]["payload"]["connection"]["password"] == PASSWORD
+    assert (
+        next(
+            r["payload"]["connection"]
+            for r in reversed(fake_worker.requests)
+            if r["action"] == "ssh_connect"
+        )["password"]
+        == PASSWORD
+    )
 
     after = (await ssh_api.get(f"/api/connections/{saved['id']}")).json()
     assert after["last_connected_at"] is not None

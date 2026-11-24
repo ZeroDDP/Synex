@@ -65,6 +65,7 @@ from app.plugins.sftp.tree import (
     REASON_SPECIAL,
     REASON_UNREADABLE,
     DirItem,
+    TransferStoppedError,
     Tree,
     TreeBuilder,
     depth,
@@ -958,6 +959,8 @@ class RemoteFS:
                     wait=settings.SFTP_SESSION_WAIT, name="sftp",
                 )  # fmt: skip
         except WorkerCommandError as e:
+            if e.stderr == "cancelled":
+                raise TransferStoppedError from e
             raise self._remember(session_id, _translate(e.stderr, payload)) from e
         except WorkerTimeoutError as e:
             raise SftpTimeoutError(
