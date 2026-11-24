@@ -1,18 +1,11 @@
 from __future__ import annotations
 
+import re
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Path, Query, WebSocket
 
 from app.core.config import settings
-from app.plugins.docker.commands import (
-    IMAGES_FORMAT,
-    PS_FORMAT,
-    STATS_FORMAT,
-    parse_containers,
-    parse_images,
-    parse_stats,
-)
 from app.plugins.docker.logs import fetch_logs, serve_log_socket
 from app.plugins.docker.schemas import (
     CONTAINER_PATTERN,
@@ -24,9 +17,8 @@ from app.plugins.docker.schemas import (
     ContainerStatsInfo,
     DockerInfo,
     ImageInfo,
-    LogLineInfo,
 )
-from app.plugins.docker.service import docker_version, run_docker
+from app.plugins.docker.service import docker_request
 from app.plugins.ssh.manager import SSHSessionManager
 from app.plugins.ssh.routes import get_ssh_manager
 from app.plugins.ssh.schemas import SESSION_ID_PATTERN
@@ -59,16 +51,9 @@ ERRORS = {
     responses={404: ERRORS[404], 409: ERRORS[409]},
 )
 async def info(session_id: SessionId, manager: Manager) -> DockerInfo:
-    status, detail, version = await docker_version(manager, session_id)
-    return DockerInfo(
-        status=status,
-        detail=detail,
-        client_version=version.client_version,
-        server_version=version.server_version,
-        api_version=version.api_version,
-        os=version.os,
-        arch=version.arch,
-    )
+    result = await docker_request(manager, session_id, "docker_info")
+    result["status"] = result["status"].removeprefix("docker_")
+    return DockerInfo.model_validate(result)
 
 
 @router.get(
@@ -82,11 +67,7 @@ async def containers(
     manager: Manager,
     all: Annotated[bool, Query(description="И остановленные (docker ps -a)")] = True,  # noqa: A002
 ) -> list[ContainerInfo]:
-    args = ["ps", "--no-trunc", "--format", PS_FORMAT]
-    if all:
-        args.insert(1, "-a")
-    result = await run_docker(manager, session_id, args)
-    return [ContainerInfo.from_container(c) for c in parse_containers(result.stdout)]
+    return await docker_request(manager, session_id, "docker_containers", {"all": all})
 
 
 @router.get(
@@ -115,7 +96,7 @@ async def container_logs(
     lines, next_since = await fetch_logs(manager, session_id, container, tail=tail, since=since)
     return ContainerLogs(
         container=container,
-        lines=[LogLineInfo.from_line(line) for line in lines],
+        lines=lines,
         next_since=next_since,
     )
 
@@ -150,11 +131,22 @@ async def container_action(
         Query(ge=0, le=3600, description="stop и restart: сколько секунд ждать до KILL"),
     ] = None,
 ) -> ContainerActionResult:
-    args: list[str] = [action]
-    if timeout is not None and action in ("stop", "restart"):
-        args += ["-t", str(timeout)]
-    result = await run_docker(manager, session_id, [*args, container], timeout=_limit(timeout))
-    return ContainerActionResult(container=container, action=action, output=result.stdout)
+    worker_container = container
+    if re.fullmatch(r"[0-9a-f]{1,63}", container):
+        # Core looks up the resulting state by full ID or name after applying the action.
+        rows = await docker_request(manager, session_id, "docker_containers", {"all": True})
+        named = [row for row in rows if container in row["names"] or container == row["name"]]
+        matches = named or [row for row in rows if row["id"].startswith(container)]
+        if len(matches) == 1:
+            worker_container = matches[0]["id"]
+    result = await docker_request(
+        manager,
+        session_id,
+        "docker_container_action",
+        {"container": worker_container, "action": action, "timeout": timeout},
+        timeout=_limit(timeout),
+    )
+    return ContainerActionResult(container=container, action=action, output=result["output"])
 
 
 @router.delete(
@@ -170,9 +162,13 @@ async def remove_container(
     force: Annotated[bool, Query(description="Удалить и запущенный (docker rm -f)")] = False,
     volumes: Annotated[bool, Query(description="Вместе с анонимными томами (-v)")] = False,
 ) -> ContainerActionResult:
-    args = ["rm"] + (["-f"] if force else []) + (["-v"] if volumes else []) + [container]
-    result = await run_docker(manager, session_id, args)
-    return ContainerActionResult(container=container, action="remove", output=result.stdout)
+    await docker_request(
+        manager,
+        session_id,
+        "docker_container_remove",
+        {"container": container, "force": force, "volumes": volumes},
+    )
+    return ContainerActionResult(container=container, action="remove", output=container)
 
 
 @router.get(
@@ -183,9 +179,10 @@ async def remove_container(
     responses=ERRORS,
 )
 async def stats(session_id: SessionId, manager: Manager) -> list[ContainerStatsInfo]:
-    args = ["stats", "--no-stream", "--no-trunc", "--format", STATS_FORMAT]
-    result = await run_docker(manager, session_id, args)
-    return [ContainerStatsInfo.from_stats(s) for s in parse_stats(result.stdout)]
+    samples = await docker_request(manager, session_id, "docker_stats")
+    for sample in samples:
+        sample["name"] = sample["name"].removeprefix("/")
+    return samples
 
 
 @router.get(
@@ -195,10 +192,7 @@ async def stats(session_id: SessionId, manager: Manager) -> list[ContainerStatsI
     responses=ERRORS,
 )
 async def images(session_id: SessionId, manager: Manager) -> list[ImageInfo]:
-    result = await run_docker(
-        manager, session_id, ["images", "--no-trunc", "--format", IMAGES_FORMAT]
-    )
-    return [ImageInfo.from_image(image) for image in parse_images(result.stdout)]
+    return await docker_request(manager, session_id, "docker_images")
 
 
 def _limit(stop_timeout: int | None) -> float | None:

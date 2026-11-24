@@ -5,8 +5,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.plugins.docker.commands import Container, ContainerStats, Image, LogLine, Port
-
 # Имя или ID контейнера: как в docker (без пробелов и ведущего "-": не станет флагом)
 CONTAINER_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,254}$"
 # --since docker logs: время RFC3339, Unix-время или длительность (10m, 1h30m)
@@ -35,15 +33,6 @@ class PortInfo(BaseModel):
     host_ip: str | None = Field(default=None, description="null: порт не опубликован")
     host_port: str | None = None
 
-    @classmethod
-    def from_port(cls, port: Port) -> PortInfo:
-        return cls(
-            container_port=port.container_port,
-            protocol=port.protocol,
-            host_ip=port.host_ip,
-            host_port=port.host_port,
-        )
-
 
 class ContainerInfo(BaseModel):
     id: str
@@ -64,26 +53,6 @@ class ContainerInfo(BaseModel):
     compose_project: str | None = Field(default=None, description="Проект docker compose")
     compose_service: str | None = None
 
-    @classmethod
-    def from_container(cls, container: Container) -> ContainerInfo:
-        return cls(
-            id=container.id,
-            name=container.name,
-            names=container.names,
-            image=container.image,
-            command=container.command,
-            created_at=container.created_at,
-            state=container.state,
-            status=container.status,
-            health=container.health,
-            exit_code=container.exit_code,
-            ports=[PortInfo.from_port(p) for p in container.ports],
-            labels=container.labels,
-            networks=container.networks,
-            compose_project=container.compose_project,
-            compose_service=container.compose_service,
-        )
-
 
 ContainerAction = Literal["start", "stop", "restart", "pause", "unpause", "kill"]
 
@@ -98,10 +67,6 @@ class LogLineInfo(BaseModel):
     time: str = Field(..., description="Время строки, RFC3339 с наносекундами (UTC)")
     stream: Literal["stdout", "stderr"]
     text: str
-
-    @classmethod
-    def from_line(cls, line: LogLine) -> LogLineInfo:
-        return cls(time=line.time, stream=line.stream, text=line.text)
 
 
 class ContainerLogs(BaseModel):
@@ -126,10 +91,6 @@ class ContainerStatsInfo(BaseModel):
     block_write: int | None
     pids: int | None
 
-    @classmethod
-    def from_stats(cls, stats: ContainerStats) -> ContainerStatsInfo:
-        return cls(**stats.__dict__)
-
 
 class ImageInfo(BaseModel):
     id: str
@@ -138,7 +99,3 @@ class ImageInfo(BaseModel):
     digest: str | None
     created_at: datetime | None
     size: int | None = Field(..., description="Байты")
-
-    @classmethod
-    def from_image(cls, image: Image) -> ImageInfo:
-        return cls(**image.__dict__)

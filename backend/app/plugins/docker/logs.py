@@ -5,11 +5,7 @@ ws://127.0.0.1:8000/api/docker/sessions/{session_id}/containers/{container}/logs
 (время последней уже показанной строки: после переподключения UI передаёт `next_since`
 и не получает строки повторно).
 
-Rust-воркер выполняет команду целиком и отдаёт вывод в конце, поэтому `docker logs -f`
-через него не идёт. Пока Docker нет в ядре, поток собирается опросом: раз в
-DOCKER_LOGS_INTERVAL секунд `docker logs --since <время последней строки>` служебной
-командой сессии. Когда логи будет отдавать ядро, изменится только источник строк, а
-протокол останется.
+Первый запрос читает историю. Служебная сессия получает новые строки через docker_logs с follow.
 
 Конверт сообщений тот же, что у /ws: {"type": str, "ts": int (Unix, мс), "data": ...}.
 
@@ -41,14 +37,14 @@ from fastapi import WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
 from app.core.config import settings
-from app.core.errors import AppError
-from app.plugins.docker.commands import LogLine, parse_logs
+from app.core.errors import AppError, WorkerCommandError
 from app.plugins.docker.errors import (
     DockerContainerNotFoundError,
     DockerNotInstalledError,
     DockerPermissionError,
 )
-from app.plugins.docker.service import run_docker
+from app.plugins.docker.schemas import LogLineInfo
+from app.plugins.docker.service import docker_error, docker_request
 from app.plugins.ssh.errors import SSHNotConnectedError, SSHSessionNotFoundError
 from app.plugins.ssh.manager import SSHSessionManager
 from app.ws.hub import encode
@@ -86,16 +82,16 @@ async def fetch_logs(
     tail: int | None,
     since: str | None,
     wait: float | None = None,
-) -> tuple[list[LogLine], str | None]:
+) -> tuple[list[LogLineInfo], str | None]:
     """Строки лога контейнера и время последней из них (для следующего since)."""
-    args = ["logs", "--timestamps"]
-    if tail is not None:
-        args += ["--tail", str(tail)]
-    if since is not None:
-        args += ["--since", since]
-    result = await run_docker(manager, session_id, [*args, container], wait=wait)
-    lines = parse_logs(result.stdout, result.stderr, since)
-    return lines, (lines[-1].time if lines else since)
+    batch = await docker_request(
+        manager,
+        session_id,
+        "docker_logs",
+        {"container": container, "tail": tail, "since": since, "follow": False},
+        wait=wait,
+    )
+    return [LogLineInfo(**line) for line in batch["lines"]], batch["next_since"] or since
 
 
 def active_streams() -> int:
@@ -217,6 +213,53 @@ async def _poll(
                     },
                 )
             first = False
+            if manager.get(session_id).channel.native_cancel:
+                try:
+                    companion = await manager.open_companion(session_id, "docker_logs")
+                    if companion is not None:
+
+                        async def forward(channel_session):
+                            nonlocal since
+                            client = channel_session.channel.client
+                            follow = {
+                                "container": container,
+                                "since": since,
+                                "tail": MAX_LINES,
+                                "follow": True,
+                            }
+                            async with contextlib.aclosing(
+                                client.progress(
+                                    "docker_logs", follow, request_id=channel_session.id
+                                )
+                            ) as batches:
+                                async for payload in batches:
+                                    batch = json.loads(payload["stdout"])
+                                    await send("logs", {**batch, "truncated": False})
+                                    since = batch["next_since"] or since
+
+                        task = asyncio.create_task(forward(companion))
+                        try:
+                            await asyncio.wait(
+                                (receiver, task), return_when=asyncio.FIRST_COMPLETED
+                            )
+                            if task.done():
+                                await task
+                        finally:
+                            task.cancel()
+                            await manager.close_companion(companion)
+                            await asyncio.gather(task, return_exceptions=True)
+                except SESSION_GONE:
+                    await send("closed", {"reason": REASON_SESSION_CLOSED})
+                    return CLOSE_NORMAL
+                except WorkerCommandError as exc:
+                    error = docker_error(exc)
+                    fatal = FATAL.get(type(error))
+                    await send("error", _error(error, fatal=fatal is not None))
+                    if fatal is not None:
+                        return fatal
+                except AppError:
+                    # Retry from the last delivered cursor on the next poll.
+                    pass
         # Отключение UI обрывает паузу сразу
         await asyncio.wait({receiver}, timeout=interval)
     return CLOSE_NORMAL

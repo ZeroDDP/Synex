@@ -6,10 +6,7 @@ from app.plugins.docker.routes import router
 
 
 class DockerPlugin(BasePlugin):
-    """Docker на серверах: /api/docker/sessions/{session_id}/... (контейнеры, действия,
-    логи и живой лог по WebSocket, нагрузка, образы). Docker в Rust-ядре ещё нет, поэтому
-    команды docker CLI выполняются в SSH-сессии служебными командами и в терминал не
-    попадают."""
+    """HTTP and WebSocket interface to Docker operations in the Rust worker."""
 
     name = "docker"
     version = "0.2.0"

@@ -204,3 +204,95 @@ def _parse(args: list[str]) -> tuple[str, dict[str, Any], list[str]]:
         else:
             rest.append(item)
     return command, options, rest
+
+
+def worker_response(engine, action, data):
+    """Translate the stateful Docker fixture into the Rust IPC response format."""
+    from dataclasses import asdict
+
+    from tests import docker_format as fmt
+
+    info = {
+        "client_version": None,
+        "server_version": None,
+        "api_version": None,
+        "os": None,
+        "arch": None,
+    }
+    error = None
+    if engine is None:
+        error = ("not_installed", "Docker unavailable")
+    elif not engine.permission:
+        error = ("permission_denied", PERMISSION_DENIED)
+    elif not engine.daemon:
+        error = ("daemon_unavailable", DAEMON_DOWN)
+    if action == "docker_info":
+        if error:
+            return {**info, "status": "docker_" + error[0], "detail": error[1]}
+        return {
+            **info,
+            "status": "ok",
+            "detail": None,
+            "server_version": SERVER["Version"],
+            "api_version": SERVER["ApiVersion"],
+            "os": SERVER["Os"],
+            "arch": SERVER["Arch"],
+        }
+    if error:
+        raise ValueError(f"docker_{error[0]}: {error[1]}")
+    container = data.get("container")
+    if action == "docker_containers":
+        args = ["ps", "--no-trunc", "--format", fmt.PS_FORMAT]
+        if data["all"]:
+            args.insert(1, "-a")
+    elif action == "docker_images":
+        args = ["images", "--no-trunc", "--format", fmt.IMAGES_FORMAT]
+    elif action == "docker_stats":
+        args = ["stats", "--no-stream", "--no-trunc", "--format", fmt.STATS_FORMAT]
+    elif action == "docker_logs":
+        args = ["logs", "--timestamps", "--tail", str(data["tail"])]
+        if data.get("since"):
+            args.extend(["--since", data["since"]])
+        args.append(container)
+    elif action == "docker_container_action":
+        args = [data["action"]]
+        if data.get("timeout") is not None:
+            args.extend(["-t", str(data["timeout"])])
+        args.append(container)
+    elif action == "docker_container_remove":
+        args = (
+            ["rm"]
+            + (["-f"] if data["force"] else [])
+            + (["-v"] if data["volumes"] else [])
+            + [container]
+        )
+    else:
+        raise ValueError(f"Unknown action: {action}")
+    stdout, stderr, code = engine(args, "/", {})
+    if code:
+        error_code = (
+            "docker_container_not_found"
+            if "no such container" in stderr.lower()
+            else "docker_container_conflict"
+        )
+        raise ValueError(f"{error_code}: {stderr}")
+    if action == "docker_logs":
+        lines = fmt.parse_logs(stdout, stderr, data.get("since"))
+        return {
+            "lines": [asdict(line) for line in lines],
+            "next_since": lines[-1].time if lines else data.get("since"),
+        }
+    if action == "docker_container_action":
+        return {"output": stdout.strip(), "action": data["action"]}
+    if action == "docker_container_remove":
+        return None
+    parser = {
+        "docker_containers": fmt.parse_containers,
+        "docker_stats": fmt.parse_stats,
+        "docker_images": fmt.parse_images,
+    }[action]
+    rows = [asdict(item) for item in parser(stdout)]
+    if action == "docker_stats":
+        for row in rows:
+            row["name"] = "/" + row["name"]
+    return rows
