@@ -1,6 +1,8 @@
 <script>
   import { chart, metrics, selectedServerId, servers } from '../stores.js';
 
+  export let onAddServer = () => {};
+
   const RADIUS = 27;
   const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
   const chartRanges = [
@@ -89,7 +91,7 @@
             stroke-linecap="round"
             stroke-dasharray={CIRCUMFERENCE}
             stroke-dashoffset={offset(card)}
-            // transform="rotate(-90 32 32)"
+            transform="rotate(-90 32 32)"
           />
         </svg>
         <div class="metric-text">
@@ -110,7 +112,7 @@
       <ul class="chart-legend">
         <li class="legend-item"><span class="legend-dash legend-dash-cpu"></span>CPU</li>
         <li class="legend-item"><span class="legend-dash legend-dash-ram"></span>RAM</li>
-        <li class="legend-item" title="Network is scaled relative to 1000 MB/s">
+        <li class="legend-item" title="Network is scaled relative to 1000 Mbit/s">
           <span class="legend-dash legend-dash-network"></span>NET
         </li>
       </ul>
@@ -145,7 +147,7 @@
         <span
           class="chart-dot dot-network"
           style="top: {lastTop($chart.network, rangePoints)}%"
-          title="Network utilization relative to 1000 MB/s"
+          title="Network utilization relative to 1000 Mbit/s"
         ></span>
         <span class="chart-dot dot-ram" style="top: {lastTop($chart.ram, rangePoints)}%"></span>
         <span class="chart-dot dot-cpu" style="top: {lastTop($chart.cpu, rangePoints)}%"></span>
@@ -182,7 +184,10 @@
         </li>
       {/each}
       {#if $servers.length === 0}
-        <li class="status-empty">No active servers.</li>
+        <li class="status-empty">
+          <span>No servers yet</span>
+          <button type="button" class="add-server" on:click={onAddServer}>Add new server</button>
+        </li>
       {/if}
     </ul>
   </section>
@@ -518,9 +523,20 @@
   }
 
   .status-empty {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--synex-space-3);
     padding: var(--synex-space-3) var(--synex-space-4);
     color: var(--synex-text-muted);
     font-size: var(--font-size-12);
+  }
+
+  .add-server {
+    flex: 0 0 auto;
+    color: var(--synex-accent);
+    font: inherit;
+    font-weight: 600;
   }
 
   .status-id {

@@ -41,7 +41,7 @@ const initialMetrics = [
     id: 'network',
     label: 'NETWORK',
     value: null,
-    unit: 'MB/s',
+    unit: 'Mbit/s',
     info: 'Waiting for metrics',
     max: NETWORK_MAX_MBPS,
     warn: 900,
@@ -92,4 +92,21 @@ export const chart = writable(initialChart);
 const initialServers = [];
 
 export const servers = writable(initialServers);
-export const selectedServerId = writable('');
+function storedServerId() {
+  try {
+    return localStorage.getItem('synex.selectedServerId') || '';
+  } catch (error) {
+    console.warn('Could not read the selected server from local storage:', error);
+    return '';
+  }
+}
+
+export const selectedServerId = writable(storedServerId());
+selectedServerId.subscribe((serverId) => {
+  try {
+    if (serverId) localStorage.setItem('synex.selectedServerId', serverId);
+    else localStorage.removeItem('synex.selectedServerId');
+  } catch (error) {
+    console.warn('Could not save the selected server to local storage:', error);
+  }
+});
