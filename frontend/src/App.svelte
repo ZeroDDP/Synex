@@ -36,6 +36,7 @@
   ];
 
   let activeTab = 'dashboard';
+  let connectionReturnTab = 'dashboard';
   let terminalSessionId = '';
   let showConnectForm = false;
   let unreadAlertCount = 0;
@@ -87,8 +88,16 @@
   }
 
   function openConnectionForm() {
+    connectionReturnTab = activeTab;
     activeTab = 'servers';
     showConnectForm = true;
+  }
+
+  function handleActiveSessionSelected(session) {
+    selectedServerId.set(`${session.host}:${session.port}`);
+    if (connectionReturnTab === 'terminal') terminalSessionId = session.session_id;
+    showConnectForm = false;
+    activeTab = connectionReturnTab;
   }
 
   function handleSshConnected(session) {
@@ -143,7 +152,11 @@
       {#if activeTab === 'dashboard'}
         <DashboardPage onAddServer={openConnectionForm} />
       {:else if activeTab === 'servers'}
-        <ServersPage bind:showConnectForm onConnected={handleSshConnected} />
+        <ServersPage
+          bind:showConnectForm
+          onConnected={handleSshConnected}
+          onSessionSelected={handleActiveSessionSelected}
+        />
       {:else if activeTab === 'docker'}
         <PageStub label="Docker" hint="Container list and actions." />
       {:else if activeTab === 'logs'}
@@ -160,6 +173,7 @@
         initialSessionId={terminalSessionId}
         hidden={activeTab !== 'terminal'}
         onNewSession={() => {
+          connectionReturnTab = 'terminal';
           activeTab = 'servers';
           showConnectForm = true;
         }}

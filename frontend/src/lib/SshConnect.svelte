@@ -5,12 +5,17 @@
   export let onClose = () => {};
   /** @type {(session: { session_id: string }) => void} */
   export let onConnected = () => {};
+  /** @type {(session: { session_id: string, host: string, port: number }) => void} */
+  export let onSessionSelected = () => {};
 
   let host = '';
   let port = '22';  
   let username = '';
+  let password = '';
   let passphrase = '';
-  let keyId = '';
+  let keyInput = '';
+  let selectedKeyFile = null;
+  let keyFileInput;
   let authMode = 'key';
   let search = '';
   let activeSessions = [];
@@ -30,7 +35,7 @@
   );
 
   function selectSession(session) {
-    onConnected(session);
+    onSessionSelected(session);
     onClose();
   }
 
@@ -38,8 +43,10 @@
     host = '';
     port = '22';
     username = '';
+    password = '';
     passphrase = '';
-    keyId = keys[0]?.id || '';
+    keyInput = keys[0] ? savedKeyOption(keys[0]) : '';
+    selectedKeyFile = null;
     requestError = '';
     requestMessage = '';
     pendingHostKey = null;
@@ -105,6 +112,10 @@
     }
   }
 
+  function savedKeyOption(key) {
+    return `${key.name} · ${key.fingerprint}`;
+  }
+
   async function loadKeys() {
     keysError = '';
     try {
@@ -113,13 +124,13 @@
         throw new Error('Backend returned an invalid SSH key list.');
       }
       keys = savedKeys;
-      if (!keyId && keys.length > 0) keyId = keys[0].id;
+      if (!keyInput && keys.length > 0) keyInput = savedKeyOption(keys[0]);
     } catch (error) {
       keysError = errorMessage(error);
     }
   }
 
-  function connectionPayload() {
+  async function connectionPayload() {
     const numericPort = Number(port);
     if (!host.trim() || !username.trim()) {
       throw new Error('Host and username are required.');
@@ -130,13 +141,71 @@
 
     const payload = { host: host.trim(), port: numericPort, username: username.trim() };
     if (authMode === 'password') {
-      if (!passphrase) throw new Error('Password is required.');
-      payload.password = passphrase;
+      if (!password) throw new Error('Password is required.');
+      payload.password = password;
+    } else if (selectedKeyFile) {
+      const privateKey = await selectedKeyFile.text();
+      const keyName = `${selectedKeyFile.name.replace(/\.[^.]+$/, '').slice(0, 40) || 'ssh-key'}-${Date.now()}`;
+      let key;
+      try {
+        key = await backendRequest('/api/keys', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: keyName,
+            private_key: privateKey,
+            ...(passphrase ? { passphrase } : {})
+          })
+        });
+      } catch (error) {
+        if (error instanceof BackendRequestError && error.status === 409) {
+          await loadKeys();
+          selectedKeyFile = null;
+          keyInput = '';
+          throw new Error(`${errorMessage(error)} Select the existing key from the key store.`);
+        }
+        throw error;
+      }
+      if (typeof key?.id !== 'string') {
+        throw new Error('Backend imported the SSH key but returned no key ID.');
+      }
+      keys = [...keys, key];
+      selectedKeyFile = null;
+      keyInput = savedKeyOption(key);
+      passphrase = '';
+      payload.key_id = key.id;
     } else {
-      if (!keyId) throw new Error('Select an SSH key from the key store.');
-      payload.key_id = keyId;
+      const savedKey = keys.find((key) => savedKeyOption(key) === keyInput.trim());
+      if (savedKey) {
+        if (passphrase) {
+          throw new Error('A passphrase can only be used with a private key file path or a selected key file.');
+        }
+        payload.key_id = savedKey.id;
+      } else {
+        if (!keyInput.trim()) throw new Error('Select a saved SSH key or enter a key file path.');
+        payload.key_path = keyInput.trim();
+        if (passphrase) payload.passphrase = passphrase;
+      }
     }
     return payload;
+  }
+
+  function handleKeyFileChange(event) {
+    const file = event.currentTarget.files?.[0] || null;
+    if (file && file.size > 64 * 1024) {
+      selectedKeyFile = null;
+      event.currentTarget.value = '';
+      requestError = 'SSH key files must be 64 KB or smaller.';
+      return;
+    }
+    selectedKeyFile = file;
+    keyInput = file?.name || '';
+    requestError = '';
+  }
+
+  function handleKeyInput() {
+    selectedKeyFile = null;
+    if (keyFileInput) keyFileInput.value = '';
   }
 
   async function openSession(payload) {
@@ -244,7 +313,7 @@
     try {
       attempt = connection
         ? { action, connectionId: connection.id, connection, credentials }
-        : { action, payload: connectionPayload() };
+        : { action, payload: await connectionPayload() };
       await performConnectionAttempt(attempt);
     } catch (error) {
       if (error instanceof BackendRequestError && error.data?.error === 'ssh_host_key_revoked') {
@@ -535,20 +604,43 @@
     {#if authMode === 'password'}
       <label class="field">
         <span class="field__label">Password</span>
-        <input class="input" type="password" bind:value={passphrase} />
+        <input class="input" type="password" bind:value={password} />
       </label>
     {:else}
       <label class="field">
-        <span class="field__label">SSH key</span>
-        <select class="input" bind:value={keyId} disabled={keys.length === 0}>
-          {#if keys.length === 0}
-            <option value="">No keys in key store</option>
-          {:else}
+        <span class="field__label">Passphrase (optional)</span>
+        <input class="input" type="password" bind:value={passphrase} autocomplete="off" />
+      </label>
+      <label class="field">
+        <span class="field__label">SSH Key</span>
+        <div class="key-path-control">
+          <input
+            class="input"
+            type="text"
+            list="saved-ssh-keys"
+            placeholder="Enter key path or select a saved key"
+            bind:value={keyInput}
+            on:input={handleKeyInput}
+          />
+          <datalist id="saved-ssh-keys">
             {#each keys as key (key.id)}
-              <option value={key.id}>{key.name} · {key.fingerprint}</option>
+              <option value={savedKeyOption(key)}></option>
             {/each}
-          {/if}
-        </select>
+          </datalist>
+          <button type="button" class="browse-key" on:click={() => keyFileInput?.click()}>
+            Browse
+          </button>
+          <input
+            class="file-input"
+            type="file"
+            bind:this={keyFileInput}
+            aria-label="Choose SSH private key file"
+            on:change={handleKeyFileChange}
+          />
+        </div>
+        {#if selectedKeyFile}
+          <span class="selected-key-file">Selected file: {selectedKeyFile.name}</span>
+        {/if}
       </label>
       {#if keysError}
         <div class="sessions-error" role="alert">{keysError}</div>
@@ -606,10 +698,16 @@
   }
 
   .saved__add { 
+    padding: 2px var(--synex-space-3);
+    border: 1px solid var(--synex-accent);
+    border-radius: var(--synex-radius-lg);
     color: var(--synex-accent);
     font-size: var(--font-size-13);
     font-weight: 700; 
 }
+  .saved__add:hover {
+    background: var(--synex-ring-off);
+  }
 
   .search {
     font-family: var(--font-host);
@@ -787,6 +885,32 @@
   }
 
   .tabs { display: flex; gap: var(--synex-space-3); }
+  .key-path-control {
+    display: flex;
+    gap: var(--synex-space-2);
+  }
+  .key-path-control .input {
+    min-width: 0;
+  }
+  .browse-key {
+    flex: 0 0 auto;
+    padding: 0 var(--synex-space-3);
+    border: 1px solid var(--synex-border-default);
+    border-radius: var(--synex-radius-sm);
+    color: var(--synex-text-primary);
+    font-family: var(--font-host);
+  }
+  .browse-key:hover {
+    background: var(--synex-bg-hover);
+  }
+  .file-input {
+    display: none;
+  }
+  .selected-key-file {
+    color: var(--synex-text-secondary);
+    font-size: var(--font-size-12);
+    overflow-wrap: anywhere;
+  }
   .tab {
     flex: 1 1 0;
     font-size: var(--font-size-13);
