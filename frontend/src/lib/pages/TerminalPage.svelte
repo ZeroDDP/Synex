@@ -8,6 +8,7 @@
   import stringWidth from 'string-width';
   import '@xterm/xterm/css/xterm.css';
   import { BACKEND_URL } from '../api/config.js';
+  import { setServerUsernames } from '../stores.js';
   import { onEvent } from '../ws.js';
 
   export let initialSessionId = '';
@@ -636,6 +637,7 @@
         throw new Error('Backend returned an invalid SSH session list.');
       }
       sessions = data;
+      setServerUsernames(data);
       if (
         initialSessionId &&
         initialSessionId !== lastInitialSessionId &&

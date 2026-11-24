@@ -1,5 +1,5 @@
 <script>
-  import { chart, metrics, selectedServerId, servers } from '../stores.js';
+  import { chart, metrics, selectedServerId, servers, serverUsernames } from '../stores.js';
 
   export let onAddServer = () => {};
 
@@ -161,7 +161,7 @@
     </footer>
   </section>
 
-  <section class="panel">
+  <section class="panel status-panel">
     <h2 class="panel-title">SERVER STATUS</h2>
     <ul class="status-list">
       {#each $servers as server (server.id)}
@@ -173,7 +173,9 @@
             on:click={() => selectServer(server.id)}
           >
             <span class="status-id">
-              <span class="status-name">{server.name}</span>
+              <span class="status-name">
+                {#if $serverUsernames[server.id]}{$serverUsernames[server.id]}@{/if}{server.name}
+              </span>
               <span class="status-host">{server.host}</span>
             </span>
             <span class="status-state" data-status={server.status}>
@@ -292,12 +294,23 @@
     border-radius: var(--synex-radius-md);
   }
 
+  .status-panel {
+    overflow: hidden;
+    padding: 0;
+    padding-bottom: 32px;
+  }
+
   .panel-title {
     margin: 0 0 var(--synex-space-4);
     font-size: var(--font-size-14);
     font-weight: 900;
     letter-spacing: 0.04em;
     color: var(--synex-text-muted);
+  }
+
+  .status-panel .panel-title {
+    margin: 0;
+    padding: 40px clamp(16px, 4vw, 56px) 18px;
   }
 
   .chart-head {
@@ -485,12 +498,15 @@
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: var(--synex-space-2);
+    gap: 0;
   }
 
   .status-list > li {
-    border-left: 3px solid transparent;
-    border-radius: var(--synex-radius-sm);
+    border-left: 4px solid transparent;
+  }
+
+  .status-list > li:nth-child(even) {
+    background: var(--synex-bg-hover);
   }
 
   .status-list > li.status-row--active {
@@ -503,7 +519,8 @@
     align-items: center;
     justify-content: space-between;
     width: 100%;
-    padding: var(--synex-space-3) var(--synex-space-4);
+    min-height: 50px;
+    padding: var(--synex-space-3) clamp(16px, 4vw, 56px);
     border: 0;
     border-radius: inherit;
     background: transparent;
@@ -527,16 +544,25 @@
     align-items: center;
     justify-content: space-between;
     gap: var(--synex-space-3);
-    padding: var(--synex-space-3) var(--synex-space-4);
+    min-height: 78px;
+    padding: var(--synex-space-3) clamp(16px, 4vw, 56px);
     color: var(--synex-text-muted);
     font-size: var(--font-size-12);
   }
 
   .add-server {
     flex: 0 0 auto;
+    padding: 4px 28px;
+    border: 1px solid var(--synex-accent);
+    border-radius: var(--synex-radius-lg);
+    background: transparent;
     color: var(--synex-accent);
     font: inherit;
     font-weight: 600;
+  }
+
+  .add-server:hover {
+    background: var(--synex-bg-active);
   }
 
   .status-id {
@@ -546,14 +572,14 @@
   }
 
   .status-name {
-    font-size: var(--font-size-13);
+    font-size: clamp(13px, 1vw, 16px);
     font-weight: 600;
     color: var(--synex-text-secondary);
   }
 
   .status-host {
     font-family: var(--font-mono);
-    font-size: var(--font-size-11);
+    font-size: var(--font-size-13);
     color: var(--synex-text-muted);
   }
 
@@ -561,14 +587,14 @@
     display: flex;
     align-items: center;
     gap: var(--synex-space-2);
-    font-size: var(--font-size-12);
+    font-size: var(--font-size-20);
     letter-spacing: 0.06em;
     text-transform: uppercase;
   }
 
   .status-dot {
-    width: 6px;
-    height: 6px;
+    width: 9px;
+    height: 9px;
     border-radius: 50%;
     background: currentColor;
   }

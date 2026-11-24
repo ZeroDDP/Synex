@@ -1,6 +1,6 @@
 <script>
   import SshConnect from '../SshConnect.svelte';
-  import { servers } from '../stores.js';
+  import { servers, serverUsernames } from '../stores.js';
 
   export let onConnected = () => {};
   export let showConnectForm = false;
@@ -40,7 +40,7 @@
 
         {#each $servers as server (server.id)}
           <div class="table-row">
-            <span class="cell cell-name">{server.name}</span>
+            <span class="cell cell-name">{$serverUsernames[server.id] || '—'}</span>
             <span class="cell cell-host">{server.host}</span>
             <span class="cell cell-meter">
               <span class="bar">

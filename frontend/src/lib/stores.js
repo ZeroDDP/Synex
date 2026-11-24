@@ -92,6 +92,29 @@ export const chart = writable(initialChart);
 const initialServers = [];
 
 export const servers = writable(initialServers);
+
+/** @type {import('svelte/store').Writable<Record<string, string>>} */
+export const serverUsernames = writable({});
+
+/** @param {unknown[]} sessions */
+export function setServerUsernames(sessions) {
+  /** @type {Record<string, string>} */
+  const usernames = {};
+  for (const session of sessions) {
+    if (
+      session &&
+      typeof session === 'object' &&
+      typeof session.host === 'string' &&
+      typeof session.username === 'string' &&
+      Number.isInteger(session.port)
+    ) {
+      const key = `${session.host.toLowerCase()}:${session.port}`;
+      if (typeof usernames[key] !== 'string') usernames[key] = session.username;
+    }
+  }
+  serverUsernames.set(usernames);
+}
+
 function storedServerId() {
   try {
     return localStorage.getItem('synex.selectedServerId') || '';
