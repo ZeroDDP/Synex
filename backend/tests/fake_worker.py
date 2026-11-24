@@ -321,6 +321,28 @@ class FakeWorkerProtocol(asyncio.Protocol):
                     await asyncio.sleep(float(command.split()[1]))
                 self.send(reply(msg_id, "ok", stdout=f"ran: {command}\n"))
 
+        elif action in {
+            "docker_info",
+            "docker_containers",
+            "docker_images",
+            "docker_stats",
+            "docker_logs",
+            "docker_container_action",
+            "docker_container_remove",
+        }:
+            import json
+
+            from tests.fake_docker import worker_response
+
+            if msg_id not in self.sessions:
+                self.send(reply(msg_id, "error", stderr=NO_SESSION, exit_code=1))
+                return
+            try:
+                value = worker_response(self.state.shell.programs.get("docker"), action, payload)
+                self.send(reply(msg_id, "ok", stdout=json.dumps(value, default=str)))
+            except ValueError as exc:
+                self.send(reply(msg_id, "error", stderr=str(exc), exit_code=1))
+
         elif action == "monitor_get_values":
             session = self.sessions.get(msg_id)
             if session is None:

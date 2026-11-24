@@ -104,8 +104,7 @@ flowchart LR
 ## Быстрый старт
 
 Нужны **Python 3.12 + [uv](https://docs.astral.sh/uv/)** и **Node.js 22**. Готовый воркер
-лежит в репозитории для Windows x64 и Linux x86_64; на macOS его собирают через `cargo`
-(см. RUNNING.ru.md).
+лежит в репозитории для Windows x64, Linux x64, macOS Intel и Apple Silicon.
 
 **PowerShell** (Windows):
 
@@ -233,8 +232,8 @@ pull request в `main` с зелёными проверками. Подробн�
 - [ ] UI: терминал, файловый менеджер, экраны Docker и git
 - [x] Desktop-сборки для Windows, Linux и macOS (v0.1.0)
 - [ ] Release Candidate v1.0.0-rc1
-- [ ] Отмена идущих команд и передач в воркере
-- [ ] Сборки воркера под macOS и Linux musl
+- [x] Отмена SSH-команд и SFTP-передач в служебной сессии воркера
+- [ ] Сборки воркера под Linux musl
 - [ ] Интеграция с AI-ассистентом (v2.0)
 
 <!-- TODO(release): ссылка на CHANGELOG или страницу релизов после v1.0.0-rc1 -->

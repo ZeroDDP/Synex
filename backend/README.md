@@ -21,7 +21,7 @@ uv sync                      # dependencies, including the dev group (pytest, ru
 uv run python -m app.main    # http://127.0.0.1:8000
 ```
 
-The backend starts `app/core/target/release/synex_worker.exe` as a child process, connects
+The backend starts `app/core/target/release/synex_worker_windows.exe` as a child process, connects
 to it over a Named Pipe (Linux/macOS: Unix socket, TCP as a fallback) and restarts the
 worker if it crashes. Settings live in `.env`, the template is `.env.example`. An empty
 value (`DEBUG=`) means the default. If a value is wrong, the backend does not start and
@@ -38,12 +38,8 @@ uv sync
 uv run python -m app.main
 ```
 
-The repository contains `app/core/target/release/synex_worker` for Linux x86_64. It needs
-glibc 2.38 or newer (Ubuntu 24.04, Debian 13, Fedora 39 and later). On an older
-distribution the worker exits right away with "version `GLIBC_2.38' not found", and the
-backend logs a hint: build the worker on this machine (`cargo build --release`) or
-statically (`cargo build --release --target x86_64-unknown-linux-musl`). For macOS and ARM
-you have to build the worker yourself. The backend looks for the worker like this:
+Bundled workers (Windows x64, Linux x64, macOS Intel and Apple Silicon) — `app/core/target/release/`.
+
 
 1. `RUST_EXECUTABLE_PATH_UNIX` (relative to `backend/`, then to the current folder);
 2. a build for a specific platform (`cargo build --release --target <triple>`):
@@ -388,7 +384,7 @@ duration_ms}`
 - 504 `ssh_exec_timeout` means the worker did not return a result even after
   `timeout + 3 + SSH_EXEC_TIMEOUT_GRACE` seconds. For example, the server has no coreutils
   `timeout` (macOS, old busybox), or the command was sent without `track_cwd`. The worker
-  handles the requests of a session one by one and cannot cancel a command, so all following
+  handles the requests of a session one by one, so all following
   commands would be stuck behind the hung one: the session is closed (`ssh.session` with
   `reason: exec_timeout`, the terminal gets `closed`), and the UI opens a new one.
 
@@ -397,17 +393,7 @@ duration_ms}`
 - **Time limit**: a command from the terminal WebSocket without its own `timeout` gets
   `TERMINAL_TIMEOUT` (600 s) instead of `SSH_EXEC_TIMEOUT`: `apt upgrade` or a build take
   minutes, and Ctrl+C stops a command earlier.
-- **Interrupt** (Ctrl+C): `POST .../interrupt` or `{"type": "interrupt"}` in the terminal
-  WebSocket. The worker cannot cancel a command, so the backend opens a second SSH
-  connection to the same server, finds the processes of the running command by its marker
-  and sends them INT, as Ctrl+C does; if the command is still alive 2 s later, TERM, then
-  KILL. The reply comes when the command has stopped: `{status, signal, command}`, `status`
-  `interrupted`, `idle` (nothing was running), `finished` (it ended by itself before the
-  signal) or `alive` (not even KILL helped, for example a process of another user after
-  `sudo`). The command's own result arrives as usual, with `interrupted: true`,
-  `timed_out: false` and code 130 (INT), 143 (TERM) or 137 (KILL). Without a second
-  connection (the worker does not allow one) or for a command sent with
-  `track_cwd: false`: 409 `ssh_interrupt_unavailable`.
+- **Ctrl+C.** `POST .../interrupt` or the terminal message `{"type":"interrupt"}` requests cancellation over IPC. The response acknowledges the request. The command result arrives separately with `interrupted: true` and exit code 143. The worker discards buffered command output on cancellation. Older workers use a companion SSH connection and the command marker.
 - **Programs that need a terminal.** Commands run without a TTY, so full-screen programs
   cannot work: `vim` hangs until the timeout and its escape codes break the terminal in the
   UI, `top` exits with an error. Such a command is not sent: 422 `ssh_interactive_command`
@@ -482,9 +468,7 @@ POST /api/connections
 
 ### Docker on servers (plugin `docker`)
 
-The plugin runs the regular `docker` on the server through an open SSH session: these are
-service commands of the session and do not show up in its terminal. All paths start with
-`/api/docker/sessions/{session_id}/`. Docker 20.10 or newer is required.
+The worker accesses Docker Engine over SSH through `/var/run/docker.sock`. HTTP API — `/api/docker/sessions/{session_id}/`.
 
 - `GET .../info` always answers 200: `status` `ok`, `not_installed` (no docker),
   `permission_denied` (the SSH user is not in the docker group) or `daemon_unavailable` (the
@@ -525,17 +509,12 @@ service commands of the session and do not show up in its terminal. All paths st
   | `closed` | `{reason}`: `session_closed` (the SSH session was closed, code 1000) or `shutdown` (the plugin or the backend is stopping, code 1001) |
   | `pong` | `data` from the UI's `ping` |
 
-  The Rust core has no Docker support yet, and the worker returns command output only as a
-  whole, so the stream is built by polling `docker logs --since` every
-  `DOCKER_LOGS_INTERVAL` (1 s). When the core starts serving logs, the protocol for the UI
-  will not change.
+  After the history batch, the worker sends live lines using `docker_logs` with `follow=true`.
 - `GET .../stats`: one `docker stats` sample of the running containers (a couple of seconds):
   `cpu_percent` (100 = one core), `memory_used`, `memory_limit`, `memory_percent`, `net_rx`,
   `net_tx`, `block_read`, `block_write` (bytes), `pids`.
 - `GET .../images`: images (`repository` and `tag` = `null` for untagged images, `size` in
   bytes).
-- If the SSH user is not in the docker group, set `DOCKER_COMMAND=sudo -n docker` (needs
-  passwordless sudo). The limit for one command is `DOCKER_TIMEOUT` (60 s).
 - Errors: 404 `docker_not_installed`, 403 `docker_permission_denied`, 503
   `docker_daemon_unavailable`, 404 `docker_container_not_found`, 409
   `docker_container_conflict`, 504 `docker_timeout`, 502 `docker_command_failed` (the docker
@@ -1006,7 +985,7 @@ app/
   desktop.py           the app: backend, worker and UI in a window (packaging/ builds it)
   core/                platform: config, app factory, errors, event bus, logging,
                        files (atomic writes of files with secrets)
-    target/release/    synex_worker.exe (Windows), synex_worker (Linux x86_64)
+    target/release/    workers for Windows x64, Linux x64, macOS Intel/ARM64
   worker/              Rust core: client.py (IPC protocol), manager.py (process),
                        executable.py (finding the binary for the OS and CPU),
                        unix_socket.py (socket path and folder on Linux/macOS),

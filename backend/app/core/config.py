@@ -149,10 +149,7 @@ class Settings(BaseSettings):
     LOGS_CHUNK_BYTES: int = Field(default=1024 * 1024, ge=4096)
     LOGS_COMPANION: bool = True
 
-    # Docker на серверах (плагин docker). Команда docker на сервере: например
-    # "sudo -n docker", если пользователь SSH не в группе docker (нужен sudo без пароля).
-    DOCKER_COMMAND: str = Field(default="docker", min_length=1)
-    # Сколько ждать команду docker на сервере, сек (stop и restart ждут контейнер).
+    # Deadline for Docker worker IPC.
     DOCKER_TIMEOUT: float = Field(default=60.0, gt=0)
     # Живой лог контейнера (WebSocket): как часто спрашивать у docker новые строки, сек.
     DOCKER_LOGS_INTERVAL: float = Field(default=1.0, gt=0)

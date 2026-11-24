@@ -218,10 +218,10 @@ async def test_daemon_outage_is_reported_once_and_the_stream_recovers(stream: St
         stream.docker.daemon = False
         error = await next_of(ws, "error")
         assert (error["error"], error["fatal"]) == ("docker_daemon_unavailable", False)
-        calls = len(stream.log_calls())
+        calls = len(stream.rig.worker.requests)
         with pytest.raises(TimeoutError):  # та же причина не повторяется на каждом опросе
             await recv_json(ws, timeout=0.3)
-        assert len(stream.log_calls()) > calls
+        assert len(stream.rig.worker.requests) > calls
 
         stream.docker.daemon = True
         stream.add(1, "daemon is back")

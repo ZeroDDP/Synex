@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from app.plugins.docker.commands import (
+from tests.docker_format import (
     PS_FORMAT,
     LogLine,
     Port,
@@ -21,10 +21,7 @@ from app.plugins.docker.commands import (
     parse_stats,
     parse_version,
 )
-from app.plugins.docker.errors import DockerCommandError, DockerPermissionError
-from app.plugins.docker.service import classify
-from app.plugins.ssh.manager import ServiceResult
-from tests.fake_docker import PERMISSION_DENIED, FakeContainer, FakeDocker, FakeImage
+from tests.fake_docker import FakeContainer, FakeDocker, FakeImage
 from tests.plugin_rig import plugin_rig
 
 # Вывод настоящего Docker 29.9.1 (docker ps -a --no-trunc --format PS_FORMAT)
@@ -79,16 +76,6 @@ def test_parse_ports_labels_and_dates():
     assert parse_labels("hosts=a,b,c=d") == {"hosts": "a,b", "c": "d"}
     assert parse_created_at("2026-11-06 15:42:33 +0000 UTC") is not None
     assert parse_created_at("garbage") is None
-
-
-def test_only_socket_permission_errors_mean_no_access():
-    def failed(stderr: str) -> ServiceResult:
-        return ServiceResult(stdout="", stderr=stderr, exit_code=1, timed_out=False, duration_ms=1)
-
-    assert isinstance(classify(failed(PERMISSION_DENIED)), DockerPermissionError)
-    assert isinstance(classify(failed("sudo: a password is required")), DockerPermissionError)
-    inside = 'failed to create task: exec: "/app": permission denied: unknown'
-    assert isinstance(classify(failed(inside)), DockerCommandError)
 
 
 def test_parse_version():
@@ -229,7 +216,7 @@ async def test_info(rig, docker):
     assert info == {
         "status": "ok",
         "detail": None,
-        "client_version": "29.9.1",
+        "client_version": None,
         "server_version": "29.9.1",
         "api_version": "1.56",
         "os": "linux",
@@ -240,7 +227,7 @@ async def test_info(rig, docker):
     down = (await rig.api.get(url)).json()
     assert (down["status"], down["client_version"], down["server_version"]) == (
         "daemon_unavailable",
-        "29.9.1",
+        None,
         None,
     )
     assert "failed to connect to the docker API" in down["detail"]
