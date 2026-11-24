@@ -7,6 +7,17 @@ for Windows, Linux and macOS.
 
 [Русская версия](CHANGELOG.ru.md)
 
+## [0.3.0] — unreleased
+
+- The Rust worker accesses Docker Engine over SSH. The existing API serves containers, images, stats and logs.
+- The backend selects a worker for Windows x64, Linux x64, Intel Macs and Apple Silicon. Workers support SSH command and SFTP transfer cancellation.
+- Updated Dashboard, Servers, Logs and Terminal views, including SSH usernames for selected servers.
+
+## [0.2.0] - 2026-11-24
+
+- Added IPC for external plugin hosts, local package installation and updates, permissions and REST/WebSocket actions.
+- Updated navigation, pages and SSH terminal. Packaged UI uses the application's port. Release builds check HTTP and WebSocket on two ports.
+
 ## [0.1.0] - 2026-11-20
 
 The first build of Synex as a desktop app: one download, no Python, Node.js or Rust

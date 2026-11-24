@@ -180,8 +180,7 @@ Backend проверяется и без UI:
 
 ## Воркер на macOS, ARM и старом Linux
 
-Готовый `synex_worker` в репозитории собран для Windows x64 и Linux x86_64 с glibc 2.38
-и новее (Ubuntu 24.04, Debian 13, Fedora 39). В остальных случаях соберите его сами:
+Backend выбирает бинарник из `backend/app/core/target/release/` (Windows x64, Linux x64, macOS Intel и Apple Silicon). Для других платформ соберите воркер из исходников.
 
 **PowerShell** (Windows):
 

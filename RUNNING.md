@@ -180,9 +180,7 @@ Restart the backend after changing `.env`.
 
 ## Worker on macOS, ARM and older Linux
 
-The prebuilt `synex_worker` in the repository is built for Windows x64 and for Linux x86_64
-with glibc 2.38 or newer (Ubuntu 24.04, Debian 13, Fedora 39). In any other case, build it
-yourself:
+The backend selects a binary from `backend/app/core/target/release/` (Windows x64, Linux x64, macOS Intel and Apple Silicon). Build from source for other targets.
 
 **PowerShell** (Windows):
 

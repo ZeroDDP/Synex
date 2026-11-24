@@ -21,7 +21,7 @@ uv sync                      # зависимости, включая dev-гру
 uv run python -m app.main    # http://127.0.0.1:8000
 ```
 
-Бэкенд сам запускает `app/core/target/release/synex_worker.exe` как дочерний процесс,
+Бэкенд сам запускает `app/core/target/release/synex_worker_windows.exe` как дочерний процесс,
 подключается к нему по Named Pipe (Linux/macOS: Unix socket, запасной вариант TCP)
 и перезапускает воркер, если тот упал. Настройки лежат в `.env`, образец: `.env.example`.
 Пустое значение (`DEBUG=`) означает значение по умолчанию. Если значение неверное,
@@ -38,12 +38,8 @@ uv sync
 uv run python -m app.main
 ```
 
-В репозитории лежит `app/core/target/release/synex_worker` для Linux x86_64. Ему нужна
-glibc 2.38 или новее (Ubuntu 24.04, Debian 13, Fedora 39 и новее). На более старом
-дистрибутиве воркер сразу завершается с «version `GLIBC_2.38' not found», и бэкенд
-пишет в лог подсказку: собрать воркер на этой машине (`cargo build --release`) или
-статически (`cargo build --release --target x86_64-unknown-linux-musl`). Для macOS
-и ARM воркер нужно собрать самому. Бэкенд ищет воркер так:
+Готовые сборки (Windows x64, Linux x64, macOS Intel и Apple Silicon) — `app/core/target/release/`.
+
 
 1. `RUST_EXECUTABLE_PATH_UNIX` (относительно `backend/`, затем текущей папки);
 2. сборку под конкретную платформу (`cargo build --release --target <triple>`):
@@ -384,7 +380,7 @@ duration_ms}`
 - 504 `ssh_exec_timeout` означает, что воркер не вернул результат даже через
   `timeout + 3 + SSH_EXEC_TIMEOUT_GRACE` секунд. Например, на сервере нет coreutils
   `timeout` (macOS, старый busybox) или команда без `track_cwd`. Воркер выполняет
-  запросы сессии по очереди и отменять команду не умеет, поэтому все следующие команды
+  запросы сессии по очереди, поэтому все следующие команды
   встали бы за зависшей: сессия закрывается (`ssh.session` с `reason: exec_timeout`,
   терминал получает `closed`), UI открывает новую.
 
@@ -393,16 +389,7 @@ duration_ms}`
 - **Лимит времени**: команда из WebSocket терминала без своего `timeout` получает
   `TERMINAL_TIMEOUT` (600 с) вместо `SSH_EXEC_TIMEOUT`: `apt upgrade` или сборка идут
   минутами, а остановить команду раньше можно Ctrl+C.
-- **Прерывание** (Ctrl+C): `POST .../interrupt` или `{"type": "interrupt"}` в WebSocket
-  терминала. Воркер не умеет отменять команду, поэтому backend открывает второе
-  SSH-подключение к тому же серверу, находит процессы идущей команды по её маркеру и шлёт
-  им INT, как Ctrl+C; если команда через 2 с жива, TERM, потом KILL. Ответ приходит, когда
-  команда остановилась: `{status, signal, command}`, `status` — `interrupted`, `idle`
-  (ничего не выполнялось), `finished` (закончилась сама раньше сигнала) или `alive` (не
-  помог даже KILL, например процесс другого пользователя после `sudo`). Результат самой
-  команды приходит как обычно, с `interrupted: true`, `timed_out: false` и кодом 130
-  (INT), 143 (TERM) или 137 (KILL). Без второго подключения (воркер его не даёт) или для
-  команды с `track_cwd: false`: 409 `ssh_interrupt_unavailable`.
+- **Ctrl+C.** `POST .../interrupt` или сообщение терминала `{"type":"interrupt"}` запрашивает отмену выполняемой команды по IPC. Ответ сообщает о принятом запросе. Результат команды приходит отдельно с `interrupted: true` и кодом 143. Воркер при отмене теряет накопленный вывод команды. Старые воркеры используют служебное SSH-подключение и маркер команды.
 - **Программы, которым нужен терминал.** Команды идут без TTY, поэтому полноэкранные
   программы работать не могут: `vim` висит до таймаута, и его escape-коды ломают
   терминал в UI, `top` завершается с ошибкой. Такая команда не отправляется: 422
@@ -477,9 +464,7 @@ POST /api/connections
 
 ### Docker на серверах (плагин `docker`)
 
-Плагин выполняет на сервере обычный `docker` через открытую SSH-сессию: это служебные
-команды сессии, в её терминал они не попадают. Все пути начинаются с
-`/api/docker/sessions/{session_id}/`. Нужен Docker 20.10 или новее.
+Воркер открывает Docker Engine по SSH через `/var/run/docker.sock`. HTTP API — `/api/docker/sessions/{session_id}/`.
 
 - `GET .../info` отвечает всегда 200: `status` `ok`, `not_installed` (нет docker),
   `permission_denied` (пользователь SSH не в группе docker) или `daemon_unavailable`
@@ -520,16 +505,12 @@ POST /api/connections
   | `closed` | `{reason}`: `session_closed` (SSH-сессию закрыли, код 1000) или `shutdown` (плагин или backend останавливается, код 1001) |
   | `pong` | `data` из `ping` UI |
 
-  Docker в Rust-ядре ещё нет, а воркер отдаёт вывод команды только целиком, поэтому
-  поток собирается опросом `docker logs --since` раз в `DOCKER_LOGS_INTERVAL` (1 с).
-  Когда логи будет отдавать ядро, протокол для UI не изменится.
+  После истории воркер передаёт новые строки через `docker_logs` с `follow=true`.
 - `GET .../stats`: один замер `docker stats` запущенных контейнеров (пара секунд):
   `cpu_percent` (100 = одно ядро), `memory_used`, `memory_limit`, `memory_percent`,
   `net_rx`, `net_tx`, `block_read`, `block_write` (байты), `pids`.
 - `GET .../images`: образы (`repository` и `tag` = `null` у образов без имени,
   `size` в байтах).
-- Если пользователь SSH не в группе docker, можно задать `DOCKER_COMMAND=sudo -n docker`
-  (нужен sudo без пароля). Лимит одной команды `DOCKER_TIMEOUT` (60 с).
 - Ошибки: 404 `docker_not_installed`, 403 `docker_permission_denied`, 503
   `docker_daemon_unavailable`, 404 `docker_container_not_found`, 409
   `docker_container_conflict`, 504 `docker_timeout`,
@@ -989,7 +970,7 @@ app/
   desktop.py           приложение: backend, воркер и UI в окне (его собирает packaging/)
   core/                платформа: config, app factory, ошибки, шина событий, логи,
                        files (атомарная запись файлов с секретами)
-    target/release/    synex_worker.exe (Windows), synex_worker (Linux x86_64)
+    target/release/    workers for Windows x64, Linux x64, macOS Intel/ARM64
   worker/              Rust-ядро: client.py (IPC-протокол), manager.py (процесс),
                        executable.py (поиск бинарника для ОС и процессора),
                        unix_socket.py (путь и папка сокета на Linux/macOS),

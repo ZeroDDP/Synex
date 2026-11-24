@@ -103,7 +103,7 @@ More: [backend/README.md](backend/README.md) (API, plugins, errors, tests) ·
 ## Quick start
 
 You need **Python 3.12 + [uv](https://docs.astral.sh/uv/)** and **Node.js 22**. The worker is
-prebuilt for Windows x64 and Linux x86_64; on macOS build it with `cargo` (see RUNNING.md).
+prebuilt for Windows x64, Linux x64, macOS Intel and Apple Silicon.
 
 **PowerShell** (Windows):
 
@@ -229,8 +229,8 @@ into `main` with green checks. Details: [CONTRIBUTING.md](CONTRIBUTING.md).
 - [ ] UI: terminal, file manager, Docker and git screens
 - [x] Desktop builds for Windows, Linux and macOS (v0.1.0)
 - [ ] Release Candidate v1.0.0-rc1
-- [ ] Cancel running commands and transfers in the worker
-- [ ] macOS and Linux musl builds of the worker
+- [x] Cancel SSH commands and companion SFTP transfers in the worker
+- [ ] Linux musl builds of the worker
 - [ ] AI assistant integration (v2.0)
 
 <!-- TODO(release): ссылка на CHANGELOG или страницу релизов после v1.0.0-rc1 -->
