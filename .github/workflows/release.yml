@@ -17,6 +17,7 @@ on:
     paths:
       - "packaging/**"
       - "VERSION"
+      - "LICENSE"
       - "backend/app/desktop.py"
       - ".github/workflows/release.yml"
   workflow_dispatch:
@@ -33,6 +34,8 @@ jobs:
   build:
     name: build (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -46,8 +49,10 @@ jobs:
           # Apple Silicon, macos-15-intel — Intel
           - name: macos-arm64
             os: macos-15
+            macos_arch: arm64
           - name: macos-x64
             os: macos-15-intel
+            macos_arch: x86_64
     steps:
       - uses: actions/checkout@v5
 
@@ -93,7 +98,13 @@ jobs:
         run: bash packaging/linux/build.sh --from-core --clean --browser-smoke
       - name: Build (macOS)
         if: runner.os == 'macOS'
-        run: bash packaging/macos/build.sh --clean --browser-smoke
+        run: bash packaging/macos/build.sh --clean --browser-smoke --defer-archive
+
+      - name: Verify macOS signature and architecture before archiving
+        if: runner.os == 'macOS'
+        env:
+          SYNEX_MACOS_ARCH: ${{ matrix.macos_arch }}
+        run: uv run --project backend python packaging/build.py --archive-macos "$SYNEX_MACOS_ARCH"
 
       - name: Memory (without the window)
         shell: bash
@@ -101,8 +112,11 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then app=packaging/dist/Synex/Synex.exe
           elif [ "$RUNNER_OS" = "macOS" ]; then app=packaging/dist/Synex.app/Contents/MacOS/Synex
           else app=packaging/dist/Synex/Synex; fi
-          uv run --project backend --with psutil python packaging/measure_memory.py --app "$app" --settle 15
+          measurement_status=0
+          uv run --project backend --with psutil python packaging/measure_memory.py --app "$app" --settle 15 || measurement_status=$?
+          ls packaging/dist/memory-*.md >/dev/null
           cat packaging/dist/memory-*.md >> "$GITHUB_STEP_SUMMARY"
+          test "$measurement_status" -eq 0
 
       - uses: actions/upload-artifact@v6
         with:
@@ -125,6 +139,7 @@ jobs:
       - name: Collect files
         run: |
           mkdir dist
+          cp LICENSE dist/LICENSE
           find artifacts -name 'Synex-*' -type f -exec cp {} dist/ \;
           cat artifacts/*/SHA256SUMS.txt > dist/SHA256SUMS.txt
           for f in artifacts/*/memory-*.md; do cat "$f"; echo; done > memory.md
