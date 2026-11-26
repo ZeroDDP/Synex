@@ -157,9 +157,16 @@ uv run --project backend --with psutil python packaging/measure_memory.py \
 Ручной запуск (Actions → release → Run workflow) только собирает и сохраняет файлы как
 артефакты.
 
+## Подпись macOS и лицензия
+
+После PyInstaller сборщик подписывает весь `Synex.app` ad-hoc. Перед архивированием CI проверяет подпись через `codesign --verify --deep --strict`, архитектуру launcher и воркера через `lipo`, а также `Synex --version`. Эти проверки повторяются после распаковки ZIP. Для первого запуска проверенного архива очистите quarantine конкретного приложения по инструкции [RUNNING.ru.md](../RUNNING.ru.md#запуск-готовой-сборки).
+
+Для дистрибуции с доверием Gatekeeper нужен сертификат Developer ID Application с закрытым ключом, Hardened Runtime, отправка через `notarytool` и прикрепление билета через `stapler`. Храните сертификат и пароль к нему, а также параметры API Apple в защищённом окружении релиза GitHub. Учётные данные не входят в ZIP и не нужны для ad-hoc-сборок. [Руководство Apple](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution/)
+
+Лицензия MIT лежит рядом с исполняемым файлом на Windows и Linux, в `Synex.app/Contents/Resources/LICENSE` на macOS, а также отдельным файлом в GitHub Pre-release. Эта лицензия не требует активации. Замеры доступны в логах workflow и в отчётах сборки. `N/A` означает недоступную метрику. CI требует измеренный RSS, а USS публикуется, если доступен.
+
 ## Пока нет
 
-- Подписи кода (Authenticode для Windows, нотаризации Apple): неподписанные сборки при
-  первом запуске просят подтверждение.
+- Authenticode для Windows и автоматической нотаризации Apple.
 - AppImage или deb/rpm для Linux, dmg для macOS.
-- Автообновления.
+- Автообновлений.

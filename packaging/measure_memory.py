@@ -48,29 +48,66 @@ MB = 1024 * 1024
 class Sample:
     scenario: str
     processes: list[dict[str, object]] = field(default_factory=list)
-    rss_mb: float = 0.0
-    uss_mb: float = 0.0
+    missing_rss: list[str] = field(default_factory=list)
+    missing_uss: list[str] = field(default_factory=list)
+    rss_mb: float | None = None
+    uss_mb: float | None = None
 
-    def add(self, process: psutil.Process, role: str) -> None:
+    def add(self, process: psutil.Process, role: str | None) -> None:
+        try:
+            name = process.name()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            name = "(unknown)"
+        try:
+            rss = read_rss(process)
+            if rss <= 0:
+                raise ValueError("RSS is zero")
+        except (
+            psutil.NoSuchProcess,
+            psutil.AccessDenied,
+            OSError,
+            ValueError,
+            subprocess.SubprocessError,
+        ) as exc:
+            self.missing_rss.append(f"PID {process.pid} ({name}): {type(exc).__name__}")
+            return
         try:
             info = process.memory_full_info()
-            uss = getattr(info, "uss", info.rss)
-            entry = {
+            uss = info.uss / MB if hasattr(info, "uss") else None
+            if uss is None:
+                self.missing_uss.append(f"PID {process.pid} ({name}): unsupported")
+        except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
+            uss = None
+            self.missing_uss.append(f"PID {process.pid} ({name}): {type(exc).__name__}")
+        self.processes.append(
+            {
                 "pid": process.pid,
-                "role": role,
-                "name": process.name(),
-                "rss_mb": round(info.rss / MB, 1),
-                "uss_mb": round(uss / MB, 1),
+                "role": role or role_of(name),
+                "name": name,
+                "rss_mb": rss,
+                "uss_mb": uss,
             }
-        except (psutil.NoSuchProcess, psutil.AccessDenied):
-            return
-        self.processes.append(entry)
-        self.rss_mb += entry["rss_mb"]  # type: ignore[operator]
-        self.uss_mb += entry["uss_mb"]  # type: ignore[operator]
+        )
 
 
-def role_of(process: psutil.Process) -> str:
-    name = process.name().lower()
+def read_rss(process: psutil.Process) -> float:
+    try:
+        return process.memory_info().rss / MB
+    except psutil.AccessDenied:
+        if sys.platform != "darwin":
+            raise
+        result = subprocess.run(
+            ["ps", "-o", "rss=", "-p", str(process.pid)],
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=2,
+        )
+        return int(result.stdout.strip()) / 1024
+
+
+def role_of(name: str) -> str:
+    name = name.lower()
     if "synex_worker" in name:
         return "worker"
     if "webview" in name or "webkit" in name or "edge" in name:
@@ -78,13 +115,22 @@ def role_of(process: psutil.Process) -> str:
     return "backend" if "synex" in name or "python" in name else "other"
 
 
-def snapshot(root: psutil.Process, scenario: str) -> Sample:
+def snapshot(root: psutil.Process, scenario: str, worker_pid: int) -> Sample:
     sample = Sample(scenario)
     sample.add(root, "backend")
-    for child in root.children(recursive=True):
-        sample.add(child, role_of(child))
-    sample.rss_mb = round(sample.rss_mb, 1)
-    sample.uss_mb = round(sample.uss_mb, 1)
+    try:
+        children = {child.pid: child for child in root.children(recursive=True)}
+        if worker_pid not in children:
+            children[worker_pid] = psutil.Process(worker_pid)
+    except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
+        sample.missing_rss.append(f"Process tree or worker: {type(exc).__name__}")
+        children = {}
+    for child in children.values():
+        sample.add(child, "worker" if child.pid == worker_pid else None)
+    if not sample.missing_rss and sample.processes:
+        sample.rss_mb = sum(float(p["rss_mb"]) for p in sample.processes)
+        if not sample.missing_uss:
+            sample.uss_mb = sum(float(p["uss_mb"]) for p in sample.processes)
     return sample
 
 
@@ -111,7 +157,7 @@ def start_app(app: Path | None, port: int, data: str, *, window: bool) -> subpro
     return subprocess.Popen(command, env=env, cwd=cwd)
 
 
-def wait_ready(port: int, process: subprocess.Popen, timeout: float = 60) -> None:
+def wait_ready(port: int, process: subprocess.Popen, timeout: float = 60) -> int:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if process.poll() is not None:
@@ -120,7 +166,7 @@ def wait_ready(port: int, process: subprocess.Popen, timeout: float = 60) -> Non
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=2) as r:
                 worker = json.loads(r.read())["worker"]
             if worker.get("connected") and worker.get("worker_pid"):
-                return
+                return int(worker["worker_pid"])
         except OSError:
             pass
         time.sleep(0.5)
@@ -142,7 +188,7 @@ def api(port: int, method: str, path: str, body: object | None = None) -> dict:
 
 async def ui_client(port: int, stop: asyncio.Event, paths: list[str]) -> None:
     """Подключения UI: /ws и, если есть, живой лог. Читают всё, что приходит."""
-    from websockets.asyncio.client import connect  # noqa: PLC0415
+    from websockets.asyncio.client import connect
 
     async def reader(path: str) -> None:
         async with connect(f"ws://127.0.0.1:{port}{path}", max_size=None) as ws:
@@ -175,7 +221,12 @@ def run_with_clients(port: int, paths: list[str], seconds: float, measure) -> Sa
 def trust_and_connect(port: int, ssh: str, key: str) -> str:
     user, _, address = ssh.partition("@")
     host, _, port_text = address.partition(":")
-    body = {"host": host, "port": int(port_text or 22), "username": user, "key_path": key}
+    body = {
+        "host": host,
+        "port": int(port_text or 22),
+        "username": user,
+        "key_path": key,
+    }
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}/api/ssh/sessions",
         data=json.dumps(body).encode(),
@@ -201,29 +252,42 @@ def report(samples: list[Sample], meta: dict[str, object]) -> str:
     lines = [
         f"# Synex memory: {meta['version']} on {meta['os']}",
         "",
-        f"{meta['when']}, {meta['what']}, settle {meta['settle']} s. RSS counts shared "
-        "libraries in every process, USS only the process's own memory.",
+        (
+            f"{meta['when']}, {meta['what']}, settle {meta['settle']} s. RSS counts shared "
+            "libraries in every process, USS only the process's own memory."
+        ),
         "",
         "| Scenario | Backend USS | Worker USS | Window USS | Total USS | Total RSS |",
         "|---|---:|---:|---:|---:|---:|",
     ]
+
+    def fmt(value: float | None) -> str:
+        return "N/A" if value is None else f"{value:.1f} MB"
+
     for sample in samples:
-        by_role: dict[str, float] = {}
-        for item in sample.processes:
-            role = str(item["role"])
-            by_role[role] = by_role.get(role, 0.0) + float(item["uss_mb"])  # type: ignore[arg-type]
-        lines.append(
-            f"| {sample.scenario} | {by_role.get('backend', 0):.1f} MB | "
-            f"{by_role.get('worker', 0):.1f} MB | {by_role.get('window', 0):.1f} MB | "
-            f"{sample.uss_mb:.1f} MB | {sample.rss_mb:.1f} MB |"
-        )
+        cells = []
+        for role in ("backend", "worker", "window"):
+            values = [p["uss_mb"] for p in sample.processes if p["role"] == role]
+            cells.append(
+                fmt(None if sample.missing_rss or None in values else sum(map(float, values)))
+            )
+        cells.extend((fmt(sample.uss_mb), fmt(sample.rss_mb)))
+        lines.append(f"| {sample.scenario} | " + " | ".join(cells) + " |")
+    for sample in samples:
+        if sample.missing_rss or sample.missing_uss:
+            lines.append("")
+            lines.extend(f"- {sample.scenario}, RSS: {error}" for error in sample.missing_rss)
+            lines.extend(f"- {sample.scenario}, USS: {error}" for error in sample.missing_uss)
     idle = samples[0]
-    verdict = "meets" if idle.rss_mb <= TARGET_MB else "exceeds"
-    lines += [
-        "",
-        f"Idle total RSS {idle.rss_mb:.1f} MB {verdict} the {TARGET_MB} MB target (SYN-72).",
-        "",
-    ]
+    if idle.rss_mb is None:
+        lines += ["", "Idle RSS measurement incomplete. No result for SYN-72.", ""]
+    else:
+        verdict = "meets" if idle.rss_mb <= TARGET_MB else "exceeds"
+        lines += [
+            "",
+            f"Idle total RSS {fmt(idle.rss_mb)} {verdict} the {TARGET_MB} MB target (SYN-72).",
+            "",
+        ]
     return "\n".join(lines)
 
 
@@ -243,18 +307,26 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="synex-memory-") as data:
         process = start_app(args.app, args.port, data, window=args.window)
         try:
-            wait_ready(args.port, process)
+            worker_pid = wait_ready(args.port, process)
             root = psutil.Process(process.pid)
             time.sleep(args.settle)
-            samples.append(snapshot(root, "idle"))
+            samples.append(snapshot(root, "idle", worker_pid))
             samples.append(
                 run_with_clients(
-                    args.port, ["/ws"], args.settle, lambda: snapshot(root, "ui (/ws, metrics)")
+                    args.port,
+                    ["/ws"],
+                    args.settle,
+                    lambda: snapshot(root, "ui (/ws, metrics)", worker_pid),
                 )
             )
             if args.ssh and args.key:
                 session = trust_and_connect(args.port, args.ssh, args.key)
-                api(args.port, "POST", f"/api/ssh/sessions/{session}/exec", {"command": "uname -a"})
+                api(
+                    args.port,
+                    "POST",
+                    f"/api/ssh/sessions/{session}/exec",
+                    {"command": "uname -a"},
+                )
                 server = api(args.port, "GET", f"/api/ssh/sessions/{session}")
                 server_id = f"{server['host'].lower()}:{server['port']}"
                 paths = [
@@ -265,14 +337,17 @@ def main() -> int:
                 samples.append(
                     run_with_clients(
                         args.port, paths, args.settle,
-                        lambda: snapshot(root, "ssh: 1 session, terminal, live log"),
+                        lambda: snapshot(root, "ssh: 1 session, terminal, live log", worker_pid),
                     )
                 )  # fmt: skip
                 for _ in range(4):
                     trust_and_connect(args.port, args.ssh, args.key)
                 samples.append(
                     run_with_clients(
-                        args.port, paths, args.settle, lambda: snapshot(root, "ssh: 5 sessions")
+                        args.port,
+                        paths,
+                        args.settle,
+                        lambda: snapshot(root, "ssh: 5 sessions", worker_pid),
                     )
                 )
         finally:
@@ -299,7 +374,7 @@ def main() -> int:
         json.dumps({"meta": meta, "samples": [asdict(s) for s in samples]}, indent=2),
         encoding="utf-8",
     )
-    return 0
+    return int(any(sample.rss_mb is None for sample in samples))
 
 
 if __name__ == "__main__":

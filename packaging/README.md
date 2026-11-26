@@ -157,9 +157,16 @@ The window adds its WebView: measure it on Windows and macOS with `--window`.
 A manual run (Actions → release → Run workflow) only builds and keeps the files as
 artifacts.
 
+## macOS signing and license
+
+After PyInstaller, the builder ad-hoc signs the entire `Synex.app`. Before creating the archive, CI checks the signature with `codesign --verify --deep --strict`, the launcher and worker architecture with `lipo`, and the launcher with `Synex --version`. Those checks repeat after extracting the ZIP. To clear quarantine on a verified download, follow [RUNNING.md](../RUNNING.md#run-a-downloaded-build).
+
+Trusted Gatekeeper distribution requires a Developer ID Application certificate and its private key, Hardened Runtime, a `notarytool` submission and stapling the ticket. Store the certificate and its password, and the Apple API credentials in a protected GitHub release environment. The ZIP and ad-hoc builds do not need signing credentials. [Apple documentation](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution/)
+
+The MIT license is next to the executable on Windows and Linux, in `Synex.app/Contents/Resources/LICENSE` on macOS, and a separate GitHub Pre-release asset. No activation is required. Memory results are in the workflow and build reports. `N/A` marks unavailable metrics. CI requires RSS measurements and publishes USS when available.
+
 ## Not yet
 
-- Code signing (Windows Authenticode, Apple notarization): unsigned builds ask for
-  confirmation on the first start.
+- Windows Authenticode and automated Apple notarization.
 - AppImage or deb/rpm for Linux, dmg for macOS.
-- Auto-update.
+- Auto-updates.

@@ -29,6 +29,9 @@ datas = [
     (str(STAGE / "VERSION"), "."),
     *collect_data_files("keyring"),
 ]
+if MACOS:
+    datas.append((str(ROOT / "LICENSE"), "."))
+
 # pywebview (окно приложения на Windows и macOS) PyInstaller находит сам по импорту в
 # app/desktop.py, если он установлен в среде сборки; без него UI откроется в браузере.
 

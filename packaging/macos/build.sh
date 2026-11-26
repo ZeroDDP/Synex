@@ -3,8 +3,7 @@
 #
 #   bash packaging/macos/build.sh [параметры build.py]
 #
-# Результат: packaging/dist/Synex-<версия>-macos-<арх>.zip с Synex.app. Приложение не
-# подписано: при первом запуске macOS спросит разрешение (правый клик → Открыть).
+# Результат: ZIP с ad-hoc подписанным Synex.app в packaging/dist.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 

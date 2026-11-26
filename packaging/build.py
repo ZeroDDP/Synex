@@ -12,10 +12,9 @@
 3. PyInstaller (packaging/synex.spec): папка packaging/dist/Synex (на macOS Synex.app).
    PyInstaller и pywebview ставятся только на время сборки (`uv run --with`), в
    uv.lock их нет.
-4. Архив в packaging/dist: Synex-<версия>-<ос>-<архитектура>.zip или .tar.gz и
+4. Подпись macOS и проверка запуска; в комплект копируется LICENSE.
+5. Архив в packaging/dist: Synex-<версия>-<ос>-<архитектура>.zip или .tar.gz и
    SHA256SUMS.txt.
-5. Проверка: собранное приложение запускается без окна (--headless) с пустой папкой
-   данных; /api/health отвечает, воркер запущен, UI отдаётся на /.
 
 Версия берётся из файла VERSION в корне репозитория.
 """
@@ -147,7 +146,9 @@ def build_app(stage: Path, *, window: bool) -> Path:
 
 
 def add_extras(built: Path) -> None:
-    """Linux: ярлык для меню приложений и иконка рядом с программой (install.sh)."""
+    """Add the project license and Linux desktop integration files."""
+    if target_os() != "macos":
+        shutil.copy2(ROOT / "LICENSE", built / "LICENSE")
     if target_os() != "linux":
         return
     for name in ("synex.desktop", "install.sh"):
@@ -162,6 +163,42 @@ def executable(built: Path) -> Path:
     return built / ("Synex.exe" if target_os() == "windows" else "Synex")
 
 
+def sign_macos(built: Path) -> None:
+    log("Ad-hoc signing macOS bundle")
+    run(["codesign", "--force", "--deep", "--sign", "-", str(built)])
+
+
+def verify_macos(built: Path, arch: str) -> None:
+    log(f"Verify macOS signature and architecture ({arch})")
+    run(["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(built)])
+    license_file = built / "Contents" / "Resources" / "LICENSE"
+    if not license_file.is_file() or license_file.read_bytes() != (ROOT / "LICENSE").read_bytes():
+        raise SystemExit("The macOS bundle is missing the project license")
+    programs = (
+        executable(built),
+        built / "Contents" / "Frameworks" / "worker" / "synex_worker",
+    )
+    for program in programs:
+        run(["lipo", str(program), "-verify_arch", arch])
+    result = subprocess.run(
+        [str(executable(built)), "--version"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    if result.stdout.strip() != f"Synex {version()}":
+        raise SystemExit(f"Unexpected macOS launcher version: {result.stdout!r}")
+
+
+def archive_macos(built: Path, arch: str) -> None:
+    verify_macos(built, arch)
+    path = archive(built)
+    with tempfile.TemporaryDirectory(prefix="synex-release-") as folder:
+        run(["ditto", "-x", "-k", str(path), folder])
+        verify_macos(Path(folder) / built.name, arch)
+
+
 # ----------------------------------------------------------------- archive
 
 
@@ -172,7 +209,7 @@ def archive(built: Path) -> Path:
         path = DIST / f"{name}.tar.gz"
         with tarfile.open(path, "w:gz") as tar:
             tar.add(built, arcname=name)
-    elif target_os() == "macos" and shutil.which("ditto"):
+    elif target_os() == "macos":
         path = DIST / f"{name}.zip"
         # ditto сохраняет ссылки и атрибуты внутри .app
         run(["ditto", "-c", "-k", "--keepParent", str(built), str(path)])
@@ -218,7 +255,13 @@ def smoke_test(built: Path, port: int, *, browser: bool = False) -> None:
             if '<div id="app">' not in page:
                 raise SystemExit("the build does not serve the UI on /")
             if browser:
-                run(["node", str(PACKAGING / "browser-smoke.cjs"), f"http://127.0.0.1:{port}"])
+                run(
+                    [
+                        "node",
+                        str(PACKAGING / "browser-smoke.cjs"),
+                        f"http://127.0.0.1:{port}",
+                    ]
+                )
             log(f"OK: plugins {health.get('plugins')}, worker pid {worker.get('worker_pid')}")
         finally:
             if os.name == "nt" and process.poll() is None:
@@ -256,15 +299,38 @@ def _wait_health(port: int, process: subprocess.Popen[bytes]) -> dict:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Build Synex for this OS")
-    parser.add_argument("--worker", type=Path, required=True, help="synex_worker for this OS")
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--worker", type=Path, help="synex_worker for this OS")
+    mode.add_argument(
+        "--archive-macos",
+        choices=("arm64", "x86_64"),
+        help="validate and archive an existing Synex.app for this architecture",
+    )
+    parser.add_argument(
+        "--defer-archive",
+        action="store_true",
+        help="leave Synex.app for the separate CI validation step",
+    )
     parser.add_argument("--port", type=int, help="deprecated: set PORT when starting Synex")
     parser.add_argument("--no-window", action="store_true", help="no pywebview: browser UI")
     parser.add_argument("--clean", action="store_true", help="npm ci even with node_modules")
     parser.add_argument("--no-smoke", action="store_true", help="skip the smoke test")
     parser.add_argument("--smoke-port", type=int, default=18765)
-    parser.add_argument("--browser-smoke", action="store_true",
-                        help="check the same build in Chromium on two consecutive ports")
+    parser.add_argument(
+        "--browser-smoke",
+        action="store_true",
+        help="check the same build in Chromium on two consecutive ports",
+    )
     args = parser.parse_args(argv)
+    macos = target_os() == "macos"
+    if (args.archive_macos or args.defer_archive) and not macos:
+        parser.error("macOS packaging options require macOS")
+    if args.archive_macos:
+        expected_arch = "arm64" if target_arch() == "arm64" else "x86_64"
+        if args.archive_macos != expected_arch:
+            parser.error(f"expected a native macOS runner ({args.archive_macos})")
+        archive_macos(DIST / "Synex.app", args.archive_macos)
+        return 0
     if args.browser_smoke and (args.no_smoke or not 1 <= args.smoke_port <= 65534):
         parser.error("--browser-smoke requires smoke tests and two valid consecutive ports")
     if args.port is not None:
@@ -284,11 +350,17 @@ def main(argv: list[str] | None = None) -> int:
     window = not args.no_window and target_os() in ("windows", "macos")
     built = build_app(stage, window=window)
     add_extras(built)
+    if macos:
+        sign_macos(built)
     if not args.no_smoke:
         smoke_test(built, args.smoke_port, browser=args.browser_smoke)
         if args.browser_smoke:
             smoke_test(built, args.smoke_port + 1, browser=True)
-    archive(built)
+    if not args.defer_archive:
+        if macos:
+            archive_macos(built, "arm64" if target_arch() == "arm64" else "x86_64")
+        else:
+            archive(built)
     log(f"Done: {DIST}")
     return 0
 
