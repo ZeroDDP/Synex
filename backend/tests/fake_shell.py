@@ -196,6 +196,8 @@ class FakeShell:
             if not self._is_dir(target):
                 return "", f"sh: 1: cd: can't cd to {args[0]}\n", 2, cwd, False
             return "", "", 0, target, False
+        if name == "test" and len(args) == 2 and args[0] == "-d":
+            return "", "", int(not self._is_dir(self._abs(cwd, args[1]))), cwd, False
         if name == "pwd":
             return f"{cwd}\n", "", 0, cwd, False
         if name == "echo":
