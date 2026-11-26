@@ -83,6 +83,11 @@ async def test_links_to_directories_open_like_directories(files: Files):
     }
     assert (entries["to-dir"]["type"], entries["to-dir"]["target_type"]) == ("link", "dir")
     assert entries["to-dir"]["is_dir"] is True
+    requests = files.rig.worker.requests
+    lists = [item for item in requests if item["action"] == "sftp_list_dir"]
+    assert [item["payload"]["remote_path"] for item in lists] == [HOME]
+    probes = [item for item in requests if "test -d " in item["payload"].get("command", "")]
+    assert len(probes) == 1
     assert (entries["to-file"]["target_type"], entries["to-file"]["is_dir"]) == (None, False)
     removed = await files.rig.api.delete(f"{files.base}/entry", params={"path": "to-dir"})
     assert removed.status_code == 200, removed.text

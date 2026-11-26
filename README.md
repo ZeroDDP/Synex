@@ -158,8 +158,7 @@ Ready builds are on the [releases page](https://github.com/ZeroDDP/Synex/release
 | Linux x86_64 | `Synex-<version>-linux-x64.tar.gz`: unpack, run `Synex` (`sh install.sh` adds it to the menu) |
 | macOS (Apple Silicon / Intel) | `Synex-<version>-macos-arm64.zip` / `…-macos-x64.zip` with `Synex.app` |
 
-Builds are not signed yet: confirm the first start (Windows: More info → Run anyway; macOS:
-right click → Open). Building them yourself: [packaging/README.md](packaging/README.md).
+See [RUNNING.md](RUNNING.md#run-a-downloaded-build) for launching a download, including signature verification and quarantine on macOS. Builds include the MIT license.
 
 ## Configuration
 
@@ -234,6 +233,14 @@ into `main` with green checks. Details: [CONTRIBUTING.md](CONTRIBUTING.md).
 - [ ] AI assistant integration (v2.0)
 
 <!-- TODO(release): ссылка на CHANGELOG или страницу релизов после v1.0.0-rc1 -->
+
+### Team status for 0.4.0
+
+| Team | Implemented | Open |
+|---|---|---|
+| Backend | External plugin IPC and REST/WS with the test host, Docker and cancellation via Rust, batched SFTP link checks | End-to-end verification with the real plugin host and upgrade testing with user data |
+| Core | Windows/Linux/macOS workers, Docker Engine over SSH, SSH and SFTP cancellation | PTY and SSH output streaming over IPC, a plugin host executable, cheaper symlink metadata and reusable SFTP channels |
+| Frontend | SSH session selection, updated Terminal and one listing per Files navigation ([#64](https://github.com/ZeroDDP/Synex/pull/64), [#65](https://github.com/ZeroDDP/Synex/pull/65)) | PTY terminal, external plugin installation UI and acceptance of the Docker/Git flows |
 
 ## Team
 

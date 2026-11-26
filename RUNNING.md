@@ -17,12 +17,46 @@ A prebuilt worker for Windows x64 and Linux x86_64 is in the repository. On macO
 and older Linux you have to build it (see
 [Worker on macOS, ARM and older Linux](#worker-on-macos-arm-and-older-linux)).
 
+## Run a downloaded build
+
+Choose the OS and CPU architecture on [GitHub Releases](https://github.com/ZeroDDP/Synex/releases). Verify the archive against `SHA256SUMS.txt` from that release. The bundled MIT license requires no activation.
+
+- **Windows 10/11 x64.** Extract the entire ZIP and run `Synex.exe`, or use the setup executable if available. The app window uses WebView2. Use `& .\Synex.exe --browser` for browser mode. SmartScreen may warn about builds without Authenticode.
+- **Linux x86_64.** On Ubuntu 22.04, Debian 12 and compatible newer systems, extract `linux-x64.tar.gz`, enter the extracted directory and run `./Synex`. Synex opens in your browser. Run `sh install.sh` to add an application-menu entry. For ARM or a different libc, run from source with a worker built for that system.
+- **macOS.** Use `macos-arm64.zip` on Apple Silicon and `macos-x64.zip` on Intel. CI builds and checks both on macOS 15. Extract the ZIP. To update, quit Synex and move the old application out of Applications first. App data is stored separately.
+
+For an official macOS build with a verified checksum, run the following as your regular user:
+
+```bash
+mv "$HOME/Downloads/Synex.app" /Applications/
+codesign --verify --deep --strict --verbose=2 /Applications/Synex.app
+xattr -dr com.apple.quarantine /Applications/Synex.app
+open /Applications/Synex.app
+```
+
+Run each command in order and continue after the signature check succeeds. If needed, use `~/Applications` and adjust the paths. Start the GUI from your own login session without `sudo`.
+
+If the app fails to launch, inspect the bundle:
+
+```bash
+app=/Applications/Synex.app
+"$app/Contents/MacOS/Synex" --version
+file "$app/Contents/MacOS/Synex"
+lipo -info "$app/Contents/MacOS/Synex"
+codesign -dv --verbose=4 "$app"
+codesign --verify --deep --strict --verbose=2 "$app"
+spctl -a -vvv -t exec "$app"
+xattr -l "$app"
+```
+
+A version response confirms the executable starts. Check LaunchServices, Gatekeeper and `~/Library/Application Support/Synex/logs/synex.log` if the window still fails. For `Killed: 9`, check the signature first. A dyld `incompatible architecture` error points to the executable or a library. Gatekeeper can reject an ad-hoc signature even when `codesign` verifies it. Trusted distribution requires Developer ID and notarization.
+
 ## What to install
 
 | Program | Needed for | Check |
 |---|---|---|
 | Python 3.12 and [uv](https://docs.astral.sh/uv/getting-started/installation/) | backend | `uv --version` |
-| [Node.js](https://nodejs.org/) 22 LTS (or 20.19+) with npm | UI | `node --version` |
+| [Node.js](https://nodejs.org/) 22.12+ with npm | UI | `node --version` |
 | Git | code | `git --version` |
 | [Rust](https://rustup.rs/) (cargo) | only if the prebuilt worker does not fit | `cargo --version` |
 
@@ -133,7 +167,7 @@ Ready-made builds for Windows, Linux and macOS and how to build them:
 ## What already works
 
 The UI connects to the `/ws` stream and shows metrics on the Dashboard for servers with an
-open SSH session. The other screens still use test data.
+open SSH session. Terminal and Files use active SSH sessions. Files queries only the current directory.
 You can check the backend without the UI:
 
 - http://127.0.0.1:8000/api/health: state of the backend and the worker;

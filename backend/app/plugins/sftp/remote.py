@@ -10,7 +10,7 @@
   папки файла (что умеет сборка, запоминается на сессию);
 * записи списка: размер, права, время изменения, владелец (uid/gid) и куда ведёт
   ссылка (у старых сборок только размер и права);
-* ссылка на папку или нет: пробный список, не больше LINK_PROBES ссылок на папку списка;
+* ссылка на папку или нет: одна команда test -d для ограниченной пачки ссылок;
 * ошибки воркера: код в начале текста (sftp_not_found, sftp_permission_denied,
   sftp_exists, sftp_not_a_directory, sftp_unavailable, sftp_failed; с 2026-11-14) или,
   у старых сборок, тексты статусов SFTP ("No such file", "Permission denied",
@@ -80,7 +80,9 @@ TargetType = Literal["file", "dir"]
 # Чем кончилась уборка временного пути (RemoteFS.discard)
 Discarded = Literal["removed", "absent", "failed"]
 
-LINK_PROBES = 32  # сколько ссылок одного списка проверять «ведёт ли на папку»
+LINK_PROBES = 32
+LINK_PROBE_TIMEOUT = 2.0
+LINK_PROBE_COMMAND_BYTES = 12_000
 _SHA256_RE = re.compile(r"\b([0-9a-fA-F]{64})\b")
 # Контрольные суммы пачкой: не больше стольких файлов и символов в одной команде
 CHECKSUM_BATCH = 64
@@ -900,20 +902,38 @@ class RemoteFS:
         await self._call(session_id, "sftp_remove_dir", {"remote_path": directory}, **via)
 
     async def _probe_links(self, session_id: str, entries: list[Entry]) -> list[Entry]:
-        result, probes = [], 0
-        for entry in entries:
-            if entry.type == "link" and probes < LINK_PROBES:
-                probes += 1
-                try:
-                    await self._call(session_id, "sftp_list_dir", {"remote_path": entry.path})
-                except SftpNotFoundError:
-                    pass  # ведёт на файл, или ссылка битая: SFTP воркера их не различает
-                except AppError:
-                    pass
-                else:
-                    entry = replace(entry, target_type="dir")
-            result.append(entry)
-        return result
+        probes: dict[str, int] = {}
+        commands: list[str] = []
+        size = 0
+        for index, entry in enumerate(entries):
+            if entry.type != "link" or entry.target_type is not None or "\r" in entry.path:
+                continue
+            command = f"test -d {shlex.quote(entry.path)} && echo {index};"
+            size += len(command.encode("utf-8")) + 1
+            if size > LINK_PROBE_COMMAND_BYTES:
+                break
+            probes[str(index)] = index
+            commands.append(command)
+            if len(commands) >= LINK_PROBES:
+                break
+        if not commands:
+            return entries
+
+        try:
+            result = await self.manager.run_service(
+                session_id,
+                " ".join([*commands, "true"]),
+                timeout=LINK_PROBE_TIMEOUT,
+                wait=0,
+                name="sftp",
+            )
+        except AppError:
+            return entries
+        for line in result.stdout.splitlines():
+            index = probes.get(line)
+            if index is not None:
+                entries[index] = replace(entries[index], target_type="dir")
+        return entries
 
     async def _call(
         self,

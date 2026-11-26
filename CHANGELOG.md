@@ -7,7 +7,15 @@ for Windows, Linux and macOS.
 
 [Русская версия](CHANGELOG.ru.md)
 
-## [0.3.0] — unreleased
+## [0.4.0] — unreleased
+
+- Files loads the current directory with one request. The backend checks SFTP symlink targets in one bounded batch without listing their contents.
+- Updated SSH connection, session selection and Terminal.
+- macOS uses ad-hoc signing. CI verifies the signature, architecture and launcher before archiving and after extracting the ZIP.
+- Memory reports record RSS independently of USS and flag unavailable metrics and incomplete samples.
+- The MIT license ships with the builds and pre-release.
+
+## [0.3.0] - 2026-11-24
 
 - The Rust worker accesses Docker Engine over SSH. The existing API serves containers, images, stats and logs.
 - The backend selects a worker for Windows x64, Linux x64, Intel Macs and Apple Silicon. Workers support SSH command and SFTP transfer cancellation.
