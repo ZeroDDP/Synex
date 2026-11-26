@@ -17,12 +17,46 @@
 старом Linux его нужно собрать (см.
 [Воркер на macOS, ARM и старом Linux](#воркер-на-macos-arm-и-старом-linux)).
 
+## Запуск готовой сборки
+
+Скачайте архив своей ОС и архитектуры со страницы [GitHub Releases](https://github.com/ZeroDDP/Synex/releases). Сверьте SHA-256 с `SHA256SUMS.txt` из того же релиза. Лицензия Synex MIT включена в сборку и не требует активации.
+
+- **Windows 10/11 x64.** Имя файла заканчивается на `windows-x64.zip` или `windows-x64-setup.exe`, если выпущен установщик. Распакуйте ZIP целиком и запустите `Synex.exe` либо установите приложение. Для окна нужен WebView2. Вариант с браузером запускается командой `& .\Synex.exe --browser`. Windows может показать предупреждение SmartScreen для сборки без Authenticode.
+- **Linux x86_64.** На Ubuntu 22.04, Debian 12 и совместимых более новых системах распакуйте `linux-x64.tar.gz`, перейдите в распакованную папку и запустите `./Synex`. Synex откроется в браузере. Команда `sh install.sh` добавляет ярлык в меню. Для ARM или системы с другой libc используйте запуск из исходников ниже и воркер, собранный для этой системы.
+- **macOS.** `macos-arm64.zip` предназначен для Apple Silicon, `macos-x64.zip` — для Intel. CI собирает и проверяет обе версии на macOS 15. Распакуйте ZIP. При обновлении закройте Synex и переместите старый `Synex.app` из Applications. Данные приложения хранятся отдельно.
+
+Для официальной macOS-сборки, контрольную сумму которой вы сверили, выполните от своего пользователя:
+
+```bash
+mv "$HOME/Downloads/Synex.app" /Applications/
+codesign --verify --deep --strict --verbose=2 /Applications/Synex.app
+xattr -dr com.apple.quarantine /Applications/Synex.app
+open /Applications/Synex.app
+```
+
+Выполняйте команды по очереди и продолжайте после успешной проверки подписи. Если у пользователя нет прав записи в `/Applications`, можно использовать `~/Applications`, заменив путь во всех командах. Запускайте GUI из пользовательской сессии без `sudo`.
+
+При сбое запустите внутренний бинарник и проверьте сборку:
+
+```bash
+app=/Applications/Synex.app
+"$app/Contents/MacOS/Synex" --version
+file "$app/Contents/MacOS/Synex"
+lipo -info "$app/Contents/MacOS/Synex"
+codesign -dv --verbose=4 "$app"
+codesign --verify --deep --strict --verbose=2 "$app"
+spctl -a -vvv -t exec "$app"
+xattr -l "$app"
+```
+
+Если версия печатается, бинарник запускается: проверьте LaunchServices, Gatekeeper и журнал `~/Library/Application Support/Synex/logs/synex.log`. Если появляется `Killed: 9`, первым делом проверьте подпись. `dyld` с `incompatible architecture` указывает на архитектуру приложения или библиотеки. Для сборки с ad-hoc-подписью `spctl` может отклонить приложение даже при успешной проверке `codesign`; доверенный запуск для дистрибуции требует Developer ID и нотаризации.
+
 ## Что установить
 
 | Программа | Зачем | Проверка |
 |---|---|---|
 | Python 3.12 и [uv](https://docs.astral.sh/uv/getting-started/installation/) | backend | `uv --version` |
-| [Node.js](https://nodejs.org/) 22 LTS (или 20.19+) с npm | UI | `node --version` |
+| [Node.js](https://nodejs.org/) 22.12+ с npm | UI | `node --version` |
 | Git | код | `git --version` |
 | [Rust](https://rustup.rs/) (cargo) | только если готовый воркер не подходит | `cargo --version` |
 
@@ -132,7 +166,7 @@ uv run python -m app.desktop             # --browser: всегда браузе�
 ## Что уже работает
 
 UI подключается к потоку `/ws` и показывает на Dashboard метрики серверов с открытой
-SSH-сессией. Остальные экраны пока на тестовых данных.
+SSH-сессией. Terminal и Files работают с активным SSH-подключением; Files запрашивает только текущий каталог.
 Backend проверяется и без UI:
 
 - http://127.0.0.1:8000/api/health: состояние backend и воркера;

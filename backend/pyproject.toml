@@ -1,6 +1,6 @@
 [project]
 name = "synex"
-version = "0.3.0"
+version = "0.4.0"
 description = "Synex backend: FastAPI-слой между Rust-ядром synex_worker и UI"
 requires-python = ">=3.12"
 dependencies = [

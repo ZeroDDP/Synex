@@ -654,6 +654,11 @@ and transfers between them with progress. It works through the SFTP of the Rust 
   a folder has `target_type: "dir"` and `is_dir: true` (it opens on click), and `link_target`
   holds the path stored in the link. `modified_at`, `uid`, `gid` and `link_target` of server
   files come from the worker since 2026-11-14; with an older build they are `null`.
+
+  The backend checks symlink targets in a single service command using `test -d`. It does not
+  list target directories. The command is capped at 32 links and 12 KB, with a two-second
+  server-side limit when `timeout` is available. If shell access is unavailable, the target type
+  remains unknown. Directory listings and deletion still use worker metadata.
 - `GET .../stat?path=`, `POST .../mkdir` `{path, parents?}` → 201, `POST .../move` and
   `POST .../copy` `{source, target, overwrite?}` (`target` is the new full path; a folder is
   copied as a whole), `DELETE .../entry?path=&recursive=true`. Response: the entry (like an
