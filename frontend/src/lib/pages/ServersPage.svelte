@@ -1,10 +1,63 @@
 <script>
+  import { onMount } from 'svelte';
+  import { BACKEND_URL } from '../api/config.js';
   import SshConnect from '../SshConnect.svelte';
   import { servers, serverUsernames } from '../stores.js';
 
   export let onConnected = () => {};
   export let onSessionSelected = () => {};
   export let showConnectForm = false;
+  let savedConnections = [];
+  let connectionsError = '';
+
+  $: displayServers = $servers.flatMap((server) => {
+    const connection = savedConnections.find(
+      (connection) =>
+        `${connection.host.toLowerCase()}:${Number(connection.port || 22)}` ===
+        String(server.id).toLowerCase()
+    );
+    if (!connection) {
+      return [{ ...server, displayName: $serverUsernames[server.id] || '—' }];
+    }
+    return [{
+      ...server,
+      displayName: connection.name,
+      host: `${connection.host}:${connection.port || 22}`
+    }];
+  });
+
+  onMount(() => {
+    void loadSavedConnections();
+  });
+
+  async function loadSavedConnections() {
+    try {
+      const response = await fetch(`${BACKEND_URL}/api/connections`);
+      const data = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(
+          typeof data?.detail === 'string' ? data.detail : `Backend returned HTTP ${response.status}.`
+        );
+      }
+      if (
+        !Array.isArray(data) ||
+        data.some(
+          (connection) =>
+            typeof connection?.id !== 'string' ||
+            typeof connection?.name !== 'string' ||
+            typeof connection?.host !== 'string'
+        )
+      ) {
+        throw new Error('Backend returned an invalid saved connection list.');
+      }
+      savedConnections = data;
+      connectionsError = '';
+    } catch (error) {
+      connectionsError = `Could not load saved server names: ${
+        error instanceof Error ? error.message : 'Unexpected backend error.'
+      }`;
+    }
+  }
 
   function meterWidth(value) {
     return typeof value === 'number' && Number.isFinite(value)
@@ -34,6 +87,9 @@
       </header>
 
       <div class="table">
+        {#if connectionsError}
+          <div class="connections-error" role="status">{connectionsError}</div>
+        {/if}
         <div class="table-row table-row--head">
           <span class="cell cell-name">NAME</span>
           <span class="cell cell-host">HOST</span>
@@ -43,9 +99,9 @@
           <span class="cell cell-status">STATUS</span>
         </div>
 
-        {#each $servers as server (server.id)}
+        {#each displayServers as server (server.id)}
           <div class="table-row">
-            <span class="cell cell-name">{$serverUsernames[server.id] || '—'}</span>
+            <span class="cell cell-name">{server.displayName}</span>
             <span class="cell cell-host">{server.host}</span>
             <span class="cell cell-meter">
               <span class="bar">
@@ -125,6 +181,11 @@
   .table {
     display: flex;
     flex-direction: column;
+  }
+
+  .connections-error {
+    padding: var(--synex-space-3) 0;
+    color: var(--synex-warning);
   }
 
   .table-row {
