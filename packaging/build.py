@@ -179,7 +179,7 @@ def verify_macos(built: Path, arch: str) -> None:
         built / "Contents" / "Frameworks" / "worker" / "synex_worker",
     )
     for program in programs:
-        run(["lipo", "-verify_arch", arch, str(program)])
+        run(["lipo", str(program), "-verify_arch", arch])
     result = subprocess.run(
         [str(executable(built)), "--version"],
         capture_output=True,
