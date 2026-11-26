@@ -22,7 +22,6 @@
   let selectedPath = '';
   let loading = false;
   let error = '';
-  let treeError = '';
   let sessionError = '';
   let sessionRequest = 0;
   let directoryRequest = 0;
@@ -136,7 +135,6 @@
     searchResults = null;
     searchNotice = '';
     error = '';
-    treeError = '';
     const version = ++sessionRequest;
     if (!nextSessionId) return;
 
@@ -163,7 +161,6 @@
     const currentSessionRequest = sessionRequest;
     loading = true;
     error = '';
-    treeError = '';
     searchResults = null;
     searchNotice = '';
     selectedPath = highlight;
@@ -172,19 +169,9 @@
       const data = await request(listUrl(id, path));
       if (!isListing(data)) throw new Error('Backend returned an invalid directory listing.');
 
-      let parentData = data;
-      if (data.parent) {
-        try {
-          const parent = await request(listUrl(id, data.parent));
-          if (isListing(parent)) parentData = parent;
-          else treeError = 'Backend returned an invalid parent directory listing.';
-        } catch (parentError) {
-          treeError = `Could not load the folder tree: ${errorMessage(parentError)}`;
-        }
-      }
       if (version !== directoryRequest || currentSessionRequest !== sessionRequest) return;
       listing = data;
-      treeListing = parentData;
+      treeListing = data;
       currentPath = data.path;
     } catch (requestError) {
       if (version === directoryRequest && currentSessionRequest === sessionRequest) {
@@ -377,9 +364,6 @@
 
       {#if error}
         <div class="files-error" role="alert">{error}</div>
-      {/if}
-      {#if treeError}
-        <div class="files-error files-error--subtle" role="status">{treeError}</div>
       {/if}
       {#if searchNotice}
         <div class="files-search-notice" role="status">{searchNotice}</div>
@@ -640,7 +624,6 @@
     font-size: 12px;
   }
 
-  .files-error--subtle,
   .files-search-notice {
     border-color: var(--synex-warning);
     background: var(--synex-warning-bg);

@@ -1,6 +1,7 @@
 <script>
   import { onMount } from 'svelte';
   import { BACKEND_URL } from './api/config.js';
+  import { sshConnectionName, sshServerKey, uniqueSshServers } from './sshIdentity.js';
 
   export let onClose = () => {};
   /** @type {(session: { session_id: string }) => void} */
@@ -15,6 +16,7 @@
   let passphrase = '';
   let keyInput = '';
   let selectedKeyFile = null;
+  let selectedKeyPath = '';
   let keyFileInput;
   let authMode = 'key';
   let search = '';
@@ -30,7 +32,9 @@
   let pendingAttempt = null;
   let working = false;
 
-  $: filtered = activeSessions.filter((session) =>
+  $: visibleSessions = uniqueSshServers(activeSessions);
+  $: visibleSavedConnections = uniqueSshServers(savedConnections);
+  $: filtered = visibleSessions.filter((session) =>
     `${session.username}@${session.host}:${session.port}`.toLowerCase().includes(search.toLowerCase())
   );
 
@@ -47,6 +51,7 @@
     passphrase = '';
     keyInput = keys[0] ? savedKeyOption(keys[0]) : '';
     selectedKeyFile = null;
+    selectedKeyPath = '';
     requestError = '';
     requestMessage = '';
     pendingHostKey = null;
@@ -143,6 +148,9 @@
     if (authMode === 'password') {
       if (!password) throw new Error('Password is required.');
       payload.password = password;
+    } else if (selectedKeyFile && selectedKeyPath) {
+      payload.key_path = selectedKeyPath;
+      if (passphrase) payload.passphrase = passphrase;
     } else if (selectedKeyFile) {
       const privateKey = await selectedKeyFile.text();
       const keyName = `${selectedKeyFile.name.replace(/\.[^.]+$/, '').slice(0, 40) || 'ssh-key'}-${Date.now()}`;
@@ -190,6 +198,44 @@
     return payload;
   }
 
+  async function saveConnectionProfile(payload, existingConnections) {
+    const profile = {
+      name: sshConnectionName(payload, existingConnections),
+      host: payload.host,
+      port: payload.port,
+      username: payload.username
+    };
+    if (typeof payload.password === 'string') {
+      profile.auth = 'password';
+      profile.password = payload.password;
+    } else if (typeof payload.key_id === 'string') {
+      profile.auth = 'key_id';
+      profile.key_id = payload.key_id;
+    } else if (typeof payload.key_path === 'string') {
+      profile.auth = 'key_path';
+      profile.key_path = payload.key_path;
+      if (typeof payload.passphrase === 'string') profile.passphrase = payload.passphrase;
+    } else {
+      throw new Error('Cannot save a server profile without valid SSH credentials.');
+    }
+
+    const saved = await backendRequest('/api/connections', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(profile)
+    });
+    if (
+      typeof saved?.id !== 'string' ||
+      typeof saved.name !== 'string' ||
+      typeof saved.host !== 'string' ||
+      !Number.isInteger(saved.port) ||
+      typeof saved.username !== 'string'
+    ) {
+      throw new Error('Backend saved the server but returned invalid connection details.');
+    }
+    return saved;
+  }
+
   function handleKeyFileChange(event) {
     const file = event.currentTarget.files?.[0] || null;
     if (file && file.size > 64 * 1024) {
@@ -199,12 +245,17 @@
       return;
     }
     selectedKeyFile = file;
-    keyInput = file?.name || '';
+    const filePath = file ? Reflect.get(file, 'path') : '';
+    selectedKeyPath = typeof filePath === 'string' && /^(?:[A-Za-z]:[\\/]|\\\\|\/)/.test(filePath)
+      ? filePath
+      : '';
+    keyInput = selectedKeyPath || file?.name || '';
     requestError = '';
   }
 
   function handleKeyInput() {
     selectedKeyFile = null;
+    selectedKeyPath = '';
     if (keyFileInput) keyFileInput.value = '';
   }
 
@@ -310,16 +361,62 @@
     pendingHostKey = null;
     pendingAttempt = null;
     let attempt = null;
+    let createdConnection = null;
     try {
-      attempt = connection
-        ? { action, connectionId: connection.id, connection, credentials }
-        : { action, payload: await connectionPayload() };
+      if (action === 'connect' && !connection) {
+        const [sessions, connections] = await Promise.all([
+          backendRequest('/api/ssh/sessions'),
+          backendRequest('/api/connections')
+        ]);
+        if (
+          !Array.isArray(sessions) ||
+          sessions.some(
+            (session) =>
+              typeof session?.session_id !== 'string' ||
+              typeof session.host !== 'string' ||
+              !Number.isInteger(session.port)
+          ) ||
+          !Array.isArray(connections) ||
+          connections.some(
+            (saved) =>
+              typeof saved?.id !== 'string' ||
+              typeof saved.name !== 'string' ||
+              typeof saved.host !== 'string' ||
+              !Number.isInteger(saved.port)
+          )
+        ) {
+          throw new Error('Backend returned an invalid server list.');
+        }
+        activeSessions = sessions;
+        savedConnections = connections;
+        const target = { host, port: Number(port) };
+        const targetKey = sshServerKey(target);
+        if (targetKey && [...sessions, ...connections].some((item) => sshServerKey(item) === targetKey)) {
+          throw new Error(
+            'This server already exists. Select it from the server list instead of adding it again.'
+          );
+        }
+        const payload = await connectionPayload();
+        createdConnection = await saveConnectionProfile(payload, connections);
+        savedConnections = [...connections, createdConnection];
+        attempt = {
+          action,
+          connectionId: createdConnection.id,
+          connection: createdConnection
+        };
+      } else {
+        attempt = connection
+          ? { action, connectionId: connection.id, connection, credentials }
+          : { action, payload: await connectionPayload() };
+      }
       await performConnectionAttempt(attempt);
     } catch (error) {
       if (error instanceof BackendRequestError && error.data?.error === 'ssh_host_key_revoked') {
         requestError = `The SSH host key was revoked by OpenSSH. Check the server's trusted keys. ${errorMessage(error)}`;
       } else {
-        requestError = errorMessage(error);
+        requestError = createdConnection
+          ? `Saved ${createdConnection.name}, but could not connect: ${errorMessage(error)}`
+          : errorMessage(error);
       }
     } finally {
       working = false;
@@ -449,7 +546,7 @@
       <p class="sessions-empty">No saved servers.</p>
     {:else}
       <ul class="saved__list">
-        {#each savedConnections as connection (connection.id)}
+        {#each visibleSavedConnections as connection (connection.id)}
           <li>
             <button
               type="button"
@@ -472,7 +569,9 @@
    <!-- правая панель -->
   <section class="panel form">
     <h2 class="form__title">New connection</h2>
-    <p class="form__sub">Connect over SSH to a remote server</p>
+    <p class="form__sub">
+      Connect to add a protected server profile for future independent Terminal tabs. Test connection does not save it.
+    </p>
 
     {#if pendingHostKey}
       <div class:host-key-prompt--mismatch={pendingHostKey.kind === 'mismatch'} class="host-key-prompt" role="alert">
@@ -639,7 +738,7 @@
           />
         </div>
         {#if selectedKeyFile}
-          <span class="selected-key-file">Selected file: {selectedKeyFile.name}</span>
+          <span class="selected-key-file">Selected file: {selectedKeyPath || selectedKeyFile.name}</span>
         {/if}
       </label>
       {#if keysError}
