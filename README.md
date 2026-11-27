@@ -24,9 +24,7 @@ SSH terminal, live monitoring, Docker, SFTP and git deploys in a single desktop 
 </div>
 
 <p align="center">
-  <video width="960" autoplay loop muted playsinline>
-    <source src="https://raw.githubusercontent.com/ZeroDDP/Synex/main/packaging/assets/synex.mp4" type="video/mp4">
-  </video>
+  <img src="https://raw.githubusercontent.com/ZeroDDP/Synex/main/packaging/assets/synex.webp" alt="Synex demo" width="640">
 </p>
 
 ---
