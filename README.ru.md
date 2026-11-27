@@ -23,6 +23,10 @@ SSH-терминал, мониторинг в реальном времени, D
 
 </div>
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/ZeroDDP/Synex/main/packaging/assets/synex.webp" alt="Synex demo" width="640">
+</p>
+
 ---
 
 ## Зачем
