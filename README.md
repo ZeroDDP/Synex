@@ -23,6 +23,10 @@ SSH terminal, live monitoring, Docker, SFTP and git deploys in a single desktop 
 
 </div>
 
+<p align="center">
+  <img src="https://raw.githubusercontent.com/ZeroDDP/Synex/main/packaging/assets/synex.gif" width="820" alt="Synex demo">
+</p>
+
 ---
 
 ## Why
