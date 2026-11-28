@@ -8,7 +8,7 @@
   import stringWidth from 'string-width';
   import '@xterm/xterm/css/xterm.css';
   import { BACKEND_URL } from '../api/config.js';
-  import { setServerUsernames } from '../stores.js';
+  import { setServerUsernames, sshSessionReplacement } from '../stores.js';
   import { onEvent } from '../ws.js';
   import {
     sshConnectionName,
@@ -1022,6 +1022,47 @@
     void loadHistory(sessionId);
   }
 
+  function applySessionReplacement(replacement) {
+    if (
+      !mounted ||
+      !isRecord(replacement) ||
+      !Array.isArray(replacement.oldSessionIds) ||
+      replacement.oldSessionIds.some((sessionId) => typeof sessionId !== 'string') ||
+      !isRecord(replacement.newSession) ||
+      typeof replacement.newSession.session_id !== 'string'
+    ) {
+      return;
+    }
+
+    const oldIds = new Set(replacement.oldSessionIds);
+    if (oldIds.size === 0) return;
+    const newSession = replacement.newSession;
+    const wasSelected = oldIds.has(selectedSessionId);
+    const activeOldTab = terminalTabs.find(
+      (tab) => tab.id === activeTerminalTabId && oldIds.has(tab.sessionId)
+    );
+
+    sessions = [
+      ...sessions.filter((session) => !oldIds.has(session.session_id)),
+      newSession
+    ];
+    setServerUsernames(sessions);
+    terminalTabs = terminalTabs.filter((tab) => !oldIds.has(tab.sessionId));
+    knownSessionIds = new Set([
+      ...[...knownSessionIds].filter((sessionId) => !oldIds.has(sessionId)),
+      newSession.session_id
+    ]);
+
+    if (wasSelected) {
+      const tab = activeOldTab
+        ? { ...activeOldTab, sessionId: newSession.session_id }
+        : { id: `terminal-tab-${++terminalTabCounter}`, sessionId: newSession.session_id };
+      terminalTabs = [...terminalTabs, tab];
+      activeTerminalTabId = tab.id;
+      selectSession(newSession.session_id);
+    }
+  }
+
   function handleWindowClick(event) {
     if (sessionsMenuOpen && !sessionsMenuElement?.contains(event.target)) {
       sessionsMenuOpen = false;
@@ -1125,12 +1166,14 @@
     const unsubscribe = onEvent('ssh.session', () => {
       void loadSessions();
     });
+    const unsubscribeReplacement = sshSessionReplacement.subscribe(applySessionReplacement);
     void loadConnectionNames();
     void loadSessions();
 
     return () => {
       mounted = false;
       unsubscribe();
+      unsubscribeReplacement();
       resizeObserver?.disconnect();
       inputDisposable?.dispose();
       closeTerminalSocket();

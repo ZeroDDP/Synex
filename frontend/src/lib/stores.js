@@ -133,3 +133,6 @@ selectedServerId.subscribe((serverId) => {
     console.warn('Could not save the selected server to local storage:', error);
   }
 });
+
+export const sshRecoveryStatus = writable({ state: 'idle', message: '' });
+export const sshSessionReplacement = writable(null);
