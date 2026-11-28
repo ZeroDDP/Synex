@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { BACKEND_URL } from '../api/config.js';
   import SshConnect from '../SshConnect.svelte';
+  import { reconnectUnavailableServers } from '../sshRecovery.js';
   import { servers, serverUsernames } from '../stores.js';
 
   export let onConnected = () => {};
@@ -9,6 +10,7 @@
   export let showConnectForm = false;
   let savedConnections = [];
   let connectionsError = '';
+  let reconnecting = false;
 
   $: displayServers = $servers.flatMap((server) => {
     const connection = savedConnections.find(
@@ -59,6 +61,15 @@
     }
   }
 
+  async function reconnectUnavailable() {
+    reconnecting = true;
+    try {
+      await reconnectUnavailableServers();
+    } finally {
+      reconnecting = false;
+    }
+  }
+
   function meterWidth(value) {
     return typeof value === 'number' && Number.isFinite(value)
       ? Math.max(0, Math.min(100, value))
@@ -81,9 +92,17 @@
     <section class="panel">
       <header class="panel-head">
         <span class="panel-title">ALL SERVERS</span>
-        <button type="button" class="add-server" on:click={() => (showConnectForm = true)}>
-          Add new server
-        </button>
+        <div class="panel-actions">
+          <button
+            type="button"
+            class="refresh-servers"
+            on:click={reconnectUnavailable}
+            disabled={reconnecting}
+          >{reconnecting ? 'Reconnecting…' : 'Reconnect unavailable'}</button>
+          <button type="button" class="add-server" on:click={() => (showConnectForm = true)}>
+            Add new server
+          </button>
+        </div>
       </header>
 
       <div class="table">
@@ -152,6 +171,12 @@
     border-bottom: 1px solid var(--synex-border-subtle);
   }
 
+  .panel-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--synex-space-3);
+  }
+
   .panel-title {
     font-size: var(--font-size-15);
     font-weight: 700;
@@ -176,6 +201,28 @@
 
   .add-server:hover {
     background: var(--synex-accent-hover);
+  }
+
+  .refresh-servers {
+    min-height: 30px;
+    padding: var(--synex-space-2) var(--synex-space-4);
+    border: 1px solid var(--synex-border-strong);
+    border-radius: var(--synex-radius-lg);
+    color: var(--synex-text-secondary);
+    font-family: var(--font-host);
+    font-size: var(--font-size-12);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  .refresh-servers:hover:not(:disabled) {
+    border-color: var(--synex-accent);
+    color: var(--synex-accent);
+  }
+
+  .refresh-servers:disabled {
+    cursor: wait;
+    opacity: .7;
   }
 
   .table {
@@ -293,5 +340,13 @@
 
   .status-text[data-status='offline'] {
     color: var(--synex-offline);
+  }
+
+  @media (max-width: 700px) {
+    .panel-head,
+    .panel-actions {
+      align-items: flex-start;
+      flex-direction: column;
+    }
   }
 </style>

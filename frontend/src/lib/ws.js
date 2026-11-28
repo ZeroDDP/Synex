@@ -18,6 +18,8 @@ const initialBackendState = { state: 'connecting', hello: null, error: null };
 export const backendState = writable(initialBackendState);
 
 const CONNECTION_TIMEOUT_MS = 10000;
+const HEARTBEAT_INTERVAL_MS = 15000;
+const HEARTBEAT_TIMEOUT_MS = 8000;
 /** @type {WebSocket|null} */
 let ws = null;
 let reconnectDelay = 1000;
@@ -25,6 +27,10 @@ let reconnectDelay = 1000;
 let reconnectTimer = null;
 /** @type {ReturnType<typeof setTimeout>|null} */
 let connectionTimeoutTimer = null;
+/** @type {ReturnType<typeof setTimeout>|null} */
+let heartbeatTimer = null;
+/** @type {ReturnType<typeof setTimeout>|null} */
+let heartbeatTimeoutTimer = null;
 let started = false;
 /** @type {Map<string, Set<(data: unknown) => void>>} */
 const handlers = new Map();
@@ -36,6 +42,40 @@ function setBackendError(error) {
 
 function clearBackendError() {
   backendState.update((state) => ({ ...state, error: null }));
+}
+
+function clearHeartbeatTimers() {
+  clearTimeout(heartbeatTimer);
+  clearTimeout(heartbeatTimeoutTimer);
+  heartbeatTimer = null;
+  heartbeatTimeoutTimer = null;
+}
+
+function scheduleHeartbeat(socket) {
+  clearHeartbeatTimers();
+  heartbeatTimer = setTimeout(() => {
+    if (ws !== socket || socket.readyState !== WebSocket.OPEN) return;
+    if (!sendWs({ type: 'ping', data: Date.now() })) return;
+    heartbeatTimeoutTimer = setTimeout(() => {
+      if (ws === socket && socket.readyState === WebSocket.OPEN) socket.close();
+    }, HEARTBEAT_TIMEOUT_MS);
+  }, HEARTBEAT_INTERVAL_MS);
+}
+
+function reconnectEvents() {
+  if (!started) return;
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+  clearTimeout(connectionTimeoutTimer);
+  connectionTimeoutTimer = null;
+  clearHeartbeatTimers();
+  const socket = ws;
+  ws = null;
+  if (socket && socket.readyState < WebSocket.CLOSING) socket.close();
+  reconnectDelay = 1000;
+  connection.set('reconnecting');
+  backendState.update((state) => ({ ...state, state: 'reconnecting' }));
+  open();
 }
 
 export function dismissBackendError() {
@@ -354,6 +394,11 @@ function handleMessage(message) {
     connectionTimeoutTimer = null;
     reconnectDelay = 1000;
     backendState.set({ state: 'online', hello: message.data, error: null });
+    if (ws) scheduleHeartbeat(ws);
+  } else if (message.type === 'pong') {
+    clearTimeout(heartbeatTimeoutTimer);
+    heartbeatTimeoutTimer = null;
+    if (ws) scheduleHeartbeat(ws);
   } else if (message.type === 'metrics') {
     if (!isMetricsSnapshot(message.data)) {
       setBackendError('Backend sent invalid metrics data; this update was ignored.');
@@ -421,6 +466,7 @@ function open() {
     if (ws !== socket) return;
     clearTimeout(connectionTimeoutTimer);
     connectionTimeoutTimer = null;
+    clearHeartbeatTimers();
     ws = null;
     connection.set('closed');
     if (started) {
@@ -449,12 +495,33 @@ export function connectWs() {
   startEvents();
 }
 
+export function resumeWs() {
+  if (!started) return;
+  if (ws?.readyState === WebSocket.OPEN) {
+    if (!heartbeatTimeoutTimer) {
+      clearTimeout(heartbeatTimer);
+      heartbeatTimer = null;
+      if (!sendWs({ type: 'ping', data: Date.now() })) {
+        reconnectEvents();
+        return;
+      }
+      const socket = ws;
+      heartbeatTimeoutTimer = setTimeout(() => {
+        if (ws === socket && socket.readyState === WebSocket.OPEN) reconnectEvents();
+      }, HEARTBEAT_TIMEOUT_MS);
+    }
+    return;
+  }
+  if (!ws || ws.readyState >= WebSocket.CLOSING) open();
+}
+
 export function disconnectWs() {
   started = false;
   clearTimeout(reconnectTimer);
   clearTimeout(connectionTimeoutTimer);
   reconnectTimer = null;
   connectionTimeoutTimer = null;
+  clearHeartbeatTimers();
   const socket = ws;
   ws = null;
   if (socket) socket.close();

@@ -4,11 +4,13 @@
   import PageStub from './lib/PageStub.svelte';
   import AlertsPage from './lib/pages/AlertsPage.svelte';
   import DashboardPage from './lib/pages/DashboardPage.svelte';
+  import DockerPage from './lib/pages/DockerPage.svelte';
   import FilesPage from './lib/pages/FilesPage.svelte';
   import LogsPage from './lib/pages/LogsPage.svelte';
   import ServersPage from './lib/pages/ServersPage.svelte';
   import TerminalPage from './lib/pages/TerminalPage.svelte';
   import { BACKEND_URL } from './lib/api/config.js';
+  import { startSshRecovery } from './lib/sshRecovery.js';
   import  {
     backendState,
     connectWs,
@@ -16,7 +18,7 @@
     disconnectWs,
     onEvent
   } from './lib/ws.js';
-  import { selectedServerId } from './lib/stores.js';
+  import { selectedServerId, sshRecoveryStatus } from './lib/stores.js';
 
   function connectionLabel(state) {
     if (state === 'online') return 'Backend connected';
@@ -44,10 +46,12 @@
 
   onMount(() => {
     const unsubscribe = onEvent('alert', () => void refreshAlertCount());
+    const stopSshRecovery = startSshRecovery();
     connectWs();
     void refreshAlertCount();
     return () => {
       unsubscribe();
+      stopSshRecovery();
       disconnectWs();
     };
   });
@@ -149,6 +153,21 @@
           </button>
         </div>
       {/if}
+      {#if $sshRecoveryStatus.message}
+        <div
+          class="recovery-message"
+          class:recovery-message--error={$sshRecoveryStatus.state === 'error'}
+          class:recovery-message--success={$sshRecoveryStatus.state === 'recovered'}
+          role="status"
+        >
+          <span>{$sshRecoveryStatus.message}</span>
+          <button
+            type="button"
+            aria-label="Dismiss SSH recovery message"
+            on:click={() => sshRecoveryStatus.set({ state: 'idle', message: '' })}
+          >×</button>
+        </div>
+      {/if}
       {#if activeTab === 'dashboard'}
         <DashboardPage onAddServer={openConnectionForm} />
       {:else if activeTab === 'servers'}
@@ -158,7 +177,7 @@
           onSessionSelected={handleActiveSessionSelected}
         />
       {:else if activeTab === 'docker'}
-        <PageStub label="Docker" hint="Container list and actions." />
+        <DockerPage />
       {:else if activeTab === 'logs'}
         <LogsPage onAddServer={openConnectionForm} />
       {:else if activeTab === 'alerts'}
@@ -186,6 +205,7 @@
   .shell {
     display: flex;
     height: 100%;
+    flex-direction: row;
   }
 
   .workarea {
@@ -244,6 +264,38 @@
   }
 
   .backend-error button {
+    flex: 0 0 auto;
+    color: inherit;
+    font-size: 18px;
+    line-height: 1;
+  }
+
+  .recovery-message {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--synex-space-4);
+    margin-bottom: var(--synex-space-4);
+    padding: var(--synex-space-3) var(--synex-space-4);
+    border: 1px solid var(--synex-warning);
+    border-radius: var(--synex-radius-md);
+    background: var(--synex-warning-bg);
+    color: var(--synex-text-secondary);
+  }
+
+  .recovery-message--error {
+    border-color: var(--synex-danger);
+    background: var(--synex-danger-bg);
+    color: var(--synex-danger-fg);
+  }
+
+  .recovery-message--success {
+    border-color: var(--synex-ok);
+    background: var(--synex-ok-bg);
+    color: var(--synex-ok);
+  }
+
+  .recovery-message button {
     flex: 0 0 auto;
     color: inherit;
     font-size: 18px;
